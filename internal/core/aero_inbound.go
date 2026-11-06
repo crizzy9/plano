@@ -271,6 +271,10 @@ WHERE e.flight_id=? AND COALESCE(r.revision,0)=COALESCE(f.revision,0) AND json_e
 	if latest.Valid && decisionAt.UnixNano() <= latest.Int64 {
 		decisionAt = time.Unix(0, latest.Int64+1)
 	}
-	return Event{Kind: "delay_prediction", Title: "Departure delay predicted", Body: fmt.Sprintf("%s · %d min later", flight.Number, forecast.DelayMinutes),
+	return Event{Kind: "delay_prediction", Title: "Departure delay predicted", Body: delayForecastAlertBody(flight.Number, forecast.DelayMinutes),
 		At: decisionAt.UTC(), validUntil: forecast.ValidUntil, advisoryEvidence: forecast.AdvisoryEvidence}, cleared, nil
+}
+
+func delayForecastAlertBody(number string, minutes int) string {
+	return fmt.Sprintf("%s · %d min later", number, minutes)
 }

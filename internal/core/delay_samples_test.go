@@ -119,7 +119,7 @@ func TestAeroCallbackCompletesAnExistingDelaySample(t *testing.T) {
 	actual := departure.Add(10 * time.Minute)
 	label := actual.Add(time.Minute)
 	flight.Status, flight.ActualDeparture, flight.ObservedAt = "taxi_out", &actual, label
-	if err := store.observe(ctx, flight, nil, nil, nil, false, aeroObservationScope{providerID: flight.ID}); err != nil {
+	if err := store.observe(ctx, flight, nil, nil, nil, observationDirect, aeroObservationScope{providerID: flight.ID}); err != nil {
 		t.Fatal(err)
 	}
 	flight.ObservedAt = label.Add(time.Minute)
@@ -135,7 +135,7 @@ func TestAeroCallbackCompletesAnExistingDelaySample(t *testing.T) {
 		t.Fatalf("callback label was not kept: %+v %v", rows, err)
 	}
 	flight.Status, flight.ActualDeparture, flight.ObservedAt = "cancelled", nil, label.Add(2*time.Minute)
-	if err := store.observe(ctx, flight, nil, nil, nil, false, aeroObservationScope{providerID: flight.ID}); err != nil {
+	if err := store.observe(ctx, flight, nil, nil, nil, observationDirect, aeroObservationScope{providerID: flight.ID}); err != nil {
 		t.Fatal(err)
 	}
 	var cleared int

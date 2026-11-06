@@ -176,7 +176,7 @@ func (s *Store) applyAeroObservation(ctx context.Context, flight feeds.Flight, t
 	for _, id := range targets.trackedIDs {
 		direct := flight
 		direct.ID = id
-		if err := s.observe(ctx, direct, nil, nil, nil, false, scope); err != nil {
+		if err := s.observe(ctx, direct, nil, nil, nil, observationDirect, scope); err != nil {
 			return err
 		}
 	}

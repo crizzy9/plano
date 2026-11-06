@@ -40,11 +40,15 @@ WHERE i.airport<>r.airport OR i.predecessor_id<>r.predecessor_id)`, args...).Sca
 }
 
 func (s *Store) filterSupersededAdvisories(ctx context.Context, advisories []feeds.Advisory, now time.Time) ([]feeds.Advisory, error) {
+	return filterSupersededAdvisories(ctx, s.db, advisories, now)
+}
+
+func filterSupersededAdvisories(ctx context.Context, db advisoryQueryer, advisories []feeds.Advisory, now time.Time) ([]feeds.Advisory, error) {
 	if len(advisories) == 0 {
 		return advisories, nil
 	}
 	var active bool
-	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM advisory_supersessions WHERE observed_ns<=?)`,
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM advisory_supersessions WHERE observed_ns<=?)`,
 		now.UnixNano()).Scan(&active); err != nil || !active {
 		return advisories, err
 	}
@@ -62,7 +66,7 @@ func (s *Store) filterSupersededAdvisories(ctx context.Context, advisories []fee
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT c.key FROM json_each(?) c WHERE EXISTS (
+	rows, err := db.QueryContext(ctx, `SELECT c.key FROM json_each(?) c WHERE EXISTS (
 SELECT 1 FROM advisory_supersessions r WHERE r.source=json_extract(c.value,'$.source')
 AND r.airport=json_extract(c.value,'$.airport') AND r.predecessor_id=json_extract(c.value,'$.id')
 AND r.observed_ns BETWEEN json_extract(c.value,'$.observed') AND ?)`, string(payload), now.UnixNano())

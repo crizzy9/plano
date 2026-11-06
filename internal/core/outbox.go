@@ -869,6 +869,7 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 		return
 	}
 	stateAlert := flightAlertSupersedable(flightEventKind)
+	delayAlert := flightEventKind == "delay_prediction"
 	if stateAlert {
 		var current feeds.Flight
 		if err := json.Unmarshal(latestFlight, &current); err != nil {
@@ -891,7 +892,7 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 			s.removeObsoletePush(ctx, logger, job)
 			return
 		}
-		if flightEventKind == "delay_prediction" {
+		if delayAlert {
 			var forecast *Prediction
 			if err := json.Unmarshal(latestForecast, &forecast); err != nil {
 				logger.Error("could not validate delay push forecast", "job", job.id, "error", err)
@@ -913,9 +914,23 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 				s.removeObsoletePush(ctx, logger, job)
 				return
 			}
+			// The saved forecast can use different evidence from the queued
+			// event. Its revisions and the original job's evidence both apply.
+			revised, err := forecastAdvisoryRevised(ctx, s.db, forecast, now)
+			if err != nil {
+				if ctx.Err() == nil {
+					logger.Error("could not validate delay push evidence", "job", job.id, "error", err)
+				}
+				return
+			}
+			if revised {
+				s.removeObsoletePush(ctx, logger, job)
+				return
+			}
 			if validUntil != nil {
 				expires = min(expires, validUntil.UnixNano())
 			}
+			job.message.Body = truncate(delayForecastAlertBody(current.Number, forecast.DelayMinutes), 180)
 		}
 	}
 	apnsFamily := stateAlert && job.target.Platform == "ios"
@@ -925,7 +940,7 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 		job.message.APNsCollapseID = hash("apns-flight-alert\x00" + job.owner + "\x00" + job.message.FlightID + "\x00" + flightEventKind)
 		key := hash(strings.ToLower(job.target.Token) + "\x00" + job.message.APNsCollapseID)
 		if _, sending := s.apnsFlightAlerts.LoadOrStore(key, struct{}{}); sending {
-			s.deferAPNsFlightAlert(ctx, logger, job)
+			s.deferFlightAlert(ctx, logger, job)
 			return
 		}
 		defer s.apnsFlightAlerts.Delete(key)
@@ -948,17 +963,25 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 			return
 		}
 	}
-	if hasAdvisoryEvidence || apnsFamily || flightEventKind == "delay_prediction" {
+	if hasAdvisoryEvidence || apnsFamily || delayAlert {
 		// A revision or revocation can retire the job while evidence is read
 		// or while a previous same-family send releases its gate.
 		var leaseExpiry int64
 		var advisoryFlight []byte
+		var sameDelayInputs bool
 		if err := s.db.QueryRowContext(ctx, `SELECT o.expires,
-CASE WHEN ? THEN (SELECT snapshot FROM flights WHERE id=o.flight_id) END`+leasedRow,
-			window != nil, job.id, job.deviceID, job.lease).Scan(&leaseExpiry, &advisoryFlight); err != nil {
+CASE WHEN ? THEN (SELECT snapshot FROM flights WHERE id=o.flight_id) END,
+CASE WHEN ? THEN EXISTS(SELECT 1 FROM flights f WHERE f.id=o.flight_id
+  AND f.snapshot=? AND f.prediction=? AND f.inbound=?) ELSE 1 END`+leasedRow,
+			window != nil, delayAlert, string(latestFlight), string(latestForecast), string(latestRotation),
+			job.id, job.deviceID, job.lease).Scan(&leaseExpiry, &advisoryFlight, &sameDelayInputs); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
 				logger.Error("could not revalidate push lease", "job", job.id, "error", err)
 			}
+			return
+		}
+		if !sameDelayInputs {
+			s.deferFlightAlert(ctx, logger, job)
 			return
 		}
 		expires = min(expires, leaseExpiry)
@@ -1044,7 +1067,7 @@ CASE WHEN ? THEN (SELECT snapshot FROM flights WHERE id=o.flight_id) END`+leased
 		if job.target.Platform == "ios" {
 			key := hash("atfm-slot\x00" + strings.ToLower(job.target.Token) + "\x00" + job.message.APNsCollapseID)
 			if _, sending := s.apnsFlightAlerts.LoadOrStore(key, struct{}{}); sending {
-				s.deferAPNsFlightAlert(ctx, logger, job)
+				s.deferFlightAlert(ctx, logger, job)
 				return
 			}
 			defer s.apnsFlightAlerts.Delete(key)
@@ -1087,11 +1110,11 @@ CASE WHEN ? THEN (SELECT snapshot FROM flights WHERE id=o.flight_id) END`+leased
 	}
 }
 
-func (s *Store) deferAPNsFlightAlert(ctx context.Context, logger *slog.Logger, job deliveryJob) {
+func (s *Store) deferFlightAlert(ctx context.Context, logger *slog.Logger, job deliveryJob) {
 	due := time.Now().Add(dispatchPollInterval).UnixNano()
 	if _, err := s.db.ExecContext(ctx, `UPDATE outbox SET lease_until=0,due=MAX(due,?)
 WHERE id=? AND device_id=? AND lease_until=? AND done=0`, due, job.id, job.deviceID, job.lease); err != nil && ctx.Err() == nil {
-		logger.Error("could not defer APNs flight alert", "job", job.id, "error", err)
+		logger.Error("could not defer flight alert", "job", job.id, "error", err)
 	}
 }
 

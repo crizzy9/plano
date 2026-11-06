@@ -109,6 +109,73 @@ func TestFlightAlertDispatcherDropsPredictionAfterInboundChange(t *testing.T) {
 	assertFlightAlertHistory(t, store, flight.ID, "delay_prediction|AA2 · 50 min later")
 }
 
+func TestFlightAlertDispatcherRefreshesQueuedDelayEstimate(t *testing.T) {
+	store, flight := flightAlertDispatchFixture(t)
+	ctx := t.Context()
+	flight.InboundID = "direct-inbound"
+	flight.ScheduledDeparture = new(flight.ObservedAt.Add(30 * time.Hour))
+	inbound := feeds.Flight{ID: flight.InboundID, Number: "AA1", Destination: flight.Origin, Status: "airborne"}
+	observe := func(delay int) {
+		t.Helper()
+		flight.ObservedAt = flight.ObservedAt.Add(time.Nanosecond)
+		inbound.ObservedAt = flight.ObservedAt
+		inbound.EstimatedArrival = new(flight.ScheduledDeparture.Add(time.Duration(delay-40) * time.Minute))
+		if err := store.observeTracked(ctx, flight, nil, []feeds.Flight{inbound}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observe(50)
+	jobs := claimFlightAlertJobs(t, store, 2)
+	for _, delay := range []int{41, 32, 23, 14} {
+		observe(delay)
+	}
+	details, err := store.Details(ctx, flight.ID)
+	if err != nil || details.Prediction == nil || details.Prediction.DelayMinutes != 14 {
+		t.Fatalf("latest forecast = %+v, error = %v", details.Prediction, err)
+	}
+	assertFlightAlertSends(t, store, jobs, "Departure delay predicted|AA2 · 14 min later")
+	claimFlightAlertJobs(t, store, 0)
+	assertFlightAlertHistory(t, store, flight.ID, "delay_prediction|AA2 · 50 min later")
+}
+
+func TestFlightAlertDispatcherRechecksLatestDelayAdvisory(t *testing.T) {
+	store, flight := flightAlertDispatchFixture(t)
+	ctx := t.Context()
+	flight.ScheduledDeparture = new(flight.ObservedAt.Add(30 * time.Hour))
+	advisory := feeds.Advisory{Source: feeds.FAASWIM, ID: "original-delay", Kind: "departure_delay", Airport: flight.Origin,
+		Direction: "departure", Reason: "weather", DelayMinutes: new(50), ObservedAt: flight.ObservedAt}
+	observe := func() {
+		t.Helper()
+		flight.ObservedAt = flight.ObservedAt.Add(time.Nanosecond)
+		if err := store.observeTracked(ctx, flight, nil, nil, []feeds.Advisory{advisory}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observe()
+	jobs := slices.DeleteFunc(claimFlightAlertJobs(t, store, 4), func(job deliveryJob) bool {
+		return job.message.Title != "Departure delay predicted"
+	})
+	if len(jobs) != 2 {
+		t.Fatalf("claimed delay warnings = %d, want 2", len(jobs))
+	}
+
+	// A different advisory with the same reason can change the saved forecast
+	// without creating another prediction event. Only the forecast cites it.
+	advisory.ID, advisory.DelayMinutes = "latest-delay", new(41)
+	observe()
+	details, err := store.Details(ctx, flight.ID)
+	if err != nil || details.Prediction == nil || details.Prediction.DelayMinutes != 41 {
+		t.Fatalf("latest forecast = %+v, error = %v", details.Prediction, err)
+	}
+	withdrawnAt := time.Now().UTC()
+	advisory.Kind, advisory.ObservedAt = "cancelled", withdrawnAt
+	if err := store.PublishAdvisory(ctx, advisory, withdrawnAt); err != nil {
+		t.Fatal(err)
+	}
+	assertFlightAlertSends(t, store, jobs)
+	assertFlightAlertHistory(t, store, flight.ID, "delay_prediction|AA2 · 50 min later", "departure_delay|weather", "departure_delay|weather")
+}
+
 func TestFlightAlertDispatcherRechecksLegacyInboundForecast(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

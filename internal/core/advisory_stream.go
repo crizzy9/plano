@@ -306,11 +306,26 @@ SELECT q.source,q.id,q.observed_ns,q.expires_ns,q.data FROM pushed_advisory_pred
 WHERE p.observed_ns>? AND q.observed_ns=(SELECT MAX(observed_ns) FROM pushed_advisory_predecessors
 WHERE source=q.source AND id=q.id AND observed_ns<=?)`
 
+const retainedPushedAdvisories = ` FROM (` + currentPushedAdvisories + `)
+WHERE (expires_ns>? OR observed_ns>? OR (observed_ns>? AND ` + tfmsAdvisoryFamilySQL + `))`
+
+type advisoryQueryer interface {
+	rowQueryer
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
 func (s *Store) pushedAdvisories(ctx context.Context, now time.Time) ([]advisoryRevision, error) {
+	return readPushedAdvisories(ctx, s.db, now, "")
+}
+
+func retainedAdvisoryArgs(now time.Time) []any {
 	t := now.UnixNano()
-	rows, err := s.db.QueryContext(ctx, `SELECT data,expires_ns FROM (`+currentPushedAdvisories+`)
-WHERE expires_ns>? OR observed_ns>? OR (observed_ns>? AND `+tfmsAdvisoryFamilySQL+`)
-ORDER BY source,id`, t, t, t, t, now.Add(-signedAdvisoryRetention).UnixNano(), now.Add(-tfmsAdvisoryRetention).UnixNano())
+	return []any{t, t, t, t, now.Add(-signedAdvisoryRetention).UnixNano(), now.Add(-tfmsAdvisoryRetention).UnixNano()}
+}
+
+func readPushedAdvisories(ctx context.Context, db advisoryQueryer, now time.Time, filter string, args ...any) ([]advisoryRevision, error) {
+	rows, err := db.QueryContext(ctx, `SELECT data,expires_ns`+retainedPushedAdvisories+filter+` ORDER BY source,id`,
+		append(retainedAdvisoryArgs(now), args...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -328,6 +343,65 @@ ORDER BY source,id`, t, t, t, t, now.Add(-signedAdvisoryRetention).UnixNano(), n
 		advisories = append(advisories, revision)
 	}
 	return advisories, rows.Err()
+}
+
+func reconcilePolledFlightAdvisories(ctx context.Context, tx *sql.Tx, flight feeds.Flight, polled []feeds.Advisory, now time.Time) ([]feeds.Advisory, error) {
+	onRoute := func(a feeds.Advisory) bool {
+		return a.Airport != "" && (a.Airport == flight.Origin || a.Airport == flight.OriginICAO ||
+			a.Airport == flight.Destination || a.Airport == flight.DestinationICAO)
+	}
+	var relevant []feeds.Advisory
+	if polled != nil {
+		relevant = make([]feeds.Advisory, 0)
+	}
+	var keys [][2]string
+	for _, a := range polled {
+		if onRoute(a) {
+			relevant = append(relevant, a)
+			keys = append(keys, [2]string{a.Source, a.ID})
+		}
+	}
+	rawKeys, err := json.Marshal(keys)
+	if err != nil {
+		return nil, err
+	}
+	// A moved, expired or cancelled signed revision can still supersede a
+	// relevant polled row, so include matching keys as well as route airports.
+	pushed, err := readPushedAdvisories(ctx, tx, now, ` AND (
+ (json_extract(data,'$.airport')<>'' AND json_extract(data,'$.airport') IN (?,?,?,?))
+ OR (source,id) IN (SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?))
+)`, flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, string(rawKeys))
+	if err != nil {
+		return nil, err
+	}
+	if len(pushed) > 0 && len(polled) > len(relevant) {
+		// A newer poll can likewise move an older signed record off route.
+		signedKeys := make(map[[2]string]bool, len(pushed))
+		for _, revision := range pushed {
+			a := revision.advisory
+			signedKeys[[2]string{a.Source, a.ID}] = true
+		}
+		relevant = relevant[:0]
+		for _, a := range polled {
+			if onRoute(a) || signedKeys[[2]string{a.Source, a.ID}] {
+				relevant = append(relevant, a)
+			}
+		}
+	}
+	merged := mergeAdvisories(relevant, pushed, now)
+	merged = slices.DeleteFunc(merged, func(a feeds.Advisory) bool { return !onRoute(a) })
+	if merged == nil {
+		// The old all-airports read distinguished a feed outage from a
+		// snapshot with no evidence relevant to this route.
+		var available bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1`+retainedPushedAdvisories+`)`, retainedAdvisoryArgs(now)...).Scan(&available); err != nil {
+			return nil, err
+		}
+		if available {
+			merged = make([]feeds.Advisory, 0)
+		}
+	}
+	return filterSupersededAdvisories(ctx, tx, merged, now)
 }
 
 func mergeAdvisories(polled []feeds.Advisory, pushed []advisoryRevision, now time.Time) []feeds.Advisory {

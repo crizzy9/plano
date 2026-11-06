@@ -470,14 +470,22 @@ ORDER BY e.at_ns DESC,e.id LIMIT 200`, id, eventRevision, d.Tracked)
 }
 
 func (s *Store) Observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory) error {
-	return s.observe(ctx, flight, track, inbound, advisories, false, aeroObservationScope{})
+	return s.observe(ctx, flight, track, inbound, advisories, observationDirect, aeroObservationScope{})
 }
 
 func (s *Store) observeTracked(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory) error {
-	return s.observe(ctx, flight, track, inbound, advisories, true, aeroObservationScope{})
+	return s.observe(ctx, flight, track, inbound, advisories, observationTracked, aeroObservationScope{})
 }
 
-func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory, trackedRefresh bool, scope aeroObservationScope) error {
+type observationMode uint8
+
+const (
+	observationDirect observationMode = iota
+	observationTracked
+	observationPoll
+)
+
+func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory, mode observationMode, scope aeroObservationScope) error {
 	if flight.ID == "" || flight.ObservedAt.IsZero() {
 		return errors.New("missing flight identity or observation time")
 	}
@@ -486,6 +494,7 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 		return err
 	}
 	defer tx.Rollback()
+	trackedRefresh := mode != observationDirect
 	callbackRefresh := scope.providerID != ""
 	if callbackRefresh {
 		var tracked bool
@@ -581,6 +590,17 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 			decisionAt = leg.ObservedAt
 		}
 	}
+	var advisoryAt time.Time
+	if mode == observationPoll && !retainedDirect {
+		advisoryAt = time.Now()
+		advisories, err = reconcilePolledFlightAdvisories(ctx, tx, flight, advisories, advisoryAt)
+		if err != nil {
+			return err
+		}
+		if decisionAt.Before(advisoryAt) {
+			decisionAt = advisoryAt
+		}
+	}
 	var predictionValue *Prediction
 	var terminalForecasts []AirportWeatherForecast
 	if trackedRefresh || prior.ID == "" || callbackRefresh && flightAlertRelevant("delay_prediction", flight) {
@@ -620,7 +640,10 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 		}
 	}
 	if predictionValue != nil {
-		revised, err := forecastAdvisoryRevised(ctx, tx, predictionValue, time.Now())
+		if advisoryAt.IsZero() {
+			advisoryAt = time.Now()
+		}
+		revised, err := forecastAdvisoryRevised(ctx, tx, predictionValue, advisoryAt)
 		if err != nil {
 			return err
 		}

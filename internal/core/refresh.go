@@ -74,16 +74,6 @@ func (r Refresher) refresh(ctx context.Context) error {
 			}
 		}
 	}
-	advisoryNow := time.Now()
-	pushed, err := r.Store.pushedAdvisories(ctx, advisoryNow)
-	if err != nil {
-		return err
-	}
-	advisories = mergeAdvisories(advisories, pushed, advisoryNow)
-	advisories, err = r.Store.filterSupersededAdvisories(ctx, advisories, advisoryNow)
-	if err != nil {
-		return err
-	}
 	for _, prior := range active {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -118,7 +108,7 @@ func (r Refresher) refresh(ctx context.Context) error {
 				}
 			}
 		}
-		if err := r.Store.observeTracked(ctx, flight, positions, inbound, advisories); err != nil {
+		if err := r.Store.observe(ctx, flight, positions, inbound, advisories, observationPoll, aeroObservationScope{}); err != nil {
 			return err
 		}
 	}
