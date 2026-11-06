@@ -10,6 +10,7 @@ import (
 
 const (
 	calendarDateTime       = "20060102T150405"
+	calendarUTCDateTime    = calendarDateTime + "Z"
 	calendarZoneCacheLimit = 32
 )
 
@@ -36,8 +37,12 @@ type calendarInput struct {
 
 type calendarEvent struct {
 	uid, start, zone, recurrence, recurrenceZone, summary, description string
-	sequence                                                           int
-	cancelled, recurring                                               bool
+	calendarRevision
+	cancelled, recurring bool
+}
+type calendarRevision struct {
+	sequence int
+	stamp    string // validated UTC DTSTAMP, ordered lexically
 }
 
 type calendarRange struct{ start, end int }
@@ -138,8 +143,30 @@ func (input calendarInput) eachEvent(visit func(calendarEvent)) {
 			if sequence, err := strconv.Atoi(value); err == nil && sequence >= 0 {
 				event.sequence = sequence
 			}
+		case "DTSTAMP":
+			if zone == "" && len(value) == len(calendarUTCDateTime) {
+				if _, err := time.Parse(calendarUTCDateTime, value); err == nil {
+					event.stamp = value
+				}
+			}
 		}
 	}
+}
+
+// Rank master events before filtering dates and extracting flight legs. A
+// newer revision can move an event outside the window or make it recurring.
+func (input calendarInput) latestConfirmedRevisions() map[string]calendarRevision {
+	latest := make(map[string]calendarRevision)
+	input.eachEvent(func(event calendarEvent) {
+		if event.uid == "" || event.cancelled || event.recurrence != "" {
+			return
+		}
+		previous, found := latest[event.uid]
+		if !found || event.sequence > previous.sequence || event.sequence == previous.sequence && event.stamp > previous.stamp {
+			latest[event.uid] = event.calendarRevision
+		}
+	})
+	return latest
 }
 
 func (event calendarEvent) flightLegs(legs []Leg, seen map[Leg]bool, start string, departure time.Time, limit int) []Leg {
@@ -156,6 +183,7 @@ func (input calendarInput) confirmed(limit int, from string, cancellations *cale
 	seen := make(map[Leg]bool)
 	eventSeen := make(map[Leg]bool)
 	locations := make(map[string]*time.Location)
+	latest := input.latestConfirmedRevisions()
 	var eventLegs []Leg
 	var locator string
 	var conflicting bool
@@ -166,6 +194,11 @@ func (input calendarInput) confirmed(limit int, from string, cancellations *cale
 		cancelledUID := cancellations.matchesUID(event)
 		if cancelledUID && localDepartures == nil {
 			return
+		}
+		if revision, found := latest[event.uid]; found && !cancelledUID {
+			if event.sequence < revision.sequence || event.sequence == revision.sequence && event.stamp < revision.stamp {
+				return
+			}
 		}
 		start := calendarDay(event.start)
 		if start == "" || start < from {
@@ -341,7 +374,7 @@ func calendarProperty(line string) (name, zone, value string) {
 }
 
 func calendarDeparture(value, zone string, locations map[string]*time.Location) time.Time {
-	if departure, err := time.Parse(calendarDateTime+"Z", value); err == nil {
+	if departure, err := time.Parse(calendarUTCDateTime, value); err == nil {
 		return departure
 	}
 	if !validDepartureZone(zone) {

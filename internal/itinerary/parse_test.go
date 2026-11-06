@@ -26,6 +26,49 @@ func TestSubscriptionCalendarFiltersHistoryBeforeApplyingLegLimit(t *testing.T) 
 	}
 }
 
+func TestSubscriptionCalendarUsesCurrentEventRevision(t *testing.T) {
+	const earlier = "DTSTART:20261208T120000Z\nSUMMARY:Flight UA123\n"
+	const revised = "DTSTART:20261209T120000Z\nSUMMARY:Flight UA456\n"
+	event := func(properties string) string {
+		return "BEGIN:VEVENT\nUID:trip@example.test\n" + properties + "END:VEVENT\n"
+	}
+	for _, test := range []struct {
+		name, first, second, want string
+	}{
+		{"newer sequence", "SEQUENCE:1\n" + earlier, "SEQUENCE:2\n" + revised, "UA456"},
+		{"newer timestamp", "SEQUENCE:2\nDTSTAMP:20261105T120000Z\n" + earlier,
+			"SEQUENCE:2\nDTSTAMP:20261106T120000Z\n" + revised, "UA456"},
+		{"valid timestamp preferred", "SEQUENCE:2\nDTSTAMP:20261305T120000Z\n" + earlier,
+			"SEQUENCE:2\nDTSTAMP:20261106T120000Z\n" + revised, "UA456"},
+		{"sequence beats timestamp", "SEQUENCE:1\nDTSTAMP:20261106T120000Z\n" + earlier,
+			"SEQUENCE:2\nDTSTAMP:20261105T120000Z\n" + revised, "UA456"},
+		{"newer event has no flight", "SEQUENCE:1\n" + earlier,
+			"SEQUENCE:2\nDTSTART:20261209T120000Z\nSUMMARY:Hotel\n", ""},
+		{"newer event moved outside window", "SEQUENCE:1\n" + earlier,
+			"SEQUENCE:2\nDTSTART:20261201T120000Z\nSUMMARY:Flight UA456\n", ""},
+		{"newer cancellation", "SEQUENCE:1\n" + earlier, "SEQUENCE:2\nSTATUS:CANCELLED\n", ""},
+		{"older cancellation", "SEQUENCE:1\nSTATUS:CANCELLED\n", "SEQUENCE:2\n" + revised, "UA456"},
+		{"recurrence exception", "SEQUENCE:1\n" + earlier,
+			"SEQUENCE:2\nRECURRENCE-ID:20261208T120000Z\n" + revised, "UA123"},
+		{"new recurring master", "SEQUENCE:1\n" + earlier,
+			"SEQUENCE:2\nRRULE:FREQ=WEEKLY;COUNT=2\n" + revised, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, events := range []string{event(test.first) + event(test.second), event(test.second) + event(test.first)} {
+				feed := "BEGIN:VCALENDAR\n" + events + "END:VCALENDAR\n"
+				got, err := SubscriptionCalendar(feed, "2026-12-07")
+				var numbers []string
+				for _, leg := range got.Legs {
+					numbers = append(numbers, leg.Number)
+				}
+				if err != nil || strings.Join(numbers, ",") != test.want {
+					t.Fatalf("parsed %v, %v, want %q", numbers, err, test.want)
+				}
+			}
+		})
+	}
+}
+
 func TestEmailItineraryWithHTMLAndMultipleLegs(t *testing.T) {
 	html := `<html><head><script>UA999 on 5 Jan 2027</script></head><body>
 <table><tr><td>UA&nbsp;123</td><td>7 December 2026</td></tr>

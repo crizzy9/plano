@@ -103,7 +103,10 @@ func TestTripItSubscriptionIsPrivateAndDoesNotRetrackRemovedFlights(t *testing.T
 	const path = "/v1/import/tripit/subscription"
 	const privatePath = "/feed/ical/private/sensitive-fixture/tripit.ics"
 	const input = `{"url":"webcal://tripit.com` + privatePath + `"}`
-	calendar := fmt.Sprintf("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nDTSTART:%sT150000Z\r\nSUMMARY:Flight UA123\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n", day.Format("20060102"))
+	calendar := fmt.Sprintf("BEGIN:VCALENDAR\r\n"+
+		"BEGIN:VEVENT\r\nUID:trip@example.test\r\nSEQUENCE:1\r\nDTSTART:%sT150000Z\r\nSUMMARY:Flight UA123\r\nEND:VEVENT\r\n"+
+		"BEGIN:VEVENT\r\nUID:trip@example.test\r\nSEQUENCE:2\r\nDTSTART:%sT150000Z\r\nSUMMARY:Flight UA123\r\nEND:VEVENT\r\n"+
+		"END:VCALENDAR\r\n", day.AddDate(0, 0, 1).Format("20060102"), day.Format("20060102"))
 	requests := 0
 	service.TripItSync.client = &http.Client{Transport: tripItTransport(func(r *http.Request) (*http.Response, error) {
 		requests++
@@ -146,8 +149,9 @@ func TestTripItSubscriptionIsPrivateAndDoesNotRetrackRemovedFlights(t *testing.T
 	if !strings.Contains(status, `"status":"synced"`) || !strings.Contains(status, `"matched":1`) {
 		t.Fatalf("unexpected completed status: %s", status)
 	}
-	if tracked := importTestRequest(t, handler, "GET", "/v1/tracked", token, "", 200); !strings.Contains(tracked, flightID) {
-		t.Fatalf("flight was not added: %s", tracked)
+	oldFlightID := "demo-UA123-" + day.AddDate(0, 0, 1).Format(time.DateOnly)
+	if tracked := importTestRequest(t, handler, "GET", "/v1/tracked", token, "", 200); !strings.Contains(tracked, flightID) || strings.Contains(tracked, oldFlightID) {
+		t.Fatalf("tracking does not match the current revision: %s", tracked)
 	}
 	importTestRequest(t, handler, "DELETE", "/v1/tracked/"+flightID, token, "", 204)
 	service.syncTripItJob(t.Context(), claim(time.Now().Add(time.Hour)))
