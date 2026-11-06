@@ -2,6 +2,7 @@ package core
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ func TestAeroInboundCallbackRefreshesOnlyRotationAndForecast(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Now().UTC().Add(-time.Second).Truncate(time.Second)
 	departure := now.Add(24*time.Hour + 15*time.Minute)
 	onward := feeds.Flight{ID: "onward-1", Number: "AA2", Source: "flightaware_aeroapi", Status: "scheduled", InboundID: "inbound-1",
 		Origin: "JFK", OriginICAO: "KJFK", TailNumber: "N123AA", ScheduledDeparture: &departure, ObservedAt: now.Add(-time.Second)}
@@ -125,4 +126,23 @@ WHERE o.flight_id=? AND o.done=0 AND json_extract(e.data,'$.kind')='delay_predic
 		t.Fatalf("disrupted inbound lost to an older poll: %+v", got)
 	}
 	assertPending(0)
+
+	// The poll read its advisory snapshot before the callback but fetched
+	// the onward leg after the inbound observation. Rotation then failed.
+	prefetched := feeds.Advisory{ID: "wind", Source: feeds.FAASWIM, Airport: onward.OriginICAO, Kind: "departure_delay",
+		Direction: "departure", Reason: "earlier wind", DelayMinutes: new(25), ObservedAt: now.Add(-time.Minute),
+		EndsAt: new(departure.Add(time.Hour))}
+	current := prefetched
+	current.Reason, current.DelayMinutes, current.ObservedAt = "current wind", new(35), time.Now().UTC()
+	if err := store.PublishAdvisory(ctx, current, current.ObservedAt); err != nil {
+		t.Fatal(err)
+	}
+	onward.ObservedAt = now.Add(2 * time.Millisecond)
+	if err := store.observeTracked(ctx, onward, nil, nil, []feeds.Advisory{prefetched}); err != nil {
+		t.Fatal(err)
+	}
+	got = details()
+	if got.Prediction == nil || got.Prediction.DelayMinutes != 35 || !strings.Contains(strings.Join(got.Prediction.Reasons, " "), current.Reason) {
+		t.Fatalf("rotation outage reused prefetched advisory evidence: %+v", got.Prediction)
+	}
 }

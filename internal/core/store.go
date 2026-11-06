@@ -508,7 +508,7 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 			if err := json.Unmarshal(oldInbound, &inbound); err != nil {
 				return err
 			}
-			retainedDirect = trackedRefresh && len(inbound) != 0 && isExactAeroInbound(flight, inbound[0]) && inbound[0].ObservedAt.After(flight.ObservedAt)
+			retainedDirect = trackedRefresh && len(inbound) != 0 && isExactAeroInbound(flight, inbound[0])
 		} else if trackedRefresh {
 			inbound, retainedDirect, err = keepNewerAeroInbound(flight, inbound, oldInbound)
 			if err != nil {
@@ -527,8 +527,11 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 	if trackedRefresh || prior.ID == "" {
 		var advisoryDeadlines map[forecastAdvisory]time.Time
 		if retainedDirect {
-			// This poll crossed a callback commit. Use its current cache instead
-			// of the advisory snapshot taken before the network fetch.
+			// A saved direct leg may have been refreshed during the network
+			// requests. Use advisory revisions current at the decision time.
+			if now := time.Now(); now.After(decisionAt) {
+				decisionAt = now
+			}
 			advisories, advisoryDeadlines, err = readCurrentFlightAdvisories(ctx, tx, flight, decisionAt)
 			if err != nil {
 				return err
