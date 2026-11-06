@@ -207,6 +207,15 @@ func flightBeforeDeparture(flight feeds.Flight) bool {
 	}
 }
 
+func departureForecastInputsChanged(before, after feeds.Flight) bool {
+	return !flightAlertRelevant("delay_prediction", before) ||
+		!sameOptionalInstant(before.EstimatedDeparture, after.EstimatedDeparture) ||
+		!sameOptionalInstant(effectiveArrival(before), effectiveArrival(after)) ||
+		before.Origin != after.Origin || before.OriginICAO != after.OriginICAO ||
+		before.Destination != after.Destination || before.DestinationICAO != after.DestinationICAO ||
+		before.TailNumber != after.TailNumber || before.InboundID != after.InboundID
+}
+
 type departureHoldAdjustment struct {
 	end, validUntil time.Time
 	reasons         []string

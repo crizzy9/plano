@@ -36,7 +36,7 @@ func sameProviderTrackIdentity(prior, flight feeds.Flight, previousProvider, pro
 		prior.Source == "flightaware_aeroapi" && flight.Source == prior.Source &&
 		sameProviderTrackAirport(prior.Origin, prior.OriginICAO, flight.Origin, flight.OriginICAO) &&
 		sameProviderTrackAirport(prior.Destination, prior.DestinationICAO, flight.Destination, flight.DestinationICAO) &&
-		sameRadarInstant(prior.ScheduledDeparture, flight.ScheduledDeparture) &&
+		sameOptionalInstant(prior.ScheduledDeparture, flight.ScheduledDeparture) &&
 		(prior.Status == "cancelled") == (flight.Status == "cancelled")
 }
 

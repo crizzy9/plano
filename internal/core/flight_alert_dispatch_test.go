@@ -138,6 +138,30 @@ func TestFlightAlertDispatcherRefreshesQueuedDelayEstimate(t *testing.T) {
 	assertFlightAlertHistory(t, store, flight.ID, "delay_prediction|AA2 · 50 min later")
 }
 
+func TestFlightAlertDispatcherUsesRevisedLookupEstimate(t *testing.T) {
+	store, flight := flightAlertDispatchFixture(t)
+	flight.InboundID = "lookup-inbound"
+	flight.ScheduledDeparture = new(flight.ObservedAt.Add(30 * time.Hour))
+	inbound := feeds.Flight{ID: flight.InboundID, Number: "AA1", Destination: flight.Origin, Status: "airborne",
+		ObservedAt: flight.ObservedAt, EstimatedArrival: new(flight.ScheduledDeparture.Add(-20 * time.Minute))}
+	flight.ObservedAt = flight.ObservedAt.Add(time.Millisecond)
+	if err := store.observeTracked(t.Context(), flight, nil, []feeds.Flight{inbound}, nil); err != nil {
+		t.Fatal(err)
+	}
+	jobs := claimFlightAlertJobs(t, store, 2)
+	// Four minutes stays below the threshold for a new delay prediction.
+	// The original forecast event remains, with the latest estimate sent.
+	flight.EstimatedDeparture = new(flight.ScheduledDeparture.Add(24 * time.Minute))
+	observeFlightAlertFixture(t, store, &flight)
+	details, err := store.Details(t.Context(), flight.ID)
+	if err != nil || details.Prediction == nil || details.Prediction.DelayMinutes != 24 {
+		t.Fatalf("forecast after lookup = %+v, error = %v", details.Prediction, err)
+	}
+	assertFlightAlertSends(t, store, jobs, "Departure delay predicted|AA2 · 24 min later")
+	assertFlightAlertSends(t, store, claimFlightAlertJobs(t, store, 2), "Departure estimate changed|AA2 · 24 min later")
+	assertFlightAlertHistory(t, store, flight.ID, "delay_prediction|AA2 · 20 min later", "etd|AA2 · 24 min later")
+}
+
 func TestFlightAlertDispatcherRechecksLatestDelayAdvisory(t *testing.T) {
 	store, flight := flightAlertDispatchFixture(t)
 	ctx := t.Context()

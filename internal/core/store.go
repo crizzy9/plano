@@ -546,7 +546,7 @@ WHERE flights.id=? AND (NOT ? OR EXISTS(SELECT 1 FROM tracked WHERE flight_id=fl
 			priorTrackProvider = prior.AeroProviderID()
 		}
 		sameTrackIdentity := sameProviderTrackIdentity(prior, flight, priorTrackProvider, provider)
-		sameTakeoff := sameRadarInstant(prior.ActualTakeoff, flight.ActualTakeoff)
+		sameTakeoff := sameOptionalInstant(prior.ActualTakeoff, flight.ActualTakeoff)
 		sameTrackScope := sameTrackIdentity && sameTakeoff && strings.EqualFold(prior.TailNumber, flight.TailNumber)
 		if !flight.ObservedAt.After(prior.ObservedAt) {
 			if mode == observationPoll && sameTrackScope {
@@ -645,14 +645,18 @@ WHERE flights.id=? AND (NOT ? OR EXISTS(SELECT 1 FROM tracked WHERE flight_id=fl
 			decisionAt = advisoryAt
 		}
 	}
+	sameSchedule := !providerChanged && prior.ScheduledDeparture != nil && flight.ScheduledDeparture != nil && prior.ScheduledDeparture.Equal(*flight.ScheduledDeparture)
+	lookupForecastChanged := !trackedRefresh && !callbackRefresh && sameSchedule &&
+		flightAlertRelevant("delay_prediction", flight) && departureForecastInputsChanged(prior, flight)
 	var predictionValue *Prediction
 	var terminalForecasts []AirportWeatherForecast
-	if trackedRefresh || prior.ID == "" || callbackRefresh && flightAlertRelevant("delay_prediction", flight) {
+	if trackedRefresh || prior.ID == "" || lookupForecastChanged || callbackRefresh && flightAlertRelevant("delay_prediction", flight) {
 		forecastAdvisories := advisories
 		var advisoryDeadlines map[forecastAdvisory]time.Time
-		if retainedDirect || callbackRefresh {
+		if retainedDirect || callbackRefresh || lookupForecastChanged && advisories == nil {
 			// Callbacks supply flight data only. A retained direct leg may also
-			// be newer than the poll's advisory snapshot.
+			// be newer than the poll's advisory snapshot. A lookup uses cached
+			// notices for its forecast without replaying their alert events.
 			if now := time.Now(); now.After(decisionAt) {
 				decisionAt = now
 			}
@@ -668,8 +672,7 @@ WHERE flights.id=? AND (NOT ? OR EXISTS(SELECT 1 FROM tracked WHERE flight_id=fl
 		predictionValue = predictWithTerminalWeather(s.delayModelFor(flight, decisionAt), flight, inbound, forecastAdvisories, terminalForecasts, decisionAt)
 		capCachedAdvisoryValidity(predictionValue, advisoryDeadlines)
 	}
-	sameSchedule := !providerChanged && prior.ScheduledDeparture != nil && flight.ScheduledDeparture != nil && prior.ScheduledDeparture.Equal(*flight.ScheduledDeparture)
-	if !callbackRefresh && sameSchedule && (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flightBeforeDeparture(flight) {
+	if !callbackRefresh && !lookupForecastChanged && sameSchedule && (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flightBeforeDeparture(flight) {
 		if err := json.Unmarshal(oldPrediction, &predictionValue); err != nil {
 			return err
 		}

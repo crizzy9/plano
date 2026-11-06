@@ -94,6 +94,13 @@ func effectiveArrival(f feeds.Flight) *time.Time {
 	return firstTime(f.ActualArrival, f.EstimatedArrival, f.ScheduledArrival)
 }
 
+func sameOptionalInstant(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
+}
+
 func finished(f feeds.Flight) bool {
 	return f.Status == "arrived" || f.Status == "cancelled" || f.Status == "diverted" && f.ActualArrival != nil
 }

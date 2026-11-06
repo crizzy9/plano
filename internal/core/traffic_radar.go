@@ -134,8 +134,8 @@ func retireTrafficRadarScope(ctx context.Context, tx *sql.Tx, prior, flight feed
 	if (provider == "" || provider == previousProvider) && prior.Source == flight.Source &&
 		prior.OriginICAO == flight.OriginICAO && prior.DestinationICAO == flight.DestinationICAO &&
 		sameTail &&
-		sameRadarInstant(prior.ScheduledDeparture, flight.ScheduledDeparture) &&
-		sameRadarInstant(prior.ActualTakeoff, flight.ActualTakeoff) {
+		sameOptionalInstant(prior.ScheduledDeparture, flight.ScheduledDeparture) &&
+		sameOptionalInstant(prior.ActualTakeoff, flight.ActualTakeoff) {
 		return nil
 	}
 	priorScope := previousProvider != "" && prior.Source == "flightaware_aeroapi" && prior.OriginICAO != "" &&
@@ -172,13 +172,6 @@ ON CONFLICT(flight_id) DO UPDATE SET revision_ns=MAX(`+stream.revisions+`.revisi
 		}
 	}
 	return nil
-}
-
-func sameRadarInstant(a, b *time.Time) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return a.Equal(*b)
 }
 
 // RadarCursor selects fixes newer than After for a known stream revision.
