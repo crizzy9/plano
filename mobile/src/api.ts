@@ -1,9 +1,13 @@
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import { canFenceIOSPush, clearLiveActivities, disableAndroidPush, retireIOSPush, selectAndroidPushOrigin, type RetiredAndroidPush } from './live';
+import {
+  clearSavedFlights, forgetSavedFlight, offlineFlightScope, readSavedFlight, readSavedOverview,
+  saveFlightDetail, saveOverview,
+} from './offline-flights';
 
 export type FlightStatus = 'scheduled' | 'boarding' | 'taxi_out' | 'airborne'
-  | 'landed' | 'arrived' | 'cancelled' | 'diverted';
+  | 'landed' | 'arrived' | 'cancelled' | 'diverted' | 'unknown';
 
 export interface Flight {
   id: string;
@@ -109,6 +113,17 @@ export interface FlightDetail {
   prediction?: Prediction | null;
   weather?: AirportWeather[];
   notices?: FlightNotice[];
+}
+
+interface FlightOverview {
+  flights: Flight[];
+  savedAt?: string;
+}
+
+interface FlightScreenData {
+  detail: FlightDetail;
+  tracked: boolean;
+  savedAt?: string;
 }
 
 export interface Friend {
@@ -263,6 +278,9 @@ const calendarBackgroundStore = {
   keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
 };
 let retirementQueue = Promise.resolve();
+// Only the most recent flight read may update the saved view. This also
+// fences requests from a retired API instance after a server switch.
+let offlineRevision = 0;
 
 async function retiredServers(): Promise<string[]> {
   return JSON.parse(await SecureStore.getItemAsync(cleanupKey) || '[]') as string[];
@@ -578,6 +596,16 @@ export async function saveServer(value: string, enrollmentCode?: string, previou
         await SecureStore.setItemAsync(cleanupKey, JSON.stringify(pending.filter((item) => item !== url)));
       }
       await SecureStore.setItemAsync(hostKey, url);
+      if (current && current !== url) {
+        offlineRevision += 1;
+        try {
+          const token = await SecureStore.getItemAsync(serverStorageKey('installation', current));
+          const scope = token && await offlineFlightScope(current, token);
+          if (scope) clearSavedFlights(scope);
+        } catch {
+          // Server selection works even when the device cache is unavailable.
+        }
+      }
     });
   }
   return url;
@@ -589,10 +617,17 @@ class APIError extends Error {
   }
 }
 
+class ConnectionError extends Error {}
+
+function canReadOffline(error: unknown) {
+  return error instanceof ConnectionError || error instanceof APIError && error.status >= 500;
+}
+
 async function request<T>(server: string, path: string, init: RequestInit = {}, timeoutMs = 12_000): Promise<T> {
   if (!server) throw new Error('Connect to a Plano server in Settings.');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let raw: string;
   try {
     const response = await fetch(server + path, {
       ...init,
@@ -608,13 +643,17 @@ async function request<T>(server: string, path: string, init: RequestInit = {}, 
       if (response.status >= 500) throw new APIError(response.status, 'Plano’s server is temporarily unavailable.');
       throw new APIError(response.status, 'Plano couldn’t complete that request.');
     }
-    const raw = await response.text();
-    return (raw ? JSON.parse(raw) : undefined) as T;
+    raw = await response.text();
   } catch (error) {
     if (error instanceof APIError) throw error;
-    throw new Error('Couldn’t reach Plano. Check the server address and your connection.');
+    throw new ConnectionError('Couldn’t reach Plano. Check the server address and your connection.');
   } finally {
     clearTimeout(timeout);
+  }
+  try {
+    return (raw ? JSON.parse(raw) : undefined) as T;
+  } catch {
+    throw new Error('Plano returned an invalid response.');
   }
 }
 
@@ -667,6 +706,40 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
     return request<T>(server, path, { ...init, headers: { Authorization: `Bearer ${token}` } }, timeoutMs);
   }
 
+  async function withFlightCache<T>(token: string, revision: number | undefined, use: (scope: string) => T): Promise<T | undefined> {
+    if (options.access || Platform.OS === 'web') return;
+    try {
+      const scope = await offlineFlightScope(server, token);
+      if (!scope) return;
+      return await serializeRetirement(async () => {
+        if (await loadServer() !== server || await savedToken() !== token) return;
+        if (revision !== undefined && offlineRevision !== revision) return;
+        return use(scope);
+      });
+    } catch {
+      // A cache error does not affect the live response.
+    }
+  }
+
+  async function clearRejectedCache(error: unknown, token: string) {
+    if (error instanceof APIError && (error.status === 401 || error.status === 403)) {
+      offlineRevision += 1;
+      await withFlightCache(token, undefined, clearSavedFlights);
+    }
+  }
+
+  async function tracked(flightIds: readonly string[] = []): Promise<Flight[]> {
+    const query = new URLSearchParams();
+    for (const id of flightIds) query.append('flightId', id);
+    const path = flightIds.length ? `/v1/tracked?${query}` : '/v1/tracked';
+    return (await authenticated<{ flights: Flight[] }>(path)).flights;
+  }
+
+  function detail(id: string, rotationOf?: string) {
+    const query = rotationOf ? `?${new URLSearchParams({ rotationOf })}` : '';
+    return authenticated<FlightDetail>(`${flightPath(id)}${query}`);
+  }
+
   return {
     server,
     hasSavedInstallationToken: async () => Boolean(await savedToken()),
@@ -675,15 +748,58 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
       const query = new URLSearchParams({ number, date });
       return (await authenticated<{ flights: Flight[] }>(`/v1/flights?${query}`)).flights;
     },
-    async tracked(flightIds: readonly string[] = []): Promise<Flight[]> {
-      const query = new URLSearchParams();
-      for (const id of flightIds) query.append('flightId', id);
-      const path = flightIds.length ? `/v1/tracked?${query}` : '/v1/tracked';
-      return (await authenticated<{ flights: Flight[] }>(path)).flights;
+    tracked,
+    detail,
+    async flightOverview(): Promise<FlightOverview> {
+      const token = await installationToken();
+      const revision = ++offlineRevision;
+      try {
+        const flights = await tracked();
+        await withFlightCache(token, revision, (scope) => saveOverview(scope, flights));
+        return { flights };
+      } catch (error) {
+        if (canReadOffline(error)) {
+          const saved = await withFlightCache(token, revision, readSavedOverview);
+          if (saved) return saved;
+        }
+        await clearRejectedCache(error, token);
+        throw error;
+      }
     },
-    detail(id: string, rotationOf?: string) {
-      const query = rotationOf ? `?${new URLSearchParams({ rotationOf })}` : '';
-      return authenticated<FlightDetail>(`${flightPath(id)}${query}`);
+    async flightScreen(id: string, rotationOf?: string): Promise<FlightScreenData> {
+      const token = await installationToken();
+      const revision = ++offlineRevision;
+      const [snapshot, selection] = await Promise.allSettled([detail(id, rotationOf), tracked([id])]);
+      if (snapshot.status === 'fulfilled' && selection.status === 'fulfilled') {
+        const flight = snapshot.value;
+        const isTracked = !flight.rotationSnapshot && selection.value.some((item) => item.id === id);
+        if (!rotationOf) {
+          await withFlightCache(token, revision, (scope) => {
+            if (isTracked && flight.flight.id === id) saveFlightDetail(scope, flight);
+            else if (!isTracked) forgetSavedFlight(scope, id);
+          });
+        }
+        return { detail: flight, tracked: isTracked };
+      }
+      const failures = [snapshot, selection].flatMap((result) => result.status === 'rejected' ? [result.reason as unknown] : []);
+      const rejection = failures.find((error) => error instanceof APIError && (error.status === 401 || error.status === 403))
+        ?? failures.find((error) => !canReadOffline(error));
+      if (rejection !== undefined) {
+        await clearRejectedCache(rejection, token);
+        if (!rotationOf && rejection instanceof APIError && rejection.status === 404) {
+          await withFlightCache(token, revision, (scope) => forgetSavedFlight(scope, id));
+        }
+        throw rejection;
+      }
+      if (!rotationOf) {
+        if (selection.status === 'fulfilled' && !selection.value.some((flight) => flight.id === id)) {
+          await withFlightCache(token, revision, (scope) => forgetSavedFlight(scope, id));
+        } else {
+          const saved = await withFlightCache(token, revision, (scope) => readSavedFlight(scope, id));
+          if (saved) return { ...saved, tracked: true };
+        }
+      }
+      throw failures[0];
     },
     async radar(id: string, after?: string, providerRevision?: string, receiverRevision?: string) {
       const query = new URLSearchParams({ provider: '1' });
@@ -697,10 +813,16 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
         throw error;
       }
     },
-    track: (flightId: string, seat?: string) => authenticated<void>('/v1/tracked', {
-      method: 'POST', body: JSON.stringify({ flightId, seat }),
-    }),
-    untrack: (id: string) => authenticated<void>(`/v1/tracked/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    async track(flightId: string, seat?: string) {
+      await authenticated<void>('/v1/tracked', { method: 'POST', body: JSON.stringify({ flightId, seat }) });
+      offlineRevision += 1;
+    },
+    async untrack(id: string) {
+      const token = await installationToken();
+      await authenticated<void>(`/v1/tracked/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      offlineRevision += 1;
+      await withFlightCache(token, undefined, (scope) => forgetSavedFlight(scope, id));
+    },
     share: (flightId: string) => authenticated<{ url: string; expiresAt: string; id?: string; createdAt?: string }>('/v1/shares', {
       method: 'POST', body: JSON.stringify({ flightId }),
     }),

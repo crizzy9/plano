@@ -18,7 +18,7 @@ import { RadarMetricChart, RadarRouteMap } from './radar-visuals';
 export type Routes = {
   Home: undefined;
   Search: undefined;
-  Flight: { id: string; number: string; initial?: Flight; rotationOf?: string };
+  Flight: { id: string; number: string; initial?: Flight; rotationOf?: string; initialSavedAt?: string };
   Tools: undefined;
   Import: undefined;
   Passport: undefined;
@@ -90,13 +90,17 @@ export function Page({ children, refreshing, refresh }: {
 }
 
 export function Home({ api, navigation }: APIProps<'Home'>) {
-  const load = useCallback(() => api.tracked(), [api]);
-  const { value, error, pending, refresh } = useRemote(load, !!api.server, 60_000);
+  const load = useCallback(() => api.flightOverview(), [api]);
+  const { value: overview, error, pending, refresh } = useRemote(load, !!api.server, 60_000);
+  const value = overview?.savedAt && error ? undefined : overview?.flights;
+  const savedAt = value && overview?.savedAt;
   const upcoming = nextFlight(value ?? []);
   const current = upcoming[0];
   const previous = (value ?? []).filter(isFinished).sort((a, b) =>
     Date.parse(b.scheduledDeparture ?? b.observedAt) - Date.parse(a.scheduledDeparture ?? a.observedAt));
-  const open = (flight: Flight) => navigation.navigate('Flight', { id: flight.id, number: flight.number, initial: flight });
+  const open = (flight: Flight) => navigation.navigate('Flight', {
+    id: flight.id, number: flight.number, initial: flight, initialSavedAt: savedAt,
+  });
   return (
     <Page refresh={api.server ? refresh : undefined} refreshing={pending && !!value}>
       <Heading>My flights</Heading>
@@ -111,10 +115,10 @@ export function Home({ api, navigation }: APIProps<'Home'>) {
             <Action icon="search" label="Find a flight" onPress={() => navigation.navigate('Search')} />
             <Action icon="globe" secondary label="Trip tools" onPress={() => navigation.navigate('Tools')} />
           </View>
-          <ErrorMessage message={error} />
-          {error && <Action secondary label="Try again" onPress={refresh} busy={pending} />}
+          <ErrorMessage message={savedAt ? savedFlightMessage(savedAt) : error} />
+          {(error || savedAt) && <Action secondary label="Refresh flights" onPress={refresh} busy={pending} />}
           {pending && !value && <Loading />}
-          {!error && value?.length === 0 && <Body>Track a flight to see its departure, arrival, and latest updates here.</Body>}
+          {!error && value?.length === 0 && <Body>{savedAt ? 'No flights were saved.' : 'Track a flight to see its departure, arrival, and latest updates here.'}</Body>}
           {current && (
             <View style={layout.section}>
               <Heading>Up next</Heading>
@@ -197,17 +201,16 @@ export function Search({ api, navigation }: APIProps<'Search'>) {
 
 export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'>) {
   const { colors } = usePalette();
-  const { id, initial, rotationOf } = route.params;
-  const load = useCallback(async () => {
-    const [detail, tracked] = await Promise.all([api.detail(id, rotationOf), api.tracked([id])]);
-    return { detail, tracked: !detail.rotationSnapshot && tracked.some((item) => item.id === id) };
-  }, [api, id, rotationOf]);
-  const { value, setValue, error, pending, refresh } = useRemote(load, true, 30_000);
+  const { id, initial, initialSavedAt, rotationOf } = route.params;
+  const load = useCallback(() => api.flightScreen(id, rotationOf), [api, id, rotationOf]);
+  const { value: result, setValue, error, pending, refresh } = useRemote(load, true, 30_000);
+  const value = result?.savedAt && error ? undefined : result;
+  const savedAt = value?.savedAt ?? (!value && !error ? initialSavedAt : undefined);
   const [actionError, setActionError] = useState<string>();
   const [operation, setOperation] = useState<'track' | 'share' | 'live'>();
   const [seat, setSeat] = useState('');
   const [pickupRevision, setPickupRevision] = useState(0);
-  const flight = value?.detail.flight ?? initial;
+  const flight = value?.detail.flight ?? (error && (result?.savedAt || initialSavedAt) ? undefined : initial);
   const detail = value?.detail;
   const rotationSnapshot = detail?.rotationSnapshot === true;
   const weather = detail?.weather?.filter((report) => Date.parse(report.validUntil) > Date.now()) ?? [];
@@ -222,7 +225,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const currentNotices = noticeRows.filter(({ expires }) => expires > now).map(({ notice }) => notice);
 
   async function toggleTrack() {
-    if (!value || rotationSnapshot || operation) return;
+    if (!value || savedAt || rotationSnapshot || operation) return;
     setOperation('track');
     setActionError(undefined);
     try {
@@ -244,7 +247,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
     }
   }
   async function share() {
-    if (!flight || operation) return;
+    if (!flight || savedAt || operation) return;
     setOperation('share');
     setActionError(undefined);
     try {
@@ -259,8 +262,8 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   }
   return (
     <Page refresh={refresh} refreshing={pending && !!flight}>
-      <ErrorMessage message={error} />
-      {error && <Action secondary label="Refresh flight" onPress={refresh} />}
+      <ErrorMessage message={savedAt ? savedFlightMessage(savedAt) : error} />
+      {(error || savedAt) && <Action secondary label="Refresh flight" onPress={refresh} busy={pending} />}
       {!flight && pending && <Loading />}
       {flight && (
         <>
@@ -268,11 +271,11 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
           <FlightStrip flight={flight} />
           <Body>{formatDay(flight.scheduledDeparture, flight.originTimeZone)} · Airport local times when available</Body>
           <Body>{rotationSnapshot ? 'Last reported' : 'Last flight update'} {formatTime(flight.observedAt)}</Body>
-          {value && !rotationSnapshot && !value.tracked && !isFinished(flight) && (
+          {value && !savedAt && !rotationSnapshot && !value.tracked && !isFinished(flight) && (
             <Input label="Seat (optional)" value={seat} onChangeText={setSeat} placeholder="12A"
               maxLength={8} autoCapitalize="characters" autoCorrect={false} />
           )}
-          {value && !rotationSnapshot && (
+          {value && !savedAt && !rotationSnapshot && (
             <View style={layout.actions}>
               <Action label={value.tracked ? 'Stop tracking' : 'Track flight'} onPress={toggleTrack}
                 busy={operation === 'track'} disabled={pending || !!operation && operation !== 'track'}
@@ -291,7 +294,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
             </View>
           )}
           <ErrorMessage message={actionError} />
-          {value?.tracked && <PickupLinks key={pickupRevision} api={api} flightId={id} />}
+          {value?.tracked && !savedAt && <PickupLinks key={pickupRevision} api={api} flightId={id} />}
           {(flight.aircraftType || flight.aircraftAge != null || flight.tailNumber || flight.baggage) && (
             <View style={layout.section}>
               <Heading>Flight details</Heading>
@@ -330,11 +333,11 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
           {currentNotices.length > 0 && <AirportNotices flight={flight} notices={currentNotices} />}
           {detail && (!!detail.inbound?.length || value?.tracked && !flight.actualDeparture &&
             !isFinished(flight) && !['taxi_out', 'airborne', 'landed', 'diverted'].includes(flight.status)) && (
-            <AircraftRotation flight={flight} legs={detail.inbound ?? []} open={(leg) =>
+            <AircraftRotation flight={flight} legs={detail.inbound ?? []} open={savedAt ? undefined : (leg) =>
               navigation.push('Flight', { id: leg.id, number: leg.number, initial: leg, rotationOf: value?.tracked ? flight.id : undefined })} />
           )}
           <FlightRadar key={`${api.server}:${id}:${flight.tailNumber ?? ''}:${flight.actualTakeoff ?? ''}:${detail?.receiverRevision ?? ''}:${!!value?.tracked}`}
-            api={api} flight={flight} tracked={value?.tracked === true} history={detail?.telemetry}
+            api={api} flight={flight} tracked={value?.tracked === true && !savedAt} history={detail?.telemetry}
             detailRevision={detail?.receiverRevision} refreshFlight={refresh} />
           {detail && (!rotationSnapshot || !!detail.events?.length) && (
             <View style={layout.section}>
@@ -355,6 +358,10 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
       )}
     </Page>
   );
+}
+
+function savedFlightMessage(savedAt: string) {
+  return `Showing flight data saved ${formatDay(savedAt)} at ${formatTime(savedAt)}. Live changes may be missing.`;
 }
 
 const rotationFreshness = 30 * 60_000;
@@ -394,7 +401,7 @@ function inboundArrival(leg: Flight, now: number, stale: boolean) {
   if (Number.isFinite(scheduled)) return { label: 'Scheduled gate arrival', time: scheduled };
 }
 
-function AircraftRotation({ flight, legs, open }: { flight: Flight; legs: Flight[]; open: (leg: Flight) => void }) {
+function AircraftRotation({ flight, legs, open }: { flight: Flight; legs: Flight[]; open?: (leg: Flight) => void }) {
   const { colors } = usePalette();
   const immediate = directRotationLeg(flight, legs[0]);
   const earlier = immediate ? legs.slice(1) : legs;
@@ -421,7 +428,7 @@ function AircraftRotation({ flight, legs, open }: { flight: Flight; legs: Flight
               <Body>{stale ? 'Last reported' : 'Reported'} {rotationTime(observed, zone)}</Body>
             ) : <Body>Report time unavailable.</Body>}
           </View>
-          <FlightRow flight={immediate.leg} onPress={() => open(immediate.leg)} />
+          <FlightRow flight={immediate.leg} onPress={open && (() => open(immediate.leg))} />
         </>
       ) : <Body>Immediate inbound details are unavailable.</Body>}
       {!!earlier.length && (
@@ -429,7 +436,7 @@ function AircraftRotation({ flight, legs, open }: { flight: Flight; legs: Flight
           <Text accessibilityRole="header" style={[styles.strong, { color: colors.text }]}>
             {immediate ? 'Earlier aircraft legs' : 'Available aircraft history'}
           </Text>
-          {earlier.map((leg) => <FlightRow key={leg.id} flight={leg} onPress={() => open(leg)} />)}
+          {earlier.map((leg) => <FlightRow key={leg.id} flight={leg} onPress={open && (() => open(leg))} />)}
         </>
       )}
     </View>

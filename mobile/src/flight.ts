@@ -2,7 +2,7 @@ import type { Flight, FlightStatus, Position } from './api';
 
 export const statuses: Record<FlightStatus, string> = {
   scheduled: 'Scheduled', boarding: 'Boarding', taxi_out: 'Taxiing', airborne: 'In flight',
-  landed: 'Landed', arrived: 'At the gate', cancelled: 'Cancelled', diverted: 'Diverted',
+  landed: 'Landed', arrived: 'At the gate', cancelled: 'Cancelled', diverted: 'Diverted', unknown: 'Status unavailable',
 };
 
 export function flightStatus(status: FlightStatus) {

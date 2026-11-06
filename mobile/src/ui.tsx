@@ -96,15 +96,14 @@ export function Loading() {
   return <ActivityIndicator accessibilityLabel="Loading" size="large" color={colors.tint} style={styles.loading} />;
 }
 
-export function FlightRow({ flight, onPress }: { flight: Flight; onPress: () => void }) {
+export function FlightRow({ flight, onPress }: { flight: Flight; onPress?: () => void }) {
   const { colors } = usePalette();
-  return (
-    <Pressable onPress={onPress} accessibilityRole="button"
-      accessibilityLabel={`${flight.number}, ${flight.origin} to ${flight.destination}, ${flightStatus(flight.status)}`}
-      style={({ pressed }) => [styles.row, {
-        backgroundColor: pressed ? colors.tintSoft : colors.surface,
-        borderColor: colors.divider,
-      }]}>
+  const rowStyle = (pressed: boolean) => [styles.row, {
+    backgroundColor: pressed ? colors.tintSoft : colors.surface,
+    borderColor: colors.divider,
+  }];
+  const content = (
+    <>
       <View style={styles.rowLabel}>
         <Text style={[styles.rowRoute, { color: colors.text }]}>{flight.origin} to {flight.destination}</Text>
         <Body>{flight.number} · {formatDay(flight.scheduledDeparture, flight.originTimeZone)}</Body>
@@ -113,9 +112,16 @@ export function FlightRow({ flight, onPress }: { flight: Flight; onPress: () => 
         <Text style={[styles.label, { color: colors.tint }]}>{flightStatus(flight.status)}</Text>
         <Body>{formatTime(departure(flight), flight.originTimeZone)}</Body>
       </View>
-      <Icon name="arrow" color={colors.muted} size={18} />
-    </Pressable>
+      {onPress && <Icon name="arrow" color={colors.muted} size={18} />}
+    </>
   );
+  return onPress ? (
+    <Pressable onPress={onPress} accessibilityRole="button"
+      accessibilityLabel={`${flight.number}, ${flight.origin} to ${flight.destination}, ${flightStatus(flight.status)}`}
+      style={({ pressed }) => rowStyle(pressed)}>
+      {content}
+    </Pressable>
+  ) : <View style={rowStyle(false)}>{content}</View>;
 }
 
 export function FlightStrip({ flight }: { flight: Flight }) {
