@@ -14,12 +14,30 @@ func TestHealthEndpointUsesConfiguredListener(t *testing.T) {
 		{"[::]:8123", "", "http://[::1]:8123/healthz"},
 		{"127.0.0.2:8123", "", "http://127.0.0.2:8123/healthz"},
 		{"127.0.0.2:8123", "https://plano.invalid/healthz", "https://plano.invalid/healthz"},
+		{"127.0.0.2:8123", "http://[::1]:8123/healthz", "http://[::1]:8123/healthz"},
+		{"", "http://127.0.0.1/healthz?q=has%20space", "http://127.0.0.1/healthz?q=has%20space"},
 	} {
 		t.Setenv("PLANO_ADDR", tc.addr)
 		t.Setenv("PLANO_HEALTH_URL", tc.override)
 		got, err := healthEndpoint()
 		if err != nil || got != tc.want {
 			t.Fatalf("endpoint for %q = %q, %v, want %q", tc.addr, got, err, tc.want)
+		}
+	}
+}
+
+func TestHealthEndpointRejectsInvalidOverridesWithoutEchoingValues(t *testing.T) {
+	for _, override := range []string{
+		"ftp://127.0.0.1/healthz", "/healthz", "http:///healthz", "http://127.0.0.1:/healthz",
+		"http://127.0.0.1:0/healthz", "https://example.invalid:65536/healthz",
+		"http://::1:8123/healthz", "http://[fixture.invalid]:8123/healthz", "http://127.0.0.1]/healthz",
+		"https://fixture-credential@example.invalid/healthz", "https://example.invalid/healthz#",
+		"http://127.0.0.1/healthz?q=has space",
+	} {
+		t.Setenv("PLANO_HEALTH_URL", override)
+		if endpoint, err := healthEndpoint(); endpoint != "" || err == nil ||
+			!strings.Contains(err.Error(), "PLANO_HEALTH_URL") || strings.Contains(err.Error(), override) {
+			t.Fatal("invalid override did not produce a sanitized configuration error")
 		}
 	}
 }

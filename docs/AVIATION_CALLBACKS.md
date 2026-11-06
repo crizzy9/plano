@@ -289,9 +289,10 @@ end-of-day convention as the following midnight. [AIXM schedule rules](https://s
 
 The relay exits with `0` after Plano accepts every notice. A future-effective
 replacement or cancellation stays pending while the relay sends current
-notices and exits with `75`. Use the same input on retry. The server
-deduplicates notices it already accepted. Exit `65` means rejected input,
-`77` means the relay key was refused, and `78` means configuration or an
+notices and exits with `75`. A timed-out or interrupted upload can also be
+retried. Use the same input on retry. The server deduplicates notices it
+already accepted. Exit `65` means rejected input, including oversized uploads.
+Exit `77` means the relay key was refused, and `78` means configuration or an
 unexpected endpoint response.
 
 ### Flight-specific takeoff slots

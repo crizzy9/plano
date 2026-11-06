@@ -269,7 +269,9 @@ files without opening the database, binding the port, or contacting providers.
 It exits nonzero for partial push configuration. After startup, `plano healthcheck`
 checks the service and its database through `/healthz`. It uses `PLANO_ADDR` by
 default. Set `PLANO_HEALTH_URL` for a different direct probe endpoint reachable
-from the service's runtime. The probe bypasses HTTP proxies and rejects redirects.
+from the service's runtime. `plano check-config` validates the override's URL
+without contacting it. Use an HTTP or HTTPS endpoint without URL credentials.
+The probe bypasses HTTP proxies and rejects redirects.
 
 For an iOS push-capable build, set `PLANO_IOS_TEAM_ID` to the Apple signing
 team ID. Set `PLANO_IOS_BUNDLE_ID` for a custom bundle identifier and use the

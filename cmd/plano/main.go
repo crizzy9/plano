@@ -456,6 +456,9 @@ func run(logger *slog.Logger, checkOnly bool) error {
 	if err != nil {
 		return err
 	}
+	if _, err := healthOverride(); err != nil {
+		return err
+	}
 	if checkOnly {
 		logger.Info("plano configuration valid", "demo", demo, "apns", sender.APNs != nil, "fcm", sender.FCM != nil)
 		return nil

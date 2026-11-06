@@ -6,9 +6,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -24,8 +26,8 @@ func listenAddress() (host, port string, err error) {
 }
 
 func healthEndpoint() (string, error) {
-	if endpoint := os.Getenv("PLANO_HEALTH_URL"); endpoint != "" {
-		return endpoint, nil
+	if endpoint, err := healthOverride(); endpoint != "" || err != nil {
+		return endpoint, err
 	}
 	host, port, err := listenAddress()
 	if err != nil {
@@ -39,6 +41,36 @@ func healthEndpoint() (string, error) {
 	}
 	endpoint := url.URL{Scheme: "http", Host: net.JoinHostPort(host, port), Path: "/healthz"}
 	return endpoint.String(), nil
+}
+
+func healthOverride() (string, error) {
+	endpoint := os.Getenv("PLANO_HEALTH_URL")
+	if endpoint == "" {
+		return "", nil
+	}
+	invalid := errors.New("PLANO_HEALTH_URL must be a valid HTTP(S) probe URL without credentials or a fragment")
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.User != nil || strings.Contains(endpoint, "#") || strings.Contains(parsed.RawQuery, " ") ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") || strings.HasSuffix(parsed.Host, ":") {
+		return "", invalid
+	}
+	host := parsed.Hostname()
+	if host == "" || strings.ContainsAny(host, "[]") {
+		return "", invalid
+	}
+	if strings.Contains(host, ":") || strings.HasPrefix(parsed.Host, "[") {
+		address, err := netip.ParseAddr(host)
+		if err != nil || !address.Is6() || !strings.HasPrefix(parsed.Host, "[") {
+			return "", invalid
+		}
+	}
+	if value := parsed.Port(); value != "" {
+		port, err := strconv.ParseUint(value, 10, 16)
+		if err != nil || port == 0 {
+			return "", invalid
+		}
+	}
+	return endpoint, nil
 }
 
 func checkHealth(endpoint string, transport http.RoundTripper) error {

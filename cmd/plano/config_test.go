@@ -20,9 +20,9 @@ func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 	const aeroCallbackKey = "fixture-callback-key-not-production"
 	const invalidFlag = "fixture-invalid-flag"
 	for _, tc := range []struct {
-		name, demo, allowOpen, enrollment, aeroKey, addr, origin, wantError string
-		subscriptions, includeInbound, requireEnrollment, taf               string
-		withAeroCallback                                                    bool
+		name, demo, allowOpen, enrollment, aeroKey, addr, origin, healthURL, wantError string
+		subscriptions, includeInbound, requireEnrollment, taf                          string
+		withAeroCallback                                                               bool
 	}{
 		{name: "demo without providers", demo: "true"},
 		{name: "public demo requires enrollment", demo: "true", requireEnrollment: "true", wantError: "PLANO_ENROLLMENT_CODE"},
@@ -42,6 +42,8 @@ func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 		{name: "short enrollment code", enrollment: "fixture-short", aeroKey: aeroKey, wantError: "16 to 128 bytes"},
 		{name: "invalid listen address", demo: "true", addr: "invalid listen address", wantError: "PLANO_ADDR"},
 		{name: "public origin with empty query", demo: "true", origin: "https://plano.example?", wantError: "PLANO_PUBLIC_URL"},
+		{name: "invalid health probe scheme", demo: "true", healthURL: "ftp://fixture.invalid/healthz", wantError: "PLANO_HEALTH_URL"},
+		{name: "valid custom health probe", demo: "true", healthURL: "https://fixture.invalid:8443/plano/healthz"},
 		{name: "invalid inbound subscription flag", enrollment: enrollment, aeroKey: aeroKey, includeInbound: invalidFlag,
 			wantError: "PLANO_AERO_SUBSCRIPTIONS_INBOUND"},
 		{name: "inbound subscriptions require managed subscriptions", enrollment: enrollment, aeroKey: aeroKey, includeInbound: "true",
@@ -61,6 +63,7 @@ func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 			t.Setenv("PLANO_AEROAPI_KEY", tc.aeroKey)
 			t.Setenv("PLANO_TAF", tc.taf)
 			t.Setenv("PLANO_PUBLIC_URL", tc.origin)
+			t.Setenv("PLANO_HEALTH_URL", tc.healthURL)
 			t.Setenv("PLANO_AERO_SUBSCRIPTIONS", tc.subscriptions)
 			t.Setenv("PLANO_AERO_SUBSCRIPTIONS_INBOUND", tc.includeInbound)
 			if tc.withAeroCallback {
@@ -84,7 +87,7 @@ func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 			if err != nil {
 				diagnostic += err.Error()
 			}
-			for _, value := range []string{tc.enrollment, tc.aeroKey, aeroCallbackKey, invalidFlag} {
+			for _, value := range []string{tc.enrollment, tc.aeroKey, tc.healthURL, aeroCallbackKey, invalidFlag} {
 				if value != "" && strings.Contains(diagnostic, value) {
 					t.Fatal("configuration diagnostic exposed a fixture value")
 				}

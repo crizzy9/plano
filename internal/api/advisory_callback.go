@@ -5,8 +5,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -49,7 +51,16 @@ func readSignedCallback(w http.ResponseWriter, r *http.Request, now time.Time, k
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
 	if err != nil {
-		respond(w, 413, map[string]string{"error": "could not read " + subject + " within size limit"})
+		var oversized *http.MaxBytesError
+		var timeout net.Error
+		status, message := http.StatusServiceUnavailable, subject+" could not be read"
+		switch {
+		case errors.As(err, &oversized):
+			status, message = http.StatusRequestEntityTooLarge, subject+" exceeds size limit"
+		case errors.As(err, &timeout) && timeout.Timeout():
+			status, message = http.StatusRequestTimeout, subject+" upload timed out"
+		}
+		respond(w, status, map[string]string{"error": message})
 		return nil, false
 	}
 	mac := hmac.New(sha256.New, key)
