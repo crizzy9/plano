@@ -229,15 +229,17 @@ func (s Server) emailWebhook(w http.ResponseWriter, r *http.Request) {
 		respond(w, 422, map[string]string{"error": "email exceeds the flight import limit"})
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-	defer cancel()
-	progress, err := s.Store.EmailImportProgress(ctx, owner, digest)
+	lookupCtx, cancelLookup := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancelLookup()
+	progress, err := s.Store.EmailImportProgress(lookupCtx, owner, digest)
 	if err != nil {
 		s.failure(w, err)
 		return
 	}
 	wanted := make([]string, 0, len(parsed.Legs))
 	resolved := make([]core.EmailImportLeg, 0, len(parsed.Legs))
+	var lookupErr error
+	var retryLookup bool
 	for _, leg := range parsed.Legs {
 		key := emailLegKey(digest, leg)
 		if slices.Contains(wanted, key) {
@@ -247,16 +249,28 @@ func (s Server) emailWebhook(w http.ResponseWriter, r *http.Request) {
 		if progress[key] {
 			continue
 		}
-		matches, err := s.lookupLeg(ctx, leg)
+		var matches []feeds.Flight
+		err := lookupCtx.Err()
+		if err == nil {
+			matches, err = s.lookupLeg(lookupCtx, leg)
+		}
 		if err != nil {
-			s.failure(w, err)
-			return
+			if lookupErr == nil {
+				lookupErr = err
+			}
+			retryLookup = retryLookup || errors.Is(err, feeds.ErrUnavailable) || errors.Is(err, context.DeadlineExceeded)
+			continue
 		}
 		if len(matches) == 1 {
 			resolved = append(resolved, core.EmailImportLeg{Key: key, FlightID: matches[0].ID})
 		}
 	}
-	complete, partial, err := s.Store.CommitEmailImport(ctx, owner, digest, token, s.bookingDigest(owner, parsed.BookingCode), wanted, resolved)
+	cancelLookup()
+	// A provider may exhaust its lookup budget after other legs resolved.
+	// Give the receipt transaction its own bounded time under the request.
+	commitCtx, cancelCommit := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancelCommit()
+	complete, partial, err := s.Store.CommitEmailImport(commitCtx, owner, digest, token, s.bookingDigest(owner, parsed.BookingCode), wanted, resolved)
 	if errors.Is(err, core.ErrEmailRelayUnauthorized) {
 		respond(w, 401, map[string]string{"error": "valid email relay token required"})
 		return
@@ -272,9 +286,11 @@ func (s Server) emailWebhook(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case complete:
 		w.WriteHeader(204)
-	case partial:
+	case partial, retryLookup:
 		w.Header().Set("Retry-After", "300")
 		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "some flights could not yet be matched"})
+	case lookupErr != nil:
+		s.failure(w, lookupErr)
 	default:
 		respond(w, 422, map[string]string{"error": "email has no uniquely matching flights"})
 	}

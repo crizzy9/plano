@@ -22,6 +22,8 @@ import (
 type evolvingImportSource struct {
 	demodata.Source
 	secondLeg       bool
+	firstLegError   error
+	secondLegError  error
 	firstLegLookups int
 	lookups         []string
 }
@@ -30,9 +32,12 @@ func (s *evolvingImportSource) Search(ctx context.Context, number string, date t
 	s.lookups = append(s.lookups, number)
 	if number == "UA123" {
 		s.firstLegLookups++
+		if s.firstLegError != nil {
+			return nil, s.firstLegError
+		}
 	}
 	if number == "UA456" && !s.secondLeg {
-		return []feeds.Flight{}, nil
+		return []feeds.Flight{}, s.secondLegError
 	}
 	return s.Source.Search(ctx, number, date)
 }
@@ -56,7 +61,7 @@ func TestEmailRetryOnlyResolvesUnfinishedLegs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := &evolvingImportSource{}
+	source := &evolvingImportSource{secondLegError: feeds.ErrUnavailable}
 	handler := (api.Server{Store: store, Source: source, Demo: true, Logger: slog.New(slog.DiscardHandler)}).Handler()
 	const email = "Subject: Itinerary\r\nContent-Type: text/plain\r\n\r\n" +
 		"UA123 | Departure: 5 January 2027\r\nUA456 | Departure: 7 January 2027\r\n"
@@ -72,9 +77,14 @@ func TestEmailRetryOnlyResolvesUnfinishedLegs(t *testing.T) {
 		}
 	}
 	forward(email, http.StatusServiceUnavailable)
+	matched, err := store.Tracked(ctx, owner)
+	if err != nil || len(matched) != 1 || matched[0].ID != "demo-UA123-2027-01-05" {
+		t.Fatalf("partial import lost a match when the next lookup failed: %+v, %v", matched, err)
+	}
 	if err := store.Untrack(ctx, owner, "demo-UA123-2027-01-05"); err != nil {
 		t.Fatal(err)
 	}
+	source.secondLegError = nil
 	forward(email, http.StatusServiceUnavailable)
 	source.secondLeg = true
 	forward(email, http.StatusNoContent)
@@ -87,6 +97,11 @@ func TestEmailRetryOnlyResolvesUnfinishedLegs(t *testing.T) {
 	if err != nil || len(flights) != 1 || flights[0].ID != "demo-UA456-2027-01-07" || source.firstLegLookups != 1 {
 		t.Fatalf("retry tracked %+v after %d first-leg lookups, error = %v", flights, source.firstLegLookups, err)
 	}
+	// A new message with no matches still needs a retry when any lookup failed
+	// temporarily, even if a different leg was rejected permanently.
+	source.firstLegError = feeds.ErrInvalidQuery
+	source.secondLeg, source.secondLegError = false, feeds.ErrUnavailable
+	forward(strings.Replace(email, "Subject: Itinerary", "Subject: Retry", 1), http.StatusServiceUnavailable)
 }
 
 func TestEmailWebhookCancellationWithReplacement(t *testing.T) {

@@ -278,10 +278,20 @@ function pendingCalendarBatches(candidates: CalendarFlight[], imported: Set<stri
 
 async function legacyCalendarBatch(api: PlanoAPI, group: CalendarFlight[]) {
   const result = await importCalendarBatch(api, group);
+  if (!result || result.truncated || result.nextOffset !== undefined ||
+    !Array.isArray(result.flights) || !Array.isArray(result.unmatched)) return [];
+  const submitted = new Set(group.map(flightLabel));
   const missed = new Set(result.unmatched);
+  if (submitted.size !== group.length || missed.size !== result.unmatched.length ||
+    result.unmatched.some((label) => !submitted.has(label))) return [];
   const matched = group.filter((flight) => !missed.has(flightLabel(flight)));
-  // An older server deduplicates resolved flights across designators.
-  return result.flights.length === matched.length ? matched.map(flightKey) : [];
+  const flightIds = result.flights.map((flight) => flight?.id);
+  if (flightIds.length === 0 || flightIds.length > matched.length ||
+    flightIds.some((id) => typeof id !== 'string' || !id.trim()) ||
+    new Set(flightIds).size !== flightIds.length) return [];
+  // The explicit unmatched list identifies inputs, while returned flights
+  // are deduplicated by ID when multiple designators resolve to one flight.
+  return matched.map(flightKey);
 }
 
 async function runSync() {

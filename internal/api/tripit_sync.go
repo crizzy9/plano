@@ -173,7 +173,7 @@ func tripItLegKey(leg itinerary.Leg) string {
 }
 
 func (s Server) resolveTripItBatch(ctx context.Context, legs []itinerary.Leg, seen map[string]bool, cursor int) (core.TripItSyncResult, bool, error) {
-	result := core.TripItSyncResult{Cursor: cursor}
+	var result core.TripItSyncResult
 	if len(legs) == 0 {
 		return result, false, nil
 	}
@@ -182,17 +182,21 @@ func (s Server) resolveTripItBatch(ctx context.Context, legs []itinerary.Leg, se
 			result.Matched++
 		}
 	}
-	checked, visited := 0, 0
-	start := max(cursor, 0) % len(legs)
-	for ; visited < len(legs) && checked < itinerary.MaxFlights; visited++ {
-		leg := legs[(start+visited)%len(legs)]
+	result.Unmatched = len(legs) - result.Matched
+	checked := 0
+	// Each short continuation scans only the remaining tail. Revisit earlier
+	// unmatched legs on the next scheduled sweep.
+	for i := max(cursor, 0) % len(legs); i < len(legs); i++ {
+		leg := legs[i]
 		key := tripItLegKey(leg)
 		if seen[key] {
 			continue
 		}
+		result.Cursor = i
+		if checked == itinerary.MaxFlights {
+			return result, true, nil
+		}
 		if err := ctx.Err(); err != nil {
-			result.Cursor = (start + visited) % len(legs)
-			result.Unmatched = len(legs) - result.Matched
 			return result, checked > 0, err
 		}
 		checked++
@@ -200,9 +204,8 @@ func (s Server) resolveTripItBatch(ctx context.Context, legs []itinerary.Leg, se
 		if err != nil {
 			// Rotate past attempted legs even when a lookup uses the whole
 			// budget. A slow flight should not starve later entries.
-			result.Cursor = (start + visited + 1) % len(legs)
-			result.Unmatched = len(legs) - result.Matched
-			return result, ctx.Err() != nil && checked > 1, err
+			result.Cursor = (i + 1) % len(legs)
+			return result, result.Cursor != 0 && ctx.Err() != nil && checked > 1, err
 		}
 		if len(matches) != 1 {
 			continue
@@ -210,8 +213,8 @@ func (s Server) resolveTripItBatch(ctx context.Context, legs []itinerary.Leg, se
 		seen[key] = true
 		result.Matches = append(result.Matches, core.TripItMatch{Key: key, Date: leg.Date, FlightID: matches[0].ID})
 		result.Matched++
+		result.Unmatched--
 	}
-	result.Cursor = (start + visited) % len(legs)
-	result.Unmatched = len(legs) - result.Matched
-	return result, visited < len(legs) && result.Unmatched > 0 && len(result.Matches) > 0, nil
+	result.Cursor = 0
+	return result, false, nil
 }

@@ -61,7 +61,7 @@ func TestTripItSyncResumesAtFirstUnattemptedLegAfterBudgetExpires(t *testing.T) 
 	if _, _, err := service.resolveTripItBatch(t.Context(), legs, map[string]bool{}, result.Cursor); err != nil {
 		t.Fatal(err)
 	}
-	if len(searches) != 3 || searches[1] != "UA456" {
+	if !slices.Equal(searches, []string{"UA123", "UA456"}) {
 		t.Fatalf("unexpected resumed order: %v", searches)
 	}
 }
@@ -109,16 +109,26 @@ func TestTripItSyncRotatesAfterFirstLookupTimesOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := claim(next)
-	result, _, err = service.resolveTripItBatch(ctx, legs, map[string]bool{}, second.Cursor)
-	if err != nil || !slices.Equal(searches, []string{"UA123", "UA456", "UA123"}) {
-		t.Fatalf("resumed attempt: %+v, searches=%v, err=%v", result, searches, err)
+	result, more, err = service.resolveTripItBatch(ctx, legs, map[string]bool{}, second.Cursor)
+	if err != nil || more || result.Cursor != 0 || !slices.Equal(searches, []string{"UA123", "UA456"}) {
+		t.Fatalf("resumed attempt: %+v, more=%v, searches=%v, err=%v", result, more, searches, err)
 	}
-	if err := service.Store.FinishTripItSync(ctx, second, result, next, next.Add(time.Hour)); err != nil {
+	retry := next.Add(time.Hour)
+	if err := service.Store.FinishTripItSync(ctx, second, result, next, retry); err != nil {
 		t.Fatal(err)
 	}
 	tracked, err := service.Store.Tracked(ctx, owner)
 	if err != nil || len(tracked) != 1 || tracked[0].ID != "demo-UA456-"+date {
 		t.Fatalf("tracked flights: %+v, err=%v", tracked, err)
+	}
+	seen, err := service.Store.TripItImportedLegs(ctx, owner, date)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third := claim(retry)
+	result, more, err = service.resolveTripItBatch(ctx, legs, seen, third.Cursor)
+	if err != nil || more || !slices.Equal(searches, []string{"UA123", "UA456", "UA123"}) {
+		t.Fatalf("next scheduled attempt: %+v, more=%v, searches=%v, err=%v", result, more, searches, err)
 	}
 }
 
@@ -241,6 +251,90 @@ func TestTripItSubscriptionIsPrivateAndDoesNotRetrackRemovedFlights(t *testing.T
 	finishStale(stale)
 	if job, err := service.Store.ClaimTripItSync(t.Context(), time.Now().Add(24*time.Hour)); job != nil || err != nil {
 		t.Fatalf("removed subscription was claimable: %v", err)
+	}
+}
+
+func TestTripItSyncContinuesPastAnUnmatchedBatch(t *testing.T) {
+	for _, matchLast := range []bool{true, false} {
+		name := "later match"
+		if !matchLast {
+			name = "all unmatched"
+		}
+		t.Run(name, func(t *testing.T) {
+			service := newImportTestServer(t)
+			const interval = 24 * time.Hour
+			var err error
+			service.TripItSync, err = NewTripItSync(bytes.Repeat([]byte("k"), 32), interval)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := t.Context()
+			day := time.Now().UTC().AddDate(0, 0, 1)
+			var calendar strings.Builder
+			calendar.WriteString("BEGIN:VCALENDAR\r\n")
+			addLeg := func(number string) {
+				fmt.Fprintf(&calendar, "BEGIN:VEVENT\r\nUID:%s\r\nDTSTART;VALUE=DATE:%s\r\nSUMMARY:Flight %s\r\nEND:VEVENT\r\n",
+					number, day.Format("20060102"), number)
+			}
+			for i := range itinerary.MaxFlights {
+				addLeg(fmt.Sprintf("UA%d", 101+i))
+			}
+			addLeg("UA123")
+			calendar.WriteString("END:VCALENDAR\r\n")
+			service.TripItSync.client = &http.Client{Transport: tripItTransport(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(calendar.String()))}, nil
+			})}
+			var searches []string
+			service.Source = tripItTestFlightSource{search: func(ctx context.Context, number string, date time.Time) ([]feeds.Flight, error) {
+				searches = append(searches, number)
+				if matchLast && number == "UA123" {
+					return (demodata.Source{}).Search(ctx, number, date)
+				}
+				return nil, nil
+			}}
+			token, owner := newImportTestInstallation(t, service.Store)
+			importTestRequest(t, service.Handler(), "PUT", "/v1/import/tripit/subscription", token,
+				`{"url":"webcal://tripit.com/feed/ical/fixture/tripit.ics"}`, 204)
+			claim := func(at time.Time) core.TripItJob {
+				t.Helper()
+				job, err := service.Store.ClaimTripItSync(ctx, at)
+				if err != nil || job == nil {
+					t.Fatalf("claim failed: %v", err)
+				}
+				return *job
+			}
+			status := func() core.TripItStatus {
+				t.Helper()
+				status, err := service.Store.TripItStatus(ctx, owner)
+				if err != nil || status.LastSyncAt == nil || status.NextSyncAt == nil || status.Status != "synced" {
+					t.Fatalf("unexpected sync status %+v, err=%v", status, err)
+				}
+				return status
+			}
+			service.syncTripItJob(ctx, claim(time.Now()))
+			first := status()
+			if delay := first.NextSyncAt.Sub(*first.LastSyncAt); delay != 2*time.Minute || first.Matched != 0 ||
+				first.Unmatched != itinerary.MaxFlights+1 || len(searches) != itinerary.MaxFlights {
+				t.Fatalf("first batch status %+v, delay=%v, searches=%v", first, delay, searches)
+			}
+			service.syncTripItJob(ctx, claim(*first.NextSyncAt))
+			second := status()
+			wantMatched := 0
+			if matchLast {
+				wantMatched = 1
+			}
+			if delay := second.NextSyncAt.Sub(*second.LastSyncAt); delay != interval || second.Matched != wantMatched ||
+				second.Unmatched != itinerary.MaxFlights+1-wantMatched || !slices.Equal(searches[itinerary.MaxFlights:], []string{"UA123"}) {
+				t.Fatalf("completed sweep status %+v, delay=%v, searches=%v", second, delay, searches)
+			}
+			tracked, err := service.Store.Tracked(ctx, owner)
+			if err != nil || len(tracked) != wantMatched || matchLast && tracked[0].ID != "demo-UA123-"+day.Format(time.DateOnly) {
+				t.Fatalf("tracked flights: %+v, err=%v", tracked, err)
+			}
+			if next := claim(*second.NextSyncAt); next.Cursor != 0 {
+				t.Fatalf("next scheduled sweep cursor = %d, want 0", next.Cursor)
+			}
+		})
 	}
 }
 

@@ -16,7 +16,7 @@ const date = '2027-05-18';
 const key = ({ day, code, utcTime }) => [day, code, utcTime].filter(Boolean).join(' ');
 const flight = (number, status) => ({ title: `UA${number}`, startDate: `${date}T13:00:00Z`, timeZone: 'UTC', status });
 
-function client(events, send, consent = 'timed') {
+function client(events, send, consent = 'timed', importLegacy) {
   let now = Date.parse('2027-05-17T12:00:00Z');
   const storage = new Map([[consentKey, consent]]);
   const modern = [];
@@ -58,7 +58,9 @@ function client(events, send, consent = 'timed') {
           importFlights: async (source, text) => {
             assert.equal(source, 'calendar');
             legacy.push(text);
-            return { unmatched: [], flights: text.match(/BEGIN:VEVENT/g) ?? [] };
+            return importLegacy ? importLegacy(text) : {
+              unmatched: [], flights: (text.match(/BEGIN:VEVENT/g) ?? []).map((_, index) => ({ id: `flight-${index}` })),
+            };
           },
         };
       },
@@ -128,6 +130,51 @@ test('an old server keeps date-only consent and a separate legacy acknowledgment
   assert.match(sync.legacy[0], /DTSTART;VALUE=DATE:20270518/);
   assert.deepEqual(JSON.parse(sync.storage.get(legacyKey)).imported, [`${date} UA100`]);
   assert.deepEqual(JSON.parse(sync.storage.get(currentKey)).imported, []);
+});
+
+test('legacy sync acknowledges both codeshares when the server deduplicates their flight', async () => {
+  const sync = client([flight(100), { ...flight(100), title: 'LH8100' }], () => null, 'timed', () => ({
+    unmatched: [], flights: [{ id: 'flight-100' }],
+  }));
+  await sync.resume();
+  assert.equal(sync.legacy.length, 1);
+  assert.match(sync.legacy[0], /SUMMARY:LH8100/);
+  assert.match(sync.legacy[0], /SUMMARY:UA100/);
+  assert.deepEqual(JSON.parse(sync.storage.get(legacyKey)).imported, [`${date} LH8100 130000`, `${date} UA100 130000`]);
+  assert.deepEqual(JSON.parse(sync.storage.get(currentKey)).imported, []);
+  sync.advance();
+  await sync.resume();
+  assert.equal(sync.legacy.length, 1);
+  assert.equal(sync.modern.length, 1);
+});
+
+test('legacy sync retries only the unmatched entry from a deduplicated batch', async () => {
+  const sync = client([flight(100), { ...flight(100), title: 'LH8100' }, flight(102)], () => null, 'timed', (text) => ({
+    unmatched: [`UA102 · ${date}`],
+    flights: text.includes('SUMMARY:UA100') ? [{ id: 'flight-100' }] : [],
+  }));
+  await sync.resume();
+  assert.deepEqual(JSON.parse(sync.storage.get(legacyKey)).imported, [`${date} LH8100 130000`, `${date} UA100 130000`]);
+  sync.advance();
+  await sync.resume();
+  assert.equal(sync.legacy.length, 2);
+  assert.match(sync.legacy[1], /SUMMARY:UA102/);
+  assert.doesNotMatch(sync.legacy[1], /SUMMARY:(LH8100|UA100)/);
+});
+
+test('legacy sync leaves incomplete or inconsistent replies unacknowledged', async () => {
+  const result = { unmatched: [], flights: [{ id: 'flight-100' }] };
+  for (const reply of [
+    { ...result, truncated: true },
+    { ...result, nextOffset: 1 },
+    { ...result, unmatched: [`UA999 · ${date}`] },
+    { ...result, flights: [] },
+    { ...result, flights: [...result.flights, ...result.flights] },
+  ]) {
+    const sync = client([flight(100)], () => null, 'timed', () => reply);
+    await sync.resume();
+    assert.deepEqual(JSON.parse(sync.storage.get(legacyKey)).imported, [], JSON.stringify(reply));
+  }
 });
 
 test('a retired consent cannot retry through the legacy import path', async () => {
