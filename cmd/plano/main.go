@@ -136,6 +136,13 @@ func run(logger *slog.Logger, checkOnly bool) error {
 	if len(enrollment) != 0 && (len(enrollment) < 16 || len(enrollment) > 128) {
 		return errors.New("enrollment code must be 16 to 128 bytes")
 	}
+	requireEnrollment, err := flag("PLANO_REQUIRE_ENROLLMENT", false)
+	if err != nil {
+		return err
+	}
+	if requireEnrollment && len(enrollment) == 0 {
+		return errors.New("PLANO_REQUIRE_ENROLLMENT requires PLANO_ENROLLMENT_CODE or PLANO_ENROLLMENT_CODE_FILE")
+	}
 	if !demo {
 		allowOpen, err := flag("PLANO_ALLOW_OPEN_ENROLLMENT", false)
 		if err != nil {

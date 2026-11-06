@@ -33,14 +33,39 @@ curl --fail --silent --show-error --get http://localhost:8080/v1/flights \
 Set local overrides in `.env` using `.env.example` as a reference. If you change
 `PLANO_PORT`, set `PLANO_PUBLIC_URL` to the corresponding public origin.
 
+## Serve HTTPS with Compose
+
+Use the bundled Caddy overlay on a host where Docker Compose 2.24.4 or later
+can publish TCP ports 80 and 443. Point your domain's DNS records at the host
+and allow those ports through the firewall. Set `PLANO_DOMAIN` in `.env` to
+the bare hostname, such as `plano.example.net`. The overlay uses that name
+for both TLS and Plano's public share and callback URLs. Only Caddy publishes
+ports. [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https)
+
+Set `PLANO_DEMO=false` for live data or `PLANO_DEMO=true` for a test with
+synthetic flights. Both modes require a private enrollment code in this
+overlay. For live data, configure your providers as described below. If you
+use `compose.credentials.yaml` to mount secret files, add
+`-f compose.credentials.yaml` after the HTTPS overlay on each command.
+
+```sh
+docker compose -f compose.yaml -f compose.https.yaml run --build --rm --no-deps plano check-config
+docker compose -f compose.yaml -f compose.https.yaml up --build --wait
+curl --fail https://plano.example.net/healthz
+```
+
+Keep the `caddy_data` volume across upgrades. It holds certificates and
+private keys. Run the HTTPS health check from a network your phones will use
+to verify DNS, certificate issuance, and routing.
+
 ## Connect the mobile clients
 
-For physical phones, configure a reachable HTTPS origin such as
-`https://plano.example.net`. Keep the Compose port on loopback and configure
-your TLS reverse proxy to forward that origin to `http://127.0.0.1:8080`. If
-the proxy runs inside another container, attach it to the service's network
-and forward to `http://plano:8080`. Set `PLANO_PUBLIC_URL` to the same
-HTTPS origin so share links open on other devices.
+Physical phones need a reachable HTTPS origin such as `https://plano.example.net`.
+If you already run a TLS reverse proxy, use the base Compose file, keep its
+published port on loopback, and forward that origin to `http://127.0.0.1:8080`.
+If your proxy runs in a container, attach it to Plano's network and forward
+to `http://plano:8080`. Set `PLANO_PUBLIC_URL` to the same HTTPS origin so
+share links open on other devices.
 
 For example, a host running Caddy can use the following site block. Point
 the domain's DNS records at the server and expose ports 80 and 443 to Caddy.

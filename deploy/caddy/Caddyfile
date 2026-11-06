@@ -1,0 +1,17 @@
+{
+	admin off
+	skip_install_trust
+	servers {
+		protocols h1 h2
+	}
+	log {
+		format filter {
+			# Error logs can otherwise include pickup links and request headers.
+			request delete
+		}
+	}
+}
+
+https://{$PLANO_DOMAIN} {
+	reverse_proxy plano:8080
+}
