@@ -291,7 +291,9 @@ func TestReadsbRejectsStalePrivateAndConflictingAircraft(t *testing.T) {
 		{"hex":"a00003","type":"adsb_icao","flight":"UAL9","r":"N14AA","lat":2,"lon":2,"seen_pos":50},
 		{"hex":"a00004","type":"mlat","flight":"UAL10","r":"N15AA","lat":2,"lon":2,"seen_pos":0},
 		{"hex":"a00005","type":"adsb_icao","flight":"UAL7","r":"N16AA","lat":2,"lon":2,"seen_pos":0},
-		{"hex":"a00006","type":"adsb_icao","flight":"UAL7","r":"N16AA","lat":4,"lon":2,"seen_pos":0}]}`
+		{"hex":"a00006","type":"adsb_icao","flight":"UAL7","r":"N16AA","lat":4,"lon":2,"seen_pos":0},
+		{"hex":"a00007","type":"adsb_icao","flight":"UAL7","r":"N17AA","lat":2,"lon":2,"seen_pos":0,"alt_baro":"ground","alt_geom":650},
+		{"hex":"a00008","type":"adsb_icao","flight":"UAL7","r":"N18AA","lat":2,"lon":2,"seen_pos":0,"ground":true,"alt_baro":675}]}`
 	client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/data/aircraft.json" {
 			t.Errorf("unexpected receiver request: %s", r.URL)
@@ -308,18 +310,18 @@ func TestReadsbRejectsStalePrivateAndConflictingAircraft(t *testing.T) {
 		t.Fatal(err)
 	}
 	flight := Flight{Status: "airborne", ICAONumber: "UAL7", TailNumber: "N12AA", ActualDeparture: new(now.Add(-time.Minute))}
-	position, ok := snapshot.Match(flight, "A00001")
-	if !ok || !position.At.Equal(now.Add(-2*time.Second)) || position.Latitude != 0 || position.Kind != "ads_b" || position.AltitudeFeet == nil || *position.AltitudeFeet != 33000 {
-		t.Fatalf("position = %+v, %t", position, ok)
+	position, address, ok := snapshot.Match(flight, "A00001")
+	if !ok || address != "a00001" || !position.At.Equal(now.Add(-2*time.Second)) || position.Latitude != 0 || position.Kind != "ads_b" || position.AltitudeFeet == nil || *position.AltitudeFeet != 33000 {
+		t.Fatalf("position = %+v, address = %q, matched = %t", position, address, ok)
 	}
-	for _, tail := range []string{"N13AA", "N14AA", "N15AA", "N16AA"} {
+	for _, tail := range []string{"N13AA", "N14AA", "N15AA", "N16AA", "N17AA", "N18AA"} {
 		flight.TailNumber = tail
-		if got, ok := snapshot.Match(flight, ""); ok {
+		if got, _, ok := snapshot.Match(flight, ""); ok {
 			t.Errorf("accepted unsafe point for %s: %+v", tail, got)
 		}
 	}
 	flight.TailNumber, flight.ICAONumber = "N12AA", "UAL81"
-	if got, ok := snapshot.Match(flight, "A00001"); ok {
+	if got, _, ok := snapshot.Match(flight, "A00001"); ok {
 		t.Errorf("accepted conflicting callsign: %+v", got)
 	}
 	now = now.Add(61 * time.Second)
@@ -346,7 +348,7 @@ func TestReadsbUsesReportedVerticalRate(t *testing.T) {
 		{"N14AA", nil},
 	} {
 		flight := Flight{Status: "airborne", TailNumber: test.tail, ActualTakeoff: new(now.Add(-time.Minute))}
-		position, ok := snapshot.Match(flight, "")
+		position, _, ok := snapshot.Match(flight, "")
 		if !ok || position.VerticalTrend != "" || (position.VerticalRateFPM == nil) != (test.rate == nil) ||
 			test.rate != nil && *position.VerticalRateFPM != *test.rate {
 			t.Errorf("%s position = %+v, matched = %t", test.tail, position, ok)

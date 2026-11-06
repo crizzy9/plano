@@ -66,6 +66,7 @@ func parseReadsb(body []byte, now time.Time) (ADSBSnapshot, error) {
 			Latitude     *float64        `json:"lat"`
 			Longitude    *float64        `json:"lon"`
 			PositionAge  *float64        `json:"seen_pos"`
+			Ground       bool            `json:"ground"`
 			Altitude     json.RawMessage `json:"alt_baro"`
 			AltitudeGNSS *float64        `json:"alt_geom"`
 			GroundSpeed  *float64        `json:"gs"`
@@ -87,6 +88,7 @@ func parseReadsb(body []byte, now time.Time) (ADSBSnapshot, error) {
 		hex := strings.ToLower(row.Hex)
 		// Flags 1, 4, and 8 identify military, PIA, and LADD respectively.
 		if row.Type != "adsb_icao" || row.Flags&(1|4|8) != 0 || !modeSHexPattern.MatchString(hex) ||
+			row.Ground || string(row.Altitude) == `"ground"` ||
 			row.Latitude == nil || row.Longitude == nil || *row.Latitude < -90 || *row.Latitude > 90 ||
 			*row.Longitude < -180 || *row.Longitude > 180 || row.PositionAge == nil || *row.PositionAge < 0 || *row.PositionAge > 30 {
 			continue
@@ -136,31 +138,31 @@ func normalizeRegistration(registration string) string {
 	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(registration), "-", ""))
 }
 
-// Match uses aircraft identity and the active flight's known timeframe. A
+// Match returns the position and normalized receiver address for a flight. A
 // conflicting callsign or registration rules out a point even with a Mode S hit.
-func (s ADSBSnapshot) Match(flight Flight, modeSHex string) (Position, bool) {
+func (s ADSBSnapshot) Match(flight Flight, modeSHex string) (position Position, address string, ok bool) {
 	if flight.Status != "taxi_out" && flight.Status != "airborne" && flight.Status != "landed" &&
 		!(flight.Status == "diverted" && flight.ActualTakeoff != nil && flight.ActualLanding == nil && flight.ActualArrival == nil) {
-		return Position{}, false
+		return Position{}, "", false
 	}
 	tail := normalizeRegistration(flight.TailNumber)
 	if tail == "" {
-		return Position{}, false
+		return Position{}, "", false
 	}
 	row := s.byRegistration[tail]
 	if modeSHexPattern.MatchString(strings.ToLower(modeSHex)) {
 		row = s.byAddress[strings.ToLower(modeSHex)]
 	}
 	if row.hex == "" || row.registration != "" && row.registration != tail {
-		return Position{}, false
+		return Position{}, "", false
 	}
 	if row.callSign != "" && row.callSign != tail && row.callSign != strings.ToUpper(flight.ATCIdent) &&
 		row.callSign != strings.ToUpper(flight.ICAONumber) && row.callSign != strings.ToUpper(flight.Number) {
-		return Position{}, false
+		return Position{}, "", false
 	}
 	start := firstTime(flight.ActualDeparture, flight.ActualTakeoff, flight.EstimatedDeparture, flight.ScheduledDeparture)
 	if start == nil || row.position.At.Before(start.Add(-5*time.Minute)) {
-		return Position{}, false
+		return Position{}, "", false
 	}
-	return row.position, true
+	return row.position, row.hex, true
 }

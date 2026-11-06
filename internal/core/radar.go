@@ -29,6 +29,12 @@ AND json_extract(snapshot,'$.actualTakeoff') IS NOT NULL
 AND json_extract(snapshot,'$.actualLanding') IS NULL
 AND json_extract(snapshot,'$.actualArrival') IS NULL`
 
+const radarFlightCandidates = `FROM flights WHERE ` + radarFlightStatus + `
+AND observed_ns>=?
+AND (COALESCE(json_extract(snapshot,'$.estimatedArrival'),json_extract(snapshot,'$.scheduledArrival')) IS NULL
+ OR julianday(COALESCE(json_extract(snapshot,'$.estimatedArrival'),json_extract(snapshot,'$.scheduledArrival')))>=julianday(?))
+AND EXISTS (SELECT 1 FROM tracked WHERE flight_id=flights.id)`
+
 type radarSample struct {
 	flight   feeds.Flight
 	position feeds.Position
@@ -51,23 +57,7 @@ ON CONFLICT(flight_id) DO UPDATE SET revision_ns=excluded.revision_ns,last_tail=
 	return err
 }
 
-func (s *Store) radarFlights(ctx context.Context, now time.Time) ([]feeds.Flight, error) {
-	return s.list(ctx, `SELECT snapshot FROM flights WHERE `+radarFlightStatus+`
-AND observed_ns>=?
-AND (COALESCE(json_extract(snapshot,'$.estimatedArrival'),json_extract(snapshot,'$.scheduledArrival')) IS NULL
- OR julianday(COALESCE(json_extract(snapshot,'$.estimatedArrival'),json_extract(snapshot,'$.scheduledArrival')))>=julianday(?))
-AND EXISTS (SELECT 1 FROM tracked WHERE flight_id=flights.id)`, now.Add(-15*time.Minute).UnixNano(), now.Add(-30*time.Minute).Format(time.RFC3339))
-}
-
-func (s *Store) recordRadarSamples(ctx context.Context, samples []radarSample) error {
-	if len(samples) == 0 {
-		return nil
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+func recordRadarSamples(ctx context.Context, tx *sql.Tx, samples []radarSample) error {
 	for _, sample := range samples {
 		if sample.flight.ActualTakeoff == nil || sample.position.At.Before(*sample.flight.ActualTakeoff) {
 			continue
@@ -76,8 +66,7 @@ func (s *Store) recordRadarSamples(ctx context.Context, samples []radarSample) e
 		if err != nil {
 			return err
 		}
-		// A provider refresh can change aircraft or end the leg while the
-		// receiver request is in flight. Apply only to the still-current leg.
+		// Apply the observation only to the selected flight snapshot.
 		_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO radar_positions(flight_id,at_ns,data)
 SELECT id,?,? FROM flights WHERE id=? AND observed_ns=? AND `+radarFlightStatus+`
 AND json_extract(snapshot,'$.tailNumber')=?
@@ -92,7 +81,7 @@ AND EXISTS(SELECT 1 FROM tracked WHERE flight_id=flights.id)`,
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // RunRadar samples one operator receiver for all airborne tracked flights.
@@ -113,25 +102,69 @@ func (s *Store) RunRadar(ctx context.Context, receiver *feeds.ADSBReceiver, regi
 }
 
 func (s *Store) sampleRadar(ctx context.Context, receiver *feeds.ADSBReceiver, registry *feeds.FAARegistry) error {
-	flights, err := s.radarFlights(ctx, time.Now())
-	if err != nil || len(flights) == 0 {
+	now := time.Now()
+	var active bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 `+radarFlightCandidates+`)`,
+		now.Add(-15*time.Minute).UnixNano(), now.Add(-30*time.Minute).Format(time.RFC3339)).Scan(&active)
+	if err != nil || !active {
 		return err
 	}
 	snapshot, err := receiver.Snapshot(ctx)
 	if err != nil {
 		return err
 	}
-	var samples []radarSample
-	for _, flight := range flights {
+	// Recheck the eligible legs after the network request. Keep matching and
+	// writing in one transaction so a concurrent refresh cannot add a conflict.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now = time.Now()
+	rows, err := tx.QueryContext(ctx, `SELECT snapshot `+radarFlightCandidates,
+		now.Add(-15*time.Minute).UnixNano(), now.Add(-30*time.Minute).Format(time.RFC3339))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	matches := make(map[string]radarSample)
+	for rows.Next() {
+		var raw []byte
+		var flight feeds.Flight
+		if err := rows.Scan(&raw); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(raw, &flight); err != nil {
+			return err
+		}
 		var modeS string
 		if registry != nil {
 			modeS = registry.ModeSHex(flight.TailNumber)
 		}
-		if position, ok := snapshot.Match(flight, modeS); ok {
-			samples = append(samples, radarSample{flight, position})
+		position, address, ok := snapshot.Match(flight, modeS)
+		if !ok || flight.ActualTakeoff == nil || position.At.Before(*flight.ActualTakeoff) {
+			continue
+		}
+		if _, exists := matches[address]; exists {
+			// Keep the address marked ambiguous even if more legs match it.
+			matches[address] = radarSample{}
+		} else {
+			matches[address] = radarSample{flight, position}
 		}
 	}
-	return s.recordRadarSamples(ctx, samples)
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	var samples []radarSample
+	for _, sample := range matches {
+		if sample.flight.ID != "" {
+			samples = append(samples, sample)
+		}
+	}
+	if err := recordRadarSamples(ctx, tx, samples); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // RadarPositions returns local receiver observations in chronological order.

@@ -40,7 +40,7 @@ func TestRadarAppendCursorAndCurrentAircraftGuard(t *testing.T) {
 	}
 	first := feeds.Position{At: now.Add(time.Nanosecond), Latitude: 35, Longitude: -92, Source: "operator_readsb"}
 	second := feeds.Position{At: now.Add(2 * time.Nanosecond), Latitude: 35.01, Longitude: -91.99, Source: "operator_readsb"}
-	if err := s.recordRadarSamples(ctx, []radarSample{{flight, first}, {flight, first}, {flight, second}}); err != nil {
+	if err := storeRadarSamples(ctx, s, []radarSample{{flight, first}, {flight, first}, {flight, second}}); err != nil {
 		t.Fatal(err)
 	}
 	details, err := s.DetailsForInstallation(ctx, owner, flight.ID)
@@ -65,7 +65,7 @@ func TestRadarAppendCursorAndCurrentAircraftGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	wrong := feeds.Position{At: now.Add(3 * time.Second), Latitude: 37, Longitude: -89, Source: "operator_readsb"}
-	if err := s.recordRadarSamples(ctx, []radarSample{{flight, wrong}}); err != nil {
+	if err := storeRadarSamples(ctx, s, []radarSample{{flight, wrong}}); err != nil {
 		t.Fatal(err)
 	}
 	positions, err = s.RadarPositions(ctx, owner, flight.ID, nil, 256)
@@ -104,7 +104,7 @@ func TestRadarPageResetsAcrossMissingTailAndAircraftChange(t *testing.T) {
 	}
 	sample := func(current feeds.Flight, position feeds.Position) {
 		t.Helper()
-		if err := s.recordRadarSamples(ctx, []radarSample{{current, position}}); err != nil {
+		if err := storeRadarSamples(ctx, s, []radarSample{{current, position}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -204,6 +204,18 @@ type radarFixtureTransport func(*http.Request) (*http.Response, error)
 
 func (f radarFixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func storeRadarSamples(ctx context.Context, s *Store, samples []radarSample) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := recordRadarSamples(ctx, tx, samples); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func TestRadarCycleSamplesOnlyTrackedMatchingReceiverFlight(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "radar-cycle.db"))
@@ -256,4 +268,100 @@ func TestRadarCycleSamplesOnlyTrackedMatchingReceiverFlight(t *testing.T) {
 	if err != nil || len(positions) != 0 {
 		t.Fatalf("untracked points %#v %v", positions, err)
 	}
+}
+
+func TestRadarCycleSuppressesOverlappingLegs(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(filepath.Join(t.TempDir(), "radar-overlap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	departure, arrival := now.Add(-time.Hour), now.Add(time.Hour)
+	first := feeds.Flight{ID: "first", Number: "UA7", ICAONumber: "UAL7", TailNumber: "N123AA", Status: "airborne", ActualTakeoff: &departure, ScheduledArrival: &arrival, ObservedAt: now}
+	second := first
+	second.ID, second.Number, second.ICAONumber = "second", "UA8", "UAL8"
+	other := first
+	other.ID, other.TailNumber = "other", "N124AA"
+	stale := first
+	stale.ID, stale.ObservedAt = "stale", now.Add(-16*time.Minute)
+	for _, flight := range []feeds.Flight{first, second, other, stale} {
+		if err := s.Observe(ctx, flight, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	token, err := s.CreateInstallation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := s.Installation(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := func(flight feeds.Flight) {
+		t.Helper()
+		if err := s.Track(ctx, owner, flight.ID, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	callsign := ""
+	client := &http.Client{Transport: radarFixtureTransport(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			// The second leg becomes eligible after the preflight check.
+			track(second)
+		}
+		raw := fmt.Sprintf(`{"now":%d,"aircraft":[
+{"hex":"AB1234","r":"N123AA","flight":%q,"type":"adsb_icao","lat":42,"lon":-72,"seen_pos":%d},
+{"hex":"ab1235","r":"N124AA","type":"adsb_icao","lat":42,"lon":-72,"seen_pos":%d}]}`,
+			now.Unix(), callsign, 4-calls, 4-calls)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(raw))}, nil
+	})}
+	receiver, err := feeds.NewADSBReceiver("https://receiver.example.test/aircraft.json", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sample := func() {
+		t.Helper()
+		if err := s.sampleRadar(ctx, receiver, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertPoints := func(flight feeds.Flight, count int) {
+		t.Helper()
+		positions, err := s.RadarPositions(ctx, owner, flight.ID, nil, 256)
+		if err != nil || len(positions) != count {
+			t.Fatalf("%s: got %d points, want %d, err=%v", flight.ID, len(positions), count, err)
+		}
+	}
+	track(stale)
+	sample()
+	if calls != 0 {
+		t.Fatalf("receiver polled without a fresh tracked flight: %d calls", calls)
+	}
+	track(first)
+	track(other)
+	sample()
+	assertPoints(first, 0)
+	assertPoints(second, 0)
+	assertPoints(other, 1)
+
+	callsign = "UAL7"
+	sample()
+	assertPoints(first, 1)
+	assertPoints(second, 0)
+	assertPoints(other, 2)
+
+	callsign = ""
+	second.ActualTakeoff, second.ObservedAt = &now, now.Add(time.Second)
+	if err := s.Observe(ctx, second, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	sample()
+	assertPoints(first, 2)
+	assertPoints(second, 0)
+	assertPoints(other, 3)
+	assertPoints(stale, 0)
 }

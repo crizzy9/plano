@@ -11,7 +11,7 @@ const mapInset = 16;
 const chartWidth = 320;
 const chartHeight = 80;
 const chartInset = 5;
-const metricGap = 5 * 60_000;
+const observationGap = 5 * 60_000;
 
 type XY = readonly [number, number];
 type Metric = 'altitudeFeet' | 'groundSpeedKnots';
@@ -20,25 +20,34 @@ function pathPoint(command: 'M' | 'L', [x, y]: XY) {
   return `${command}${x.toFixed(2)} ${y.toFixed(2)}`;
 }
 
+function observationTime(at: string) {
+  // Plot in milliseconds even when the server sends a nanosecond cursor.
+  return Date.parse(at.replace(/(\.\d{3})\d+/, '$1'));
+}
+
 const land = landRings.map((ring) => ring.map(([latitude, longitude], index) =>
   pathPoint(index === 0 ? 'M' : 'L', [longitude, -latitude])).join('') + 'Z').join('');
 
 function routeGeometry(positions: readonly Position[]) {
-  const coordinates: XY[] = [];
+  const coordinates: { point: XY; startsSegment: boolean }[] = [];
   let previousLongitude: number | undefined;
-  for (const { latitude, longitude } of positions) {
+  let previousTime: number | undefined;
+  for (const { at, latitude, longitude } of positions) {
+    const time = observationTime(at);
+    if (!Number.isFinite(time)) continue;
     if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 ||
       !Number.isFinite(longitude) || Math.abs(longitude) > 180) continue;
     // Keep each point in the world copy nearest the previous one.
     const unwrapped = previousLongitude === undefined ? longitude
       : longitude + 360 * Math.round((previousLongitude - longitude) / 360);
-    coordinates.push([unwrapped, -latitude]);
+    coordinates.push({ point: [unwrapped, -latitude], startsSegment: previousTime === undefined || time - previousTime > observationGap });
     previousLongitude = unwrapped;
+    previousTime = time;
   }
   if (!coordinates.length) return undefined;
 
-  const longitudes = coordinates.map(([longitude]) => longitude);
-  const northings = coordinates.map(([, northing]) => northing);
+  const longitudes = coordinates.map(({ point: [longitude] }) => longitude);
+  const northings = coordinates.map(({ point: [, northing] }) => northing);
   const west = Math.min(...longitudes), east = Math.max(...longitudes);
   const north = Math.min(...northings), south = Math.max(...northings);
   const centerX = (west + east) / 2, centerY = (north + south) / 2;
@@ -49,12 +58,22 @@ function routeGeometry(positions: readonly Position[]) {
   const scaleX = units * longitudeScale;
   const offsetX = mapWidth / 2 - centerX * scaleX;
   const offsetY = mapHeight / 2 - centerY * units;
-  const projected = coordinates.map(([x, y]): XY => [x * scaleX + offsetX, y * units + offsetY]);
+  const projected = coordinates.map(({ point: [x, y], startsSegment }) => ({
+    point: [x * scaleX + offsetX, y * units + offsetY] as XY,
+    startsSegment,
+  }));
+  const dots: XY[] = [];
+  const track = projected.map(({ point, startsSegment }, index) => {
+    if (startsSegment && projected[index + 1]?.startsSegment) dots.push(point);
+    return pathPoint(startsSegment ? 'M' : 'L', point);
+  }).join('');
   const firstWorld = Math.ceil((-offsetX / scaleX - 180) / 360);
   const lastWorld = Math.floor(((mapWidth - offsetX) / scaleX + 180) / 360);
   return {
-    track: projected.map((point, index) => pathPoint(index === 0 ? 'M' : 'L', point)).join(''),
-    latest: projected[projected.length - 1]!,
+    track,
+    dots,
+    hasGaps: projected.some(({ startsSegment }, index) => index > 0 && startsSegment),
+    latest: projected[projected.length - 1]!.point,
     transform: `matrix(${scaleX} 0 0 ${units} ${offsetX} ${offsetY})`,
     worlds: Array.from({ length: lastWorld - firstWorld + 1 }, (_, index) => 360 * (firstWorld + index)),
   };
@@ -71,7 +90,8 @@ export function RadarRouteMap({ positions, label }: { positions: readonly Positi
 
   return (
     <View style={styles.figure}>
-      <View accessible accessibilityRole="image" accessibilityLabel={label}
+      <View accessible accessibilityRole="image"
+        accessibilityLabel={geometry.hasGaps ? `${label}, with gaps between position reports` : label}
         style={[styles.map, { backgroundColor: colors.route }]}>
         <Svg width="100%" height="100%" viewBox={`0 0 ${mapWidth} ${mapHeight}`} accessible={false}>
           <Defs>
@@ -84,10 +104,12 @@ export function RadarRouteMap({ positions, label }: { positions: readonly Positi
             </G>
             <Path d={geometry.track} fill="none" stroke={colors.routeLine} strokeWidth={2.5}
               strokeLinecap="round" strokeLinejoin="round" />
+            {geometry.dots.map(([dotX, dotY], index) => <Circle key={index} cx={dotX} cy={dotY} r={2.5} fill={colors.routeLine} />)}
             <Circle cx={x} cy={y} r={5} fill={colors.routeText} stroke={colors.route} strokeWidth={1.5} />
           </G>
         </Svg>
       </View>
+      {geometry.hasGaps && <Text style={[styles.caption, { color: colors.muted }]}>Gaps between position reports</Text>}
       <Text style={[styles.caption, { color: colors.muted }]}>Map data from Natural Earth</Text>
     </View>
   );
@@ -96,8 +118,7 @@ export function RadarRouteMap({ positions, label }: { positions: readonly Positi
 function metricGeometry(positions: readonly Position[], metric: Metric) {
   const samples: XY[] = [];
   for (const position of positions) {
-    // Charts use milliseconds even when the server sends a nanosecond cursor.
-    const time = Date.parse(position.at.replace(/(\.\d{3})\d+/, '$1'));
+    const time = observationTime(position.at);
     const value = position[metric];
     if (Number.isFinite(time) && typeof value === 'number' && Number.isFinite(value)) samples.push([time, value]);
   }
@@ -112,8 +133,8 @@ function metricGeometry(positions: readonly Position[], metric: Metric) {
     const point: XY = [chartInset + (time - first) / (last - first) * (chartWidth - 2 * chartInset),
       high === low ? chartHeight / 2 : chartHeight - chartInset - (value - low) / (high - low) * (chartHeight - 2 * chartInset)];
     const previous = samples[index - 1], next = samples[index + 1];
-    const startsSegment = !previous || time - previous[0] > metricGap;
-    if (startsSegment && (!next || next[0] - time > metricGap)) dots.push(point);
+    const startsSegment = !previous || time - previous[0] > observationGap;
+    if (startsSegment && (!next || next[0] - time > observationGap)) dots.push(point);
     return pathPoint(startsSegment ? 'M' : 'L', point);
   }).join('');
   return { path, dots, low, high, elapsed: last - first };
