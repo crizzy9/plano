@@ -76,6 +76,7 @@ func (g *AdvisoryGateway) Advisories(ctx context.Context) ([]Advisory, error) {
 		if !normalizeBridgeAdvisory(row, g.source) || seen[row.ID] {
 			return nil, fmt.Errorf("%w: %s gateway returned an invalid advisory at index %d", ErrUnavailable, g.source, i)
 		}
+		applyNOTAMSummary(row)
 		seen[row.ID] = true
 	}
 	return response.Advisories, nil

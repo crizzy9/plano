@@ -51,6 +51,7 @@ func DecodeAdvisoryIngress(input io.Reader) (Advisory, error) {
 	if row.EndsAt != nil {
 		row.EndsAt = new(row.EndsAt.UTC())
 	}
+	applyNOTAMSummary(&row)
 	row.Reason = advisoryPlainText(row.Reason)
 	return row, nil
 }

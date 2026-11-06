@@ -37,6 +37,8 @@ An example bridge body follows. The dates and airport program are illustrative.
 
 Valid sources are `faa_swim` and `eurocontrol_nm`. A bridge can include `rawReason`, `area`, and `delayMinutes` when known. The bridge owns provider access, source vocabulary mapping, revision identity, and any area-to-airport matching. Plano uses the airport and operation direction to determine which tracked flights are affected. An area-only observation does not generate flight alerts without that evidence. A newer observation can revise an existing program. Plano sends one initial alert per source program and tracked flight. Later revisions feed periodic delay estimates, and a replay cannot enqueue the initial alert twice.
 
+Recognized NOTAM text is expanded for passenger context. The original notice is retained, along with runway or taxiway scope, exceptions, and schedules. Plano does not infer delay minutes from raw notices. [FAA movement-area notices](https://www.faa.gov/air_traffic/publications/atpubs/notam_html/chap5_section_1.html) · [FAA international format](https://www.faa.gov/air_traffic/publications/atpubs/notam_html/chap8_section_1.html)
+
 ## Timing
 
 The outbox wakes as soon as its transaction commits. It keeps independent sends in flight and checks for persisted retries every 200 ms. Provider fetch time, APNs or FCM acceptance, delivery to a device, and messaging-only Wi-Fi behavior are separate stages. The fixture tests verify callback-to-dispatch behavior using local provider substitutes. Set `PLANO_LOG_LEVEL=debug` to log provider acceptance time and observation-to-send timing without including device tokens. Live latency and device delivery must be measured with configured providers and signed apps.
