@@ -85,12 +85,13 @@ private struct FlightTimer: View {
   let stale: Bool
 
   var body: some View {
+    let now = Date.now
     if stale {
       Text("Awaiting update").font(.caption)
-    } else if let end = state.countdownEnd, end > Date.now {
+    } else if let end = state.countdownEnd, end > now {
       VStack(spacing: 2) {
-        Text(state.status == "airborne" ? "Until arrival" : "Until departure").font(.caption2)
-        Text(timerInterval: Date.now...end, countsDown: true)
+        Text(state.isInFlight ? "Until arrival" : "Until departure").font(.caption2)
+        Text(timerInterval: now...end, countsDown: true)
           .font(.callout.monospacedDigit().weight(.semibold))
           .multilineTextAlignment(.center)
       }
@@ -104,7 +105,7 @@ private struct FlightProgress: View {
   let state: PlanoActivityAttributes.ContentState
 
   var body: some View {
-    if state.status == "airborne", state.departureEpoch > 0, state.arrivalEpoch > state.departureEpoch {
+    if state.isInFlight, state.departureEpoch > 0, state.arrivalEpoch > state.departureEpoch {
       ProgressView(timerInterval: Date(timeIntervalSince1970: Double(state.departureEpoch))...Date(timeIntervalSince1970: Double(state.arrivalEpoch)),
                    countsDown: false)
         .labelsHidden().tint(.mint)
@@ -117,9 +118,11 @@ private struct FlightProgress: View {
 }
 
 private extension PlanoActivityAttributes.ContentState {
+  var isInFlight: Bool { ["airborne", "diverted"].contains(status) }
+
   var countdownEnd: Date? {
-    if ["landed", "arrived", "cancelled", "diverted"].contains(status) { return nil }
-    let epoch = status == "airborne" ? arrivalEpoch : departureEpoch
+    if ["landed", "arrived", "cancelled"].contains(status) { return nil }
+    let epoch = isInFlight ? arrivalEpoch : departureEpoch
     return epoch > 0 ? Date(timeIntervalSince1970: Double(epoch)) : nil
   }
 

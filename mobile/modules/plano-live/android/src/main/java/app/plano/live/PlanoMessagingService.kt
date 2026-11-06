@@ -23,6 +23,7 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
   }
 
   private fun showAlert(data: Map<String, String>, messageId: String?) {
+    if (!manager.areNotificationsEnabled()) return
     val title = data["title"] ?: return
     val event = data["eventId"] ?: messageId ?: return
     manager.createNotificationChannel(NotificationChannel("flight-alerts", "Flight alerts", NotificationManager.IMPORTANCE_HIGH))
@@ -50,18 +51,19 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     if (observedAt < lastObserved || observedAt == lastObserved && sentAt <= lastSent) return
     last.edit().putLong(flightId, observedAt).putLong("$flightId.sent", sentAt).apply()
     val status = data["status"].orEmpty()
-    if (data["event"] == "end" || status in listOf("arrived", "cancelled", "diverted")) {
+    if (data["event"] == "end" || status in listOf("arrived", "cancelled")) {
       manager.cancel(tag, 0)
       return
     }
 
+    if (!manager.areNotificationsEnabled()) return
     manager.createNotificationChannel(NotificationChannel("flight-progress", "Live flight progress", NotificationManager.IMPORTANCE_LOW))
     val departure = data["departureEpoch"]?.toLongOrNull() ?: 0
     val arrival = data["arrivalEpoch"]?.toLongOrNull() ?: 0
     val now = System.currentTimeMillis()
     val percent = when {
       status == "landed" -> 100
-      status == "airborne" && departure > 0 && arrival > departure ->
+      status in listOf("airborne", "diverted") && departure > 0 && arrival > departure ->
         ((now / 1000.0 - departure) / (arrival - departure) * 100).toInt().coerceIn(0, 99)
       else -> 0
     }
@@ -69,6 +71,7 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
       "boarding" -> "Boarding"
       "taxi_out" -> "Taxiing"
       "airborne" -> "In flight"
+      "diverted" -> "Diverted"
       "landed" -> "Landed"
       else -> "Scheduled"
     }
@@ -81,7 +84,7 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
       data["seat"]?.takeIf { it.isNotBlank() }?.let { "Seat $it" },
     ).joinToString(" · ")
     val route = "${data["origin"].orEmpty()} to ${data["destination"].orEmpty()}"
-    val countdown = (if (status == "airborne") arrival else departure) * 1000
+    val countdown = (if (status in listOf("airborne", "diverted")) arrival else departure) * 1000
     val builder = Notification.Builder(this, "flight-progress")
       .setSmallIcon(R.drawable.plano_flight)
       .setContentTitle(data["flightNumber"]?.let { "$it · $route" } ?: route)

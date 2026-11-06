@@ -6,6 +6,7 @@ import { AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { createAPI, loadServer, removeRetiredDevices } from './src/api';
 import { errorText } from './src/flight';
+import { useFlightAlerts } from './src/alerts';
 import { Home, Search, FlightDetailScreen, ServerSettings, type Routes } from './src/screens';
 import { Tools, ImportFlights, PassportScreen, ConnectionScreen } from './src/tools';
 import { usePalette } from './src/theme';
@@ -24,6 +25,7 @@ export default function App() {
     });
   }, []);
   const api = useMemo(() => createAPI(server ?? ''), [server]);
+  useFlightAlerts(api);
   useEffect(() => {
     if (!server) return;
     const clean = () => { void removeRetiredDevices(server).catch(() => {}); };

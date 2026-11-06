@@ -51,6 +51,14 @@ private struct ActivityRegistration: Codable, Equatable {
   }
 }
 
+private struct DeviceRegistration: Encodable {
+  let platform = "ios"
+  let token: String
+  let kind: String
+  let flightId: String?
+  let requestUpdateToken: Bool?
+}
+
 private enum RegistrationError: LocalizedError {
   case invalidServer, keychain, disabled, notConfigured, inactive
 
@@ -161,7 +169,7 @@ private final class PlanoActivityCoordinator {
     guard let registration else { throw RegistrationError.notConfigured }
     guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw RegistrationError.disabled }
     let state = try JSONDecoder().decode(PlanoActivityAttributes.ContentState.self, from: Data(stateJSON.utf8))
-    guard !["arrived", "cancelled", "diverted"].contains(state.status) else { throw RegistrationError.inactive }
+    guard !["arrived", "cancelled"].contains(state.status) else { throw RegistrationError.inactive }
     if Activity<PlanoActivityAttributes>.activities.contains(where: { $0.attributes.flightId == state.flightId }) { return }
     let activity = try Activity.request(
       attributes: PlanoActivityAttributes(flightId: state.flightId),
@@ -194,10 +202,15 @@ private final class PlanoActivityCoordinator {
   private func register(data: Data, kind: String, flightId: String?, using registration: ActivityRegistration) async {
     guard let base = registration.baseURL else { return }
     let token = data.map { String(format: "%02x", $0) }.joined()
-    var payload = ["platform": "ios", "token": token, "kind": kind]
-    payload["flightId"] = flightId
+    let requestUpdateToken: Bool?
+    if #available(iOS 18.0, *), kind == "live_start" {
+      requestUpdateToken = true
+    } else {
+      requestUpdateToken = nil
+    }
+    let payload = DeviceRegistration(token: token, kind: kind, flightId: flightId, requestUpdateToken: requestUpdateToken)
     guard let body = try? JSONEncoder().encode(payload) else { return }
-    var request = URLRequest(url: base.appendingPathComponent("v1/devices"), timeoutInterval: 8)
+    var request = URLRequest(url: base.appendingPathComponent("v1").appendingPathComponent("devices"), timeoutInterval: 8)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("Bearer \(registration.token)", forHTTPHeaderField: "Authorization")

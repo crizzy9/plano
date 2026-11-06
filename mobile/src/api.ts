@@ -9,8 +9,10 @@ export interface Flight {
   number: string;
   origin: string;
   destination: string;
-  scheduledDeparture: string;
-  scheduledArrival: string;
+  scheduledDeparture?: string;
+  scheduledArrival?: string;
+  originTimeZone?: string;
+  destinationTimeZone?: string;
   estimatedDeparture?: string;
   estimatedArrival?: string;
   actualDeparture?: string;
@@ -21,6 +23,7 @@ export interface Flight {
   arrivalTerminal?: string;
   tailNumber?: string;
   aircraftType?: string;
+  aircraftAge?: number;
   status: FlightStatus;
   baggage?: string;
   observedAt: string;
@@ -132,20 +135,22 @@ export function removeRetiredDevices(activeServer: string) {
 }
 
 export function normalizeServer(value: string) {
-  let url: URL;
-  try {
-    url = new URL(value.trim());
-  } catch {
-    throw new Error('Enter a complete server address, such as https://plano.example.org.');
+  // React Native's URL implementation does not reliably canonicalize origins,
+  // especially IPv6 hosts and explicit default ports.
+  const match = value.trim().match(/^(https?):\/\/(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(?::(\d{1,5}))?\/?$/i);
+  const protocol = match?.[1]?.toLowerCase();
+  const host = match?.[2]?.toLowerCase();
+  const port = match?.[3] ? Number(match[3]) : undefined;
+  if (!protocol || !host || (port !== undefined && (port < 1 || port > 65535))
+    || (!host.startsWith('[') && !host.split('.').every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)))) {
+    throw new Error('Enter the complete server origin without a path, query, or credentials.');
   }
-  if (url.username || url.password || url.search || url.hash || url.pathname !== '/') {
-    throw new Error('Use the server origin without a path, query, or credentials.');
-  }
-  const local = ['127.0.0.1', '[::1]', 'localhost', '10.0.2.2'].includes(url.hostname);
-  if (url.protocol !== 'https:' && !(__DEV__ && local && url.protocol === 'http:')) {
+  const local = ['127.0.0.1', '[::1]', 'localhost', '10.0.2.2'].includes(host);
+  if (protocol !== 'https' && !(__DEV__ && local && protocol === 'http')) {
     throw new Error('Use an HTTPS address for your Plano server.');
   }
-  return url.origin;
+  const customPort = port && port !== (protocol === 'https' ? 443 : 80);
+  return `${protocol}://${host}${customPort ? `:${port}` : ''}`;
 }
 
 export async function loadServer(): Promise<string> {
@@ -158,7 +163,10 @@ export async function loadServer(): Promise<string> {
 
 export async function saveServer(value: string, enrollmentCode?: string, previous?: string): Promise<string> {
   const url = normalizeServer(value);
-  await request(url, '/healthz');
+  const health = await request<{ status?: string; mode?: string }>(url, '/healthz');
+  if (health?.status !== 'ok' || !['demo', 'live'].includes(health.mode ?? '')) {
+    throw new Error('This address did not return a Plano health response.');
+  }
   await createAPI(url).installationToken(enrollmentCode);
   if (Platform.OS === 'web') {
     globalThis.localStorage?.setItem(hostKey, url);
@@ -199,7 +207,7 @@ async function request<T>(server: string, path: string, init: RequestInit = {}):
       throw new APIError(response.status, 'Plano couldn’t complete that request.');
     }
     const raw = await response.text();
-    return (raw && path !== '/healthz' ? JSON.parse(raw) : undefined) as T;
+    return (raw ? JSON.parse(raw) : undefined) as T;
   } catch (error) {
     if (error instanceof APIError) throw error;
     throw new Error('Couldn’t reach Plano. Check the server address and your connection.');
@@ -208,13 +216,17 @@ async function request<T>(server: string, path: string, init: RequestInit = {}):
   }
 }
 
+export function serverStorageKey(scope: string, server: string) {
+  return `plano.${scope}.` + Array.from(server)
+    .map((character) => character.codePointAt(0)?.toString(16).padStart(2, '0')).join('');
+}
+
 const flightPath = (id: string) => `/v1/flights/${encodeURIComponent(id)}`;
 
 export function createAPI(server: string) {
   // The canonical origin is part of the key, so two installations on different
   // hosts can never use each other's bearer token.
-  const tokenKey = 'plano.installation.' + Array.from(server)
-    .map((character) => character.codePointAt(0)?.toString(16).padStart(2, '0')).join('');
+  const tokenKey = serverStorageKey('installation', server);
   let tokenPromise: Promise<string> | undefined;
 
   async function savedToken() {

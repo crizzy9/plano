@@ -29,7 +29,7 @@ export async function stopLiveActivity(flightId: string) {
 export async function startLiveActivity(api: PlanoAPI, flight: Flight, seat: string) {
   if (!native?.start) throw new Error('Live Activities require a native Plano build on iOS.');
   await configureLiveActivities(api);
-  const epoch = (value: string) => Math.floor(Date.parse(value) / 1000) || 0;
+  const epoch = (value: string | undefined) => Math.floor(Date.parse(value ?? '') / 1000) || 0;
   await native.start(JSON.stringify({
     flightId: flight.id, flightNumber: flight.number, status: flight.status, origin: flight.origin,
     destination: flight.destination, departureGate: flight.departureGate, arrivalGate: flight.arrivalGate,

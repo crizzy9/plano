@@ -107,11 +107,11 @@ export function FlightRow({ flight, onPress }: { flight: Flight; onPress: () => 
       }]}>
       <View style={styles.rowLabel}>
         <Text style={[styles.rowRoute, { color: colors.text }]}>{flight.origin} to {flight.destination}</Text>
-        <Body>{flight.number} · {formatDay(flight.scheduledDeparture)}</Body>
+        <Body>{flight.number} · {formatDay(flight.scheduledDeparture, flight.originTimeZone)}</Body>
       </View>
       <View style={styles.rowStatus}>
         <Text style={[styles.label, { color: colors.tint }]}>{flightStatus(flight.status)}</Text>
-        <Body>{formatTime(departure(flight))}</Body>
+        <Body>{formatTime(departure(flight), flight.originTimeZone)}</Body>
       </View>
       <Icon name="arrow" color={colors.muted} size={18} />
     </Pressable>
@@ -122,7 +122,7 @@ export function FlightStrip({ flight }: { flight: Flight }) {
   const { colors } = usePalette();
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    if (flight.status !== 'airborne') return;
+    if (!['airborne', 'diverted'].includes(flight.status)) return;
     const interval = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(interval);
   }, [flight.status]);
@@ -140,19 +140,19 @@ export function FlightStrip({ flight }: { flight: Flight }) {
       <View style={styles.airports}>
         <View style={styles.endpoint}>
           <Text style={[styles.code, { color: colors.routeText }]}>{flight.origin}</Text>
-          <Text style={[styles.time, { color: colors.routeText }]}>{formatTime(departure(flight))}</Text>
+          <Text style={[styles.time, { color: colors.routeText }]}>{formatTime(departure(flight), flight.originTimeZone)}</Text>
           <Text style={[styles.meta, { color: colors.routeMuted }]}>{departureNote(flight)}</Text>
         </View>
         <Icon name="plane" color={colors.routeLine} size={21} />
         <View style={[styles.endpoint, styles.right]}>
           <Text style={[styles.code, { color: colors.routeText }]}>{flight.destination}</Text>
-          <Text style={[styles.time, { color: colors.routeText }]}>{formatTime(arrival(flight))}</Text>
+          <Text style={[styles.time, { color: colors.routeText }]}>{formatTime(arrival(flight), flight.destinationTimeZone)}</Text>
           <Text style={[styles.meta, { color: colors.routeMuted, textAlign: 'right' }]}>{arrivalNote(flight)}</Text>
         </View>
       </View>
       {fraction !== undefined && (
         <View accessibilityRole="progressbar"
-          accessibilityLabel={flight.status === 'airborne' ? 'Estimated flight progress' : 'Flight progress'}
+          accessibilityLabel={['airborne', 'diverted'].includes(flight.status) ? 'Estimated flight progress' : 'Flight progress'}
           accessibilityValue={{ min: 0, max: 100, now: Math.round(fraction * 100) }}
           style={[styles.progress, { backgroundColor: '#547A6E' }]}>
           <View style={[styles.progressFill, { backgroundColor: colors.routeLine, width: `${fraction * 100}%` }]} />

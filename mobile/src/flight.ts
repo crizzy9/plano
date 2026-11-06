@@ -25,10 +25,18 @@ export function arrivalNote(flight: Flight) {
   return flight.actualArrival ? 'Arrived' : flight.estimatedArrival ? 'Estimated arrival' : 'Scheduled arrival';
 }
 
-export function formatTime(value: string | undefined) {
+function dateLabel(value: string | undefined, options: Intl.DateTimeFormatOptions, fallback: string, timeZone?: string) {
   const date = new Date(value ?? '');
-  if (!Number.isFinite(date.getTime())) return 'Time unavailable';
-  return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(date);
+  if (!Number.isFinite(date.getTime())) return fallback;
+  try {
+    return new Intl.DateTimeFormat(undefined, { ...options, timeZone }).format(date);
+  } catch {
+    return new Intl.DateTimeFormat(undefined, options).format(date);
+  }
+}
+
+export function formatTime(value: string | undefined, timeZone?: string) {
+  return dateLabel(value, { hour: 'numeric', minute: '2-digit' }, 'Time unavailable', timeZone);
 }
 
 export function dateKey(date = new Date()) {
@@ -36,11 +44,8 @@ export function dateKey(date = new Date()) {
     String(date.getDate()).padStart(2, '0')].join('-');
 }
 
-export function formatDay(value: string) {
-  const date = new Date(value);
-  return Number.isFinite(date.getTime())
-    ? new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', weekday: 'short' }).format(date)
-    : 'Date unavailable';
+export function formatDay(value: string | undefined, timeZone?: string) {
+  return dateLabel(value, { month: 'short', day: 'numeric', weekday: 'short' }, 'Date unavailable', timeZone);
 }
 
 export function validDate(value: string) {
@@ -50,19 +55,25 @@ export function validDate(value: string) {
 }
 
 export function isFinished(flight: Flight) {
-  return flight.status === 'arrived' || flight.status === 'cancelled' || flight.status === 'diverted';
+  return flight.status === 'arrived' || flight.status === 'cancelled'
+    || (flight.status === 'diverted' && !!flight.actualArrival);
 }
 
 export function nextFlight(flights: Flight[]) {
   return flights.filter((flight) => !isFinished(flight)).sort((a, b) =>
-    Date.parse(departure(a)) - Date.parse(departure(b)));
+    timeForSort(departure(a)) - timeForSort(departure(b)));
+}
+
+function timeForSort(value: string | undefined) {
+  const timestamp = Date.parse(value ?? '');
+  return Number.isFinite(timestamp) ? timestamp : Number.MAX_SAFE_INTEGER;
 }
 
 export function progress(flight: Flight, now = Date.now()) {
-  if (['landed', 'arrived'].includes(flight.status)) return 1;
-  if (flight.status !== 'airborne') return 0;
-  const from = Date.parse(departure(flight));
-  const to = Date.parse(arrival(flight));
+  if (flight.actualArrival || ['landed', 'arrived'].includes(flight.status)) return 1;
+  if (!['airborne', 'diverted'].includes(flight.status)) return 0;
+  const from = Date.parse(departure(flight) ?? '');
+  const to = Date.parse(arrival(flight) ?? '');
   if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return undefined;
   return Math.min(0.99, Math.max(0, (now - from) / (to - from)));
 }

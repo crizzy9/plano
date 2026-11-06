@@ -7,6 +7,7 @@ module.exports = ({ config }) => ({
   userInterfaceStyle: 'automatic',
   ios: {
     bundleIdentifier: process.env.PLANO_IOS_BUNDLE_ID || 'app.plano.mobile',
+    appleTeamId: process.env.PLANO_IOS_TEAM_ID || process.env.PLANO_APNS_TEAM_ID || undefined,
     infoPlist: {
       NSSupportsLiveActivities: true,
       NSAppTransportSecurity: { NSAllowsLocalNetworking: true },

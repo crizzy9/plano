@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { Alert, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
+import { Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { saveServer, type Flight, type PlanoAPI } from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
 import { usePalette } from './theme';
-import { canStartLiveActivity, clearLiveActivities, configureLiveActivities, startLiveActivity, stopLiveActivity } from './live';
+import { changeFlightAlerts, flightAlertsEnabled } from './alerts';
+import { canStartLiveActivity, clearLiveActivities, startLiveActivity, stopLiveActivity } from './live';
 import { Action, Body, Chart, ErrorMessage, FlightRow, FlightStrip, Heading, Input, Loading, RoutePlot, layout } from './ui';
 
 export type Routes = {
@@ -81,7 +82,7 @@ export function Home({ api, navigation }: APIProps<'Home'>) {
   const upcoming = nextFlight(value ?? []);
   const current = upcoming[0];
   const previous = (value ?? []).filter(isFinished).sort((a, b) =>
-    Date.parse(b.scheduledDeparture) - Date.parse(a.scheduledDeparture));
+    Date.parse(b.scheduledDeparture ?? b.observedAt) - Date.parse(a.scheduledDeparture ?? a.observedAt));
   const open = (flight: Flight) => navigation.navigate('Flight', { id: flight.id, number: flight.number, initial: flight });
   return (
     <Page refresh={api.server ? refresh : undefined} refreshing={pending && !!value}>
@@ -238,7 +239,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
       {flight && (
         <>
           <FlightStrip flight={flight} />
-          <Body>{formatDay(flight.scheduledDeparture)} · Times shown in your device’s time zone</Body>
+          <Body>{formatDay(flight.scheduledDeparture, flight.originTimeZone)} · Airport local times when available</Body>
           <Body>Last flight update {formatTime(flight.observedAt)}</Body>
           {value && !value.tracked && !isFinished(flight) && (
             <Input label="Seat (optional)" value={seat} onChangeText={setSeat} placeholder="12A"
@@ -261,12 +262,13 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
               disabled={!!operation && operation !== 'share'} icon="share" secondary />}
           </View>
           <ErrorMessage message={actionError} />
-          {(flight.aircraftType || flight.tailNumber || flight.baggage) && (
+          {(flight.aircraftType || flight.aircraftAge != null || flight.tailNumber || flight.baggage) && (
             <View style={layout.section}>
               <Heading>Flight details</Heading>
               <View style={layout.fieldRow}>
                 {flight.aircraftType && <Body>Aircraft {flight.aircraftType}</Body>}
                 {flight.tailNumber && <Body>Tail {flight.tailNumber}</Body>}
+                {flight.aircraftAge != null && <Body>Aircraft age {flight.aircraftAge} years</Body>}
                 {flight.baggage && <Body>Baggage carousel {flight.baggage}</Body>}
               </View>
             </View>
@@ -275,7 +277,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
             <View style={layout.section}>
               <Heading>Delay outlook</Heading>
               {!!prediction.delayMinutes && <Body>Estimated departure delay of {prediction.delayMinutes} min.</Body>}
-              {prediction.departure && <Body>Predicted departure at {formatTime(prediction.departure)}.</Body>}
+              {prediction.departure && <Body>Predicted departure at {formatTime(prediction.departure, flight.originTimeZone)}.</Body>}
               {prediction.reasons?.map((reason, index) => <Body key={index}>{reason}</Body>)}
               <Body>Plano estimate. Check your airline for official times.</Body>
             </View>
@@ -368,30 +370,19 @@ function AlertsSettings({ api }: { api: PlanoAPI }) {
   const [pending, setPending] = useState(false);
   const [issue, setIssue] = useState<string>();
   const [enabled, setEnabled] = useState(false);
-  async function enable() {
+  useEffect(() => {
+    flightAlertsEnabled(api).then(setEnabled, (cause: unknown) => setIssue(errorText(cause)));
+  }, [api]);
+
+  async function toggle() {
     setPending(true);
     setIssue(undefined);
     try {
-      if (Platform.OS !== 'ios' && Platform.OS !== 'android') return;
-      const notifications = await import('expo-notifications');
-      if (Platform.OS === 'android') {
-        await notifications.setNotificationChannelAsync('flight-alerts', {
-          name: 'Flight alerts', importance: notifications.AndroidImportance.HIGH,
-        });
-      }
-      const permission = await notifications.requestPermissionsAsync();
-      if (!permission.granted) {
-        Alert.alert('Flight alerts are off', 'Allow notifications for Plano in your device settings.');
-        return;
-      }
-      const device = await notifications.getDevicePushTokenAsync();
-      if (typeof device.data !== 'string' || !device.data) throw new Error('The device didn’t return a push token.');
-      await api.registerDevice({ platform: Platform.OS, token: device.data, kind: 'alert' });
-      await configureLiveActivities(api);
-      setEnabled(true);
+      await changeFlightAlerts(api, !enabled);
     } catch (cause) {
       setIssue(errorText(cause));
     } finally {
+      setEnabled(await flightAlertsEnabled(api).catch(() => enabled));
       setPending(false);
     }
   }
@@ -399,9 +390,9 @@ function AlertsSettings({ api }: { api: PlanoAPI }) {
     <View style={layout.section}>
       <Heading>Flight alerts</Heading>
       <Body>Get gate, delay, and arrival updates from this server.</Body>
-      <Action icon="bell" secondary label={enabled ? 'Refresh alert registration' : 'Enable flight alerts'}
-        onPress={enable} busy={pending} />
-      {enabled && <Body>Flight alerts are registered with this server.</Body>}
+      <Action icon="bell" secondary label={enabled ? 'Turn off flight alerts' : 'Enable flight alerts'}
+        onPress={toggle} busy={pending} />
+      {enabled && <Body>Flight alerts are enabled for this server.</Body>}
       <ErrorMessage message={issue} />
     </View>
   );

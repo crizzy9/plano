@@ -50,4 +50,8 @@ AeroAPI search / active-flight polling    FAA NAS / operator advisory gateways
 | Prediction | Versioned training observations, holdout/backtest metrics, and validation of turnaround, weather, ATC and NOTAM attribution. The current estimate is rule-based. |
 | Connections and sync | Verified airport-specific transfer/navigation and gate predictions, calendar background refresh, inbound email transport, TripIt account integration and authorized PNR lookup. |
 | Passport and Friends | Complete history and coordinate coverage, shareable card verification, and a multi-user friend graph if required beyond per-flight links. |
-| Self-host deployment | Container start with mounted storage, restart persistence, phone-to-server TLS, secret mounts, recovery and operation under expected load. |
+| Self-host deployment | Phone-to-server TLS, live credential mounts, restore testing and operation under expected load. |
+
+## Verified self-host paths
+
+The Go test suite exercises installation isolation, outbox persistence and retries, provider wire contracts, and the aviation fixture adapters. A standalone localhost smoke test verified the health endpoint, flight lookup, tracking and database persistence after restart. A rootless Podman smoke verified the image as UID 10001 with a read-only root and mounted SQLite storage. Two successive containers served the same installation token and tracked flight. Compose configuration also validated with the explicit health check and optional credential mounts.
