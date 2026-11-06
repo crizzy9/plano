@@ -90,23 +90,34 @@ func main() {
 }
 
 func runAdvisoryRelay(ctx context.Context, input io.Reader, args []string) (int, error) {
+	convert, err := advisoryRelayConverter(args)
+	if err != nil {
+		return relayConfigError, err
+	}
+	return forwardAdvisoryFromEnv(ctx, input, convert)
+}
+
+func advisoryRelayConverter(args []string) (func(io.Reader) ([][]byte, error), error) {
 	if len(args) == 0 {
-		return forwardAdvisoryFromEnv(ctx, input, nil)
+		return nil, nil
+	}
+	if len(args) == 1 && args[0] == "tfms-flow" {
+		return feeds.TFMSAdvisoryBodies, nil
 	}
 	if len(args) < 3 || len(args) > 4 || args[0] != "aixm-notam" || args[1] != feeds.FAASWIM && args[1] != feeds.Eurocontrol {
-		return relayConfigError, errors.New("usage: plano forward-advisory [aixm-notam <faa_swim|eurocontrol_nm> <publisher> [issued-at]]")
+		return nil, errors.New("usage: plano forward-advisory [tfms-flow | aixm-notam <faa_swim|eurocontrol_nm> <publisher> [issued-at]]")
 	}
 	var issued time.Time
 	if len(args) == 4 {
 		var err error
 		issued, err = time.Parse(time.RFC3339Nano, args[3])
 		if err != nil || issued.IsZero() {
-			return relayConfigError, errors.New("issued-at must be the RFC 3339 publication timestamp")
+			return nil, errors.New("issued-at must be the RFC 3339 publication timestamp")
 		}
 	}
-	return forwardAdvisoryFromEnv(ctx, input, func(body io.Reader) ([][]byte, error) {
+	return func(body io.Reader) ([][]byte, error) {
 		return feeds.AIXMAdvisoryBodies(body, args[1], args[2], issued, time.Now())
-	})
+	}, nil
 }
 
 func run(logger *slog.Logger, checkOnly bool) error {

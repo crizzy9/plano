@@ -109,7 +109,8 @@ func (s *Store) FlightNotices(ctx context.Context, flight feeds.Flight, now time
 		return notices, nil
 	}
 	departure, arrival := upcomingNoticeOperations(flight)
-	if departure == nil && arrival == nil {
+	groundStopDeparture := contextualGroundStopDeparture(flight)
+	if departure == nil && arrival == nil && groundStopDeparture == nil {
 		return notices, nil
 	}
 	rows, err := currentFlightAdvisoryRows(ctx, s.db, flight, now)
@@ -145,14 +146,18 @@ func (s *Store) FlightNotices(ctx context.Context, flight feeds.Flight, now time
 			{"departure", flight.Origin, flight.OriginICAO, departure},
 			{"arrival", flight.Destination, flight.DestinationICAO, arrival},
 		} {
-			if operation.at == nil || a.Airport != operation.code && a.Airport != operation.icao ||
+			if a.Airport != operation.code && a.Airport != operation.icao ||
 				decoded.Airport != "" && decoded.Airport != operation.code && decoded.Airport != operation.icao ||
 				a.Direction != "" && a.Direction != operation.name {
 				continue
 			}
 			at := operation.at
 			if operation.name == "arrival" && a.Kind == "ground_stop" {
-				at = departure
+				if a.AirportContextOnly {
+					at = groundStopDeparture
+				} else if at != nil {
+					at = departure
+				}
 			}
 			if at == nil {
 				continue

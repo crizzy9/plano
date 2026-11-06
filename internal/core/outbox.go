@@ -793,10 +793,14 @@ CASE WHEN ? THEN (SELECT snapshot FROM flights WHERE id=o.flight_id) END`+leased
 			// to the timeline event that supplied the original operation.
 			var current feeds.Flight
 			if err := json.Unmarshal(advisoryFlight, &current); err != nil {
-				logger.Error("could not validate closure push operation", "job", job.id, "error", err)
+				logger.Error("could not validate advisory push operation", "job", job.id, "error", err)
 				return
 			}
-			advisory := feeds.Advisory{Kind: "airport_closure", Airport: window.Airport, Direction: window.Direction}
+			advisory := feeds.Advisory{Kind: window.Kind, Airport: window.Airport, Direction: window.Direction, AirportContextOnly: window.Kind != ""}
+			if advisory.Kind == "" {
+				// Earlier outbox windows described recurring airport closures.
+				advisory.Kind = "airport_closure"
+			}
 			target, _, ok := advisoryAlertOperation(current, advisory, time.Now())
 			if !ok || target.Before(window.StartsAt) || !target.Before(window.EndsAt) {
 				s.removeObsoletePush(ctx, logger, job)

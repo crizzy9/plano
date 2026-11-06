@@ -167,6 +167,85 @@ func TestForwardAdvisoryDefersFutureEffectiveConversion(t *testing.T) {
 	}
 }
 
+func TestForwardAdvisoryTFMSFlowSignsAirportProgramAndIgnoresOtherMessages(t *testing.T) {
+	convert, err := advisoryRelayConverter([]string{"tfms-flow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, err := runAdvisoryRelay(t.Context(), strings.NewReader(""), []string{"tfms-flow", "unexpected"}); status != relayConfigError || err == nil {
+		t.Fatalf("extra operand returned exit %d, error %v", status, err)
+	}
+	observed := time.Now().UTC().Truncate(time.Second)
+	start, end := observed.Add(time.Minute), observed.Add(time.Hour)
+	document := func(kind, payload string) *strings.Reader {
+		return strings.NewReader(fmt.Sprintf(`
+<ds:tfmDataService xmlns:ds="urn:us:gov:dot:faa:atm:tfm:tfmdataservice"
+  xmlns:fi="urn:us:gov:dot:faa:atm:tfm:flowinformation"
+  xmlns:fcm="urn:us:gov:dot:faa:atm:tfm:ficommonmessages"
+  xmlns:fce="urn:us:gov:dot:faa:atm:tfm:ficommondatatypes">
+  <ds:fiOutput>
+    <fi:fiMessage msgType="%s" sourceFacility="TFMS" sourceTimeStamp="%s" sensitivity="A" destinationCodes="ALL">
+      %s
+    </fi:fiMessage>
+  </ds:fiOutput>
+</ds:tfmDataService>`, kind, observed.Format(time.RFC3339), payload))
+	}
+	program := fmt.Sprintf(`<fi:gsAdvisory>
+  <fcm:updateTime>%s</fcm:updateTime><fcm:tmiStatus>ACTUAL</fcm:tmiStatus>
+  <fcm:airportId>ORD</fcm:airportId><fcm:center>ZAU</fcm:center>
+  <fcm:pgmExpTime>%s</fcm:pgmExpTime><fcm:elementType>APT</fcm:elementType>
+  <fcm:groundStopPeriod><fce:startTime>%s</fce:startTime><fce:endTime>%s</fce:endTime></fcm:groundStopPeriod>
+  <fcm:impactingCondition>EQUIPMENT</fcm:impactingCondition>
+</fi:gsAdvisory>`, observed.Format(time.RFC3339), end.Format(time.RFC3339), start.Format(time.RFC3339), end.Format(time.RFC3339))
+	key := bytes.Repeat([]byte("k"), 32)
+	requests := 0
+	transport := relayTransport(func(r *http.Request) (*http.Response, error) {
+		requests++
+		defer r.Body.Close()
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err := feeds.DecodeAdvisoryIngress(bytes.NewReader(raw))
+		if err != nil || a.ID != "tfms/gs/ORD" || a.Source != feeds.FAASWIM || a.Airport != "ORD" ||
+			a.Kind != "ground_stop" || a.Direction != "arrival" || !a.AirportContextOnly || a.DelayMinutes != nil ||
+			!a.ObservedAt.Equal(observed) || a.StartsAt == nil || !a.StartsAt.Equal(start) || a.EndsAt == nil || !a.EndsAt.Equal(end) {
+			t.Fatalf("unexpected normalized program %+v, error %v", a, err)
+		}
+		stamp := r.Header.Get("X-Plano-Timestamp")
+		mac := hmac.New(sha256.New, key)
+		mac.Write([]byte(stamp + "."))
+		mac.Write(raw)
+		if r.Method != http.MethodPost || r.URL.String() != advisoryRelayFixtureURL ||
+			r.Header.Get("Content-Type") != "application/json" || stamp == "" ||
+			r.Header.Get("X-Plano-Signature") != hex.EncodeToString(mac.Sum(nil)) {
+			t.Fatal("converted advisory did not reach the signed relay endpoint")
+		}
+		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}, nil
+	})
+	if status, err := forwardAdvisory(t.Context(), document("GS", program), advisoryRelayFixtureURL, key, convert, transport); status != 0 || err != nil || requests != 1 {
+		t.Fatalf("ground stop returned exit %d, error %v and %d requests", status, err, requests)
+	}
+	other := document("GADV", "<fi:generalAdvisory/>")
+	if status, err := forwardAdvisory(t.Context(), other, advisoryRelayFixtureURL, key, convert, transport); status != 0 || err != nil || requests != 1 {
+		t.Fatalf("unrelated message returned exit %d, error %v and %d total requests", status, err, requests)
+	}
+}
+
+func TestForwardAdvisoryRejectsIgnoredConversionWithBody(t *testing.T) {
+	convert := func(io.Reader) ([][]byte, error) {
+		return [][]byte{relayAdvisoryBody("unexpected", time.Now())}, feeds.ErrAdvisoryIgnored
+	}
+	transport := relayTransport(func(*http.Request) (*http.Response, error) {
+		t.Fatal("ignored conversion with an envelope reached the transport")
+		return nil, nil
+	})
+	status, err := forwardAdvisory(t.Context(), nil, advisoryRelayFixtureURL, bytes.Repeat([]byte("k"), 32), convert, transport)
+	if status != relayDataError || err == nil {
+		t.Fatalf("ignored conversion with an envelope returned exit %d, error %v", status, err)
+	}
+}
+
 func TestForwardAdvisoryRequiresFileCredential(t *testing.T) {
 	t.Setenv("PLANO_ADVISORY_RELAY_URL", advisoryRelayFixtureURL)
 	t.Setenv("PLANO_ADVISORY_INGRESS_KEY_FILE", "")

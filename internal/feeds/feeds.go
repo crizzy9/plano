@@ -89,4 +89,6 @@ type Advisory struct {
 	Area         string     `json:"area,omitempty"`
 	Direction    string     `json:"direction,omitempty"`
 	RawReason    string     `json:"rawReason,omitempty"`
+	// AirportContextOnly identifies a reported program without flight membership.
+	AirportContextOnly bool `json:"airportContextOnly,omitempty"`
 }

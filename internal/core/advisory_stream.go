@@ -71,7 +71,10 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, 
 		}
 		window = &push.AdvisoryWindow{Airport: a.Airport, Direction: direction, StartsAt: *a.StartsAt, EndsAt: *a.EndsAt}
 		revision += "\x00" + direction + "\x00" + a.StartsAt.UTC().Format(time.RFC3339)
-	} else if body == "" {
+	} else if a.AirportContextOnly && (a.Kind == "ground_stop" || a.Kind == "ground_delay") && a.StartsAt != nil && a.EndsAt != nil {
+		window = &push.AdvisoryWindow{Airport: a.Airport, Direction: a.Direction, StartsAt: *a.StartsAt, EndsAt: *a.EndsAt, Kind: a.Kind}
+	}
+	if body == "" {
 		body = flight.Number
 	}
 	return Event{ID: hash(revision), Kind: a.Kind,
@@ -81,20 +84,41 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, 
 
 func advisoryAlertOperation(flight feeds.Flight, a feeds.Advisory, at time.Time) (time.Time, bool, bool) {
 	target := advisoryTime(flight, a)
+	destinationProgram := a.Direction != "departure" && (a.Airport == flight.Destination || a.Airport == flight.DestinationICAO)
+	contextualStop := a.AirportContextOnly && a.Kind == "ground_stop" && destinationProgram
+	if contextualStop {
+		target = contextualGroundStopDeparture(flight)
+	}
 	if target == nil || target.Before(at.Add(-time.Hour)) {
 		return time.Time{}, false, false
 	}
-	arrival := a.Kind != "ground_stop" && a.Direction != "departure" &&
-		(a.Airport == flight.Destination || a.Airport == flight.DestinationICAO)
-	closureOperationEnded := a.Kind == "airport_closure" && (flight.ActualLanding != nil || flight.ActualArrival != nil ||
+	arrival := a.Kind != "ground_stop" && destinationProgram
+	landingEndsOperation := a.Kind == "airport_closure" || a.AirportContextOnly && a.Kind == "ground_delay" && arrival
+	operationEnded := landingEndsOperation && (flight.ActualLanding != nil || flight.ActualArrival != nil ||
 		flight.Status == "landed" || flight.Status == "diverted")
-	if closureOperationEnded || arrival && (flight.ActualArrival != nil || finished(flight)) || !arrival && !flightBeforeDeparture(flight) {
+	if operationEnded || arrival && (flight.ActualArrival != nil || finished(flight)) || !arrival && !contextualStop && !flightBeforeDeparture(flight) {
 		return time.Time{}, false, false
 	}
 	if target.Before(at) {
 		return at, arrival, true
 	}
 	return *target, arrival, true
+}
+
+// A ground stop can still apply after the aircraft pushes back and starts taxiing.
+func contextualGroundStopDeparture(flight feeds.Flight) *time.Time {
+	if flight.ActualTakeoff != nil || flight.ActualLanding != nil || flight.ActualArrival != nil || finished(flight) {
+		return nil
+	}
+	switch flight.Status {
+	case "airborne", "landed", "diverted":
+		return nil
+	case "taxi_out":
+		if !flight.ObservedAt.IsZero() {
+			return &flight.ObservedAt
+		}
+	}
+	return effectiveDeparture(flight)
 }
 
 // PublishAdvisory commits the normalized program and affected flight alert

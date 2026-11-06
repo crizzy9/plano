@@ -120,6 +120,9 @@ func delayInputs(flight feeds.Flight, rotation []feeds.Flight, advisories []feed
 		}
 	}
 	for _, a := range advisories {
+		if a.AirportContextOnly {
+			continue
+		}
 		// NOTAM text is airport context. A verified full closure constrains
 		// the forecast separately, without changing trained model features.
 		switch a.Kind {
@@ -194,7 +197,7 @@ func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now
 	}
 	var closures []closureWindow
 	for _, a := range advisories {
-		if a.Kind != "airport_closure" || a.Direction != "" && a.Direction != "departure" ||
+		if a.AirportContextOnly || a.Kind != "airport_closure" || a.Direction != "" && a.Direction != "departure" ||
 			a.Airport == "" || a.Airport != flight.Origin && a.Airport != flight.OriginICAO {
 			continue
 		}

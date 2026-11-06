@@ -9,8 +9,86 @@ import (
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
+	"github.com/crizzy9/plano/internal/predict"
 	"github.com/crizzy9/plano/internal/push"
 )
+
+func TestAirportProgramContextAlertsWithoutAttributingAFlightDelay(t *testing.T) {
+	store, owner, id := dispatcherFixture(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	flight := noticeFlight(now)
+	flight.ID, flight.ObservedAt = id, now
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Track(ctx, owner, id, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Register(ctx, owner, Device{Platform: "android", Kind: "alert", Token: "program-fixture"}, now); err != nil {
+		t.Fatal(err)
+	}
+	program := feeds.Advisory{
+		ID: "tfms/gs/EWR", Source: feeds.FAASWIM, Airport: "EWR", Kind: "ground_stop", Direction: "arrival",
+		Reason:   "FAA reports a ground stop for selected flights due to thunderstorms. Check with your airline.",
+		StartsAt: &now, EndsAt: new(now.Add(time.Hour)), ObservedAt: now, AirportContextOnly: true,
+	}
+	publishDispatchAdvisory(t, store, program, now)
+	publishDispatchAdvisory(t, store, program, now)
+	notices, err := store.FlightNotices(ctx, flight, now)
+	if err != nil || len(notices) != 1 || notices[0].Operation != "arrival" || notices[0].Summary != program.Reason {
+		t.Fatalf("airport program notices = %+v, error = %v", notices, err)
+	}
+	taxi := flight
+	taxi.Status, taxi.ActualDeparture, taxi.ScheduledArrival = "taxi_out", new(now.Add(-90*time.Minute)), nil
+	if _, ok := advisoryEvent(taxi, program, now); !ok {
+		t.Fatal("ground stop was suppressed during taxi-out")
+	}
+	if notices, err := store.FlightNotices(ctx, taxi, now); err != nil || len(notices) != 1 {
+		t.Fatalf("taxi-out program notices = %+v, error = %v", notices, err)
+	}
+	taxi.Status = "airborne"
+	if _, ok := advisoryEvent(taxi, program, now); ok {
+		t.Fatal("ground stop alert stayed eligible after takeoff")
+	}
+	if features, ok := ExtractDelayFeatures(flight, nil, []feeds.Advisory{program}, now); !ok || features != (predict.Features{}) {
+		t.Fatalf("airport context entered delay model inputs: %+v, %t", features, ok)
+	}
+	if prediction := Predict(flight, nil, []feeds.Advisory{program}, now); prediction != nil {
+		t.Fatalf("airport context generated a flight forecast: %+v", prediction)
+	}
+	jobs, err := store.claim(ctx, time.Now(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := 0
+	for _, job := range jobs {
+		store.deliver(ctx, pushFunc(func(_ context.Context, _ push.Target, msg push.Message) error {
+			if msg.Title == "EWR · ground stop" && msg.Body == program.Reason {
+				sent++
+			}
+			return nil
+		}), slog.New(slog.DiscardHandler), job)
+	}
+	if sent != 1 {
+		t.Fatalf("airport program sent %d alerts, want 1", sent)
+	}
+	program.ObservedAt = time.Now().UTC()
+	program.EndsAt = new(now.Add(90 * time.Minute))
+	publishDispatchAdvisory(t, store, program, program.ObservedAt)
+	jobs, err = store.claim(ctx, time.Now(), 10)
+	if err != nil || len(jobs) != 1 || jobs[0].message.AdvisoryWindow == nil {
+		t.Fatalf("revised program claims = %+v, error = %v", jobs, err)
+	}
+	flight.ScheduledDeparture, flight.ObservedAt = new(now.Add(2*time.Hour)), time.Now().UTC()
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	store.deliver(ctx, pushFunc(func(context.Context, push.Target, push.Message) error {
+		t.Fatal("ground stop reached transport after the flight moved outside the hold window")
+		return nil
+	}), slog.New(slog.DiscardHandler), jobs[0])
+}
 
 func TestAdvisoryEventChecksPublishedNOTAMWindow(t *testing.T) {
 	now := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)

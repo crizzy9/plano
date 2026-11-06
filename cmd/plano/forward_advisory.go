@@ -54,6 +54,12 @@ func forwardAdvisory(ctx context.Context, input io.Reader, endpoint string, key 
 		if errors.Is(err, feeds.ErrUnavailable) {
 			return relayTempFailure, errors.New("could not read advisory from standard input")
 		}
+		if errors.Is(err, feeds.ErrAdvisoryIgnored) {
+			if len(bodies) == 0 {
+				return 0, nil
+			}
+			return relayDataError, errors.New("ignored advisory conversion yielded envelopes")
+		}
 		if err != nil && !deferred {
 			return relayDataError, errors.New("could not convert advisory from standard input")
 		}

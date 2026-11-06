@@ -61,6 +61,7 @@ type AdvisoryWindow struct {
 	Direction string
 	StartsAt  time.Time
 	EndsAt    time.Time
+	Kind      string `json:",omitempty"`
 }
 
 type Message struct {
