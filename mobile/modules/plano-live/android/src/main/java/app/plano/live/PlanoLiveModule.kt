@@ -24,6 +24,16 @@ class PlanoLiveModule : Module() {
       appContext.reactContext?.let { AndroidPushSession.disable(it, origin, expected, suppress) }
     }
 
+    AsyncFunction("androidWidgetDetailsEnabled") {
+      val context = checkNotNull(appContext.reactContext)
+      PlanoFlightWidget.detailsEnabled(context)
+    }
+
+    AsyncFunction("setAndroidWidgetDetailsEnabled") { enabled: Boolean ->
+      val context = checkNotNull(appContext.reactContext)
+      AndroidPushSession.setWidgetDetailsEnabled(context, enabled)
+    }
+
     AsyncFunction("stop") { flightId: String ->
       appContext.reactContext?.let { AndroidPushSession.stop(it, flightId) }
       Unit

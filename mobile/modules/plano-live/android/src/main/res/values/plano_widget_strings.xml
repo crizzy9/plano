@@ -7,6 +7,11 @@
   <string name="plano_widget_progress">Estimated flight progress</string>
   <string name="plano_widget_until_arrival">Until arrival</string>
   <string name="plano_widget_until_departure">Until departure</string>
+  <string name="plano_widget_departure_details">Dep. %1$s</string>
+  <string name="plano_widget_arrival_details">Arr. %1$s</string>
+  <string name="plano_widget_gate">gate %1$s</string>
+  <string name="plano_widget_terminal">terminal %1$s</string>
+  <string name="plano_widget_seat">Seat %1$s</string>
   <string name="plano_widget_scheduled">Scheduled</string>
   <string name="plano_widget_boarding">Boarding</string>
   <string name="plano_widget_taxiing">Taxiing</string>

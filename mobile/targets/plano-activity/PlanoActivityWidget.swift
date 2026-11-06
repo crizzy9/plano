@@ -23,10 +23,8 @@ struct PlanoActivityWidget: Widget {
           AirportGate(code: context.state.destination, gate: context.state.arrivalGate,
                       terminal: context.state.arrivalTerminal)
         }
-        FlightProgress(state: context.state)
-        if let seat = context.state.seat, !seat.isEmpty {
-          Text("Seat \(seat)").font(.caption)
-        }
+        FlightProgress(state: context.state, stale: context.isStale)
+        FlightSeat(seat: context.state.seat)
       }
       .padding(16)
       .activityBackgroundTint(Color(red: 0.07, green: 0.20, blue: 0.17))
@@ -46,18 +44,78 @@ struct PlanoActivityWidget: Widget {
           FlightTimer(state: context.state, stale: context.isStale)
         }
         DynamicIslandExpandedRegion(.bottom) {
-          FlightProgress(state: context.state)
+          VStack(spacing: 6) {
+            HStack {
+              Text(context.state.statusLabel).font(.caption.weight(.medium))
+              Spacer()
+              FlightSeat(seat: context.state.seat)
+            }
+            FlightProgress(state: context.state, stale: context.isStale)
+          }
         }
       } compactLeading: {
         Image(systemName: "airplane").foregroundStyle(.mint)
           .accessibilityLabel("Plano flight")
       } compactTrailing: {
-        Text(context.state.destination).font(.caption.weight(.semibold))
+        CompactFlightTiming(state: context.state, stale: context.isStale)
       } minimal: {
-        Image(systemName: "airplane").foregroundStyle(.mint)
-          .accessibilityLabel("Plano flight")
+        FlightPhaseIcon(state: context.state, stale: context.isStale)
       }
       .keylineTint(.mint)
+    }
+  }
+}
+
+private struct CompactFlightTiming: View {
+  let state: PlanoActivityAttributes.ContentState
+  let stale: Bool
+
+  var body: some View {
+    let now = Date.now
+    Group {
+      if stale {
+        FlightPhaseIcon(state: state, stale: true)
+      } else if let end = state.countdownEnd, end > now {
+        let countdown = Text(timerInterval: now...end, countsDown: true)
+        ViewThatFits(in: .horizontal) {
+          countdown
+            .monospacedDigit()
+            .lineLimit(1)
+            .accessibilityLabel(Text("\(Text(state.countdownLabel)) \(countdown)"))
+          FlightPhaseIcon(state: state, stale: false)
+        }
+      } else {
+        let airport = state.isArrivalPhase ? state.destination : state.origin
+        if airport.isEmpty {
+          FlightPhaseIcon(state: state, stale: false)
+        } else {
+          Text(airport).lineLimit(1).minimumScaleFactor(0.8)
+        }
+      }
+    }
+    .font(.caption2.weight(.semibold))
+    .multilineTextAlignment(.trailing)
+    .frame(maxWidth: 56, alignment: .trailing)
+  }
+}
+
+private struct FlightPhaseIcon: View {
+  let state: PlanoActivityAttributes.ContentState
+  let stale: Bool
+
+  var body: some View {
+    Image(systemName: stale ? "clock" : state.phaseIcon)
+      .foregroundStyle(.mint)
+      .accessibilityLabel(stale ? Text("Plano flight awaiting update") : Text("Plano flight, \(state.statusLabel)"))
+  }
+}
+
+private struct FlightSeat: View {
+  let seat: String?
+
+  var body: some View {
+    if let seat, !seat.isEmpty {
+      Text("Seat \(seat)").font(.caption).privacySensitive()
     }
   }
 }
@@ -90,7 +148,7 @@ private struct FlightTimer: View {
       Text("Awaiting update").font(.caption)
     } else if let end = state.countdownEnd, end > now {
       VStack(spacing: 2) {
-        Text(state.isInFlight ? "Until arrival" : "Until departure").font(.caption2)
+        Text(state.countdownLabel).font(.caption2)
         Text(timerInterval: now...end, countsDown: true)
           .font(.callout.monospacedDigit().weight(.semibold))
           .multilineTextAlignment(.center)
@@ -103,22 +161,36 @@ private struct FlightTimer: View {
 
 private struct FlightProgress: View {
   let state: PlanoActivityAttributes.ContentState
+  let stale: Bool
 
   var body: some View {
-    if state.isInFlight, state.departureEpoch > 0, state.arrivalEpoch > state.departureEpoch {
-      ProgressView(timerInterval: Date(timeIntervalSince1970: Double(state.departureEpoch))...Date(timeIntervalSince1970: Double(state.arrivalEpoch)),
-                   countsDown: false)
-        .labelsHidden().tint(.mint)
-        .accessibilityLabel("Estimated flight progress")
-    } else {
-      ProgressView(value: ["landed", "arrived"].contains(state.status) ? 1 : 0)
-        .tint(.mint).accessibilityLabel("Flight progress")
+    if !stale {
+      if state.isInFlight, state.departureEpoch > 0, state.arrivalEpoch > state.departureEpoch {
+        ProgressView(timerInterval: Date(timeIntervalSince1970: Double(state.departureEpoch))...Date(timeIntervalSince1970: Double(state.arrivalEpoch)),
+                     countsDown: false)
+          .labelsHidden().tint(.mint)
+          .accessibilityLabel("Estimated flight progress")
+      } else {
+        ProgressView(value: ["landed", "arrived"].contains(state.status) ? 1 : 0)
+          .tint(.mint).accessibilityLabel("Flight progress")
+      }
     }
   }
 }
 
 private extension PlanoActivityAttributes.ContentState {
   var isInFlight: Bool { ["airborne", "diverted"].contains(status) }
+  var isArrivalPhase: Bool { isInFlight || ["landed", "arrived"].contains(status) }
+  var countdownLabel: String { isInFlight ? "Until arrival" : "Until departure" }
+
+  var phaseIcon: String {
+    switch status {
+    case "cancelled": return "xmark.circle"
+    case "landed", "arrived": return "airplane.arrival"
+    case "airborne", "diverted": return "airplane"
+    default: return "airplane.departure"
+    }
+  }
 
   var countdownEnd: Date? {
     if ["landed", "arrived", "cancelled"].contains(status) { return nil }

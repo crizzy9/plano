@@ -12,6 +12,9 @@ internal enum class WidgetFlightPhase(val priority: Int, val arrivalCountdown: B
   AIRBORNE(4, true),
   DIVERTED(4, true);
 
+  val departureDetails: Boolean
+    get() = this == SCHEDULED || this == BOARDING
+
   companion object {
     fun fromStatus(status: String?) = when (status) {
       "scheduled" -> SCHEDULED
@@ -25,11 +28,39 @@ internal enum class WidgetFlightPhase(val priority: Int, val arrivalCountdown: B
   }
 }
 
+internal data class WidgetFlightDetails(val gate: String?, val terminal: String?, val seat: String?) {
+  companion object {
+    private val seatCode = Regex("[0-9]{1,3}[A-Z]{1,2}")
+
+    fun fromFlight(phase: WidgetFlightPhase, data: Map<String, String>): WidgetFlightDetails? {
+      // A diversion update can still report the originally scheduled gate.
+      if (phase == WidgetFlightPhase.DIVERTED) return fromFields(null, null, data["seat"])
+      val leg = if (phase.departureDetails) "departure" else "arrival"
+      return fromFields(data["${leg}Gate"], data["${leg}Terminal"], data["seat"])
+    }
+
+    fun fromFields(gate: String?, terminal: String?, seat: String?): WidgetFlightDetails? {
+      val details = WidgetFlightDetails(location(gate), location(terminal), seat?.takeIf(seatCode::matches))
+      return details.takeUnless { it.gate == null && it.terminal == null && it.seat == null }
+    }
+
+    private fun location(value: String?): String? = value?.takeIf { raw ->
+      raw.length in 1..18 && raw.none { char ->
+        char.isISOControl() || when (Character.getType(char)) {
+          Character.FORMAT.toInt(), Character.LINE_SEPARATOR.toInt(), Character.PARAGRAPH_SEPARATOR.toInt() -> true
+          else -> false
+        }
+      }
+    }?.trim()?.takeIf { it.isNotEmpty() }
+  }
+}
+
 internal data class WidgetFlightProgress(
   val phase: WidgetFlightPhase,
   val observedAt: Long,
   val departureAt: Long,
   val arrivalAt: Long,
+  val details: WidgetFlightDetails? = null,
 ) {
   val expiresAt: Long
     get() = observedAt + WIDGET_FRESH_MILLIS

@@ -87,6 +87,12 @@ internal object AndroidPushSession {
   }
 
   @Synchronized
+  fun setWidgetDetailsEnabled(context: Context, enabled: Boolean) {
+    val current = state(context)
+    PlanoFlightWidget.setDetailsEnabled(context, enabled, current.generation.takeIf { current.enabled })
+  }
+
+  @Synchronized
   fun stop(context: Context, flightId: String) {
     context.getSystemService(NotificationManager::class.java)?.cancel(liveNotificationTag(flightId), 0)
     val current = state(context)

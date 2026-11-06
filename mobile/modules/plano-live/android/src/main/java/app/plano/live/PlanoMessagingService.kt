@@ -58,13 +58,14 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     val tag = liveNotificationTag(flightId)
     val departure = data["departureEpoch"]?.toLongOrNull() ?: 0
     val arrival = data["arrivalEpoch"]?.toLongOrNull() ?: 0
-    // Keep the opt-in widget independent of notification permission and pass
-    // only the fields it can display. A widget host failure must not drop alerts.
+    // Keep the widget independent of notification permission. Its own privacy
+    // setting controls which details it can keep from accepted flight updates.
     runCatching {
       PlanoFlightWidget.onFlight(
         this, flightId, binding, event == "start", ended,
         WidgetFlightProgress.fromEpochs(status, observedAt, departure, arrival),
         sentAt.takeIf { it > 0 } ?: epochMillis(observedAt),
+        data,
       )
     }
     if (ended) {

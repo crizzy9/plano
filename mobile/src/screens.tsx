@@ -8,7 +8,10 @@ import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, vali
 import { usePalette } from './theme';
 import { PickupLinks } from './pickup-links';
 import { changeFlightAlerts, flightAlertsEnabled } from './alerts';
-import { canStartLiveActivity, clearLiveActivities, startLiveActivity, stopLiveActivity } from './live';
+import {
+  androidWidgetDetailsEnabled, canCustomizeAndroidWidget, canStartLiveActivity, clearLiveActivities,
+  setAndroidWidgetDetailsEnabled, startLiveActivity, stopLiveActivity,
+} from './live';
 import { Action, Body, Chart, ErrorMessage, FlightRow, FlightStrip, Heading, Input, Loading, RoutePlot, layout } from './ui';
 
 export type Routes = {
@@ -503,7 +506,47 @@ export function ServerSettings({ api, error, onChange }: {
       <ErrorMessage message={issue} />
       {connected && <Text accessibilityLiveRegion="polite">Connected to your Plano server.</Text>}
       {api.server && Platform.OS !== 'web' && <AlertsSettings api={api} />}
+      {canCustomizeAndroidWidget && <WidgetSettings />}
     </Page>
+  );
+}
+
+function WidgetSettings() {
+  const setting = useRemote(androidWidgetDetailsEnabled);
+  const [saving, setSaving] = useState(false);
+  const [issue, setIssue] = useState<string>();
+  const editing = useRef(false);
+
+  async function toggle() {
+    if (editing.current || setting.pending || setting.value === undefined) return;
+    editing.current = true;
+    setSaving(true);
+    setIssue(undefined);
+    try {
+      const next = !setting.value;
+      await setAndroidWidgetDetailsEnabled(next);
+      setting.setValue(next);
+    } catch {
+      setIssue('Couldn’t update the widget setting. Try again.');
+      setting.refresh();
+    } finally {
+      editing.current = false;
+      setSaving(false);
+    }
+  }
+
+  return (
+    <View style={layout.section}>
+      <Heading>Android flight widget</Heading>
+      <Body>Flight updates can show the gate, terminal, and seat on this widget. Anyone who can see your lock screen may see these details.</Body>
+      {setting.value !== undefined && (
+        <Action secondary label={setting.value ? 'Hide flight details on widget' : 'Show flight details on widget'}
+          onPress={toggle} busy={saving} disabled={setting.pending} />
+      )}
+      {setting.pending && setting.value === undefined && <Loading />}
+      {setting.error && <Action secondary label="Reload widget setting" onPress={setting.refresh} disabled={setting.pending || saving} />}
+      <ErrorMessage message={issue ?? setting.error} />
+    </View>
   );
 }
 

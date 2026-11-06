@@ -20,11 +20,25 @@ type NativeLive = {
   androidPushStatus?: (origin: string) => Promise<AndroidPushGeneration | null>;
   enableAndroidPush?: (origin: string, generation: string, explicit: boolean) => Promise<boolean>;
   disableAndroidPush?: (origin: string, expected: string | null, suppress: boolean) => Promise<RetiredAndroidPush | null>;
+  androidWidgetDetailsEnabled?: () => Promise<boolean>;
+  setAndroidWidgetDetailsEnabled?: (enabled: boolean) => Promise<void>;
 };
 
 const native = Platform.OS === 'web' ? null : requireOptionalNativeModule<NativeLive>('PlanoLive');
 
 export const canStartLiveActivity = Boolean(native?.start);
+export const canCustomizeAndroidWidget = Platform.OS === 'android'
+  && !!native?.androidWidgetDetailsEnabled && !!native?.setAndroidWidgetDetailsEnabled;
+
+export async function androidWidgetDetailsEnabled() {
+  if (!native?.androidWidgetDetailsEnabled) throw new Error('Widget settings require a current Android build of Plano.');
+  return native.androidWidgetDetailsEnabled();
+}
+
+export async function setAndroidWidgetDetailsEnabled(enabled: boolean) {
+  if (!native?.setAndroidWidgetDetailsEnabled) throw new Error('Widget settings require a current Android build of Plano.');
+  await native.setAndroidWidgetDetailsEnabled(enabled);
+}
 
 export async function selectAndroidPushOrigin(origin: string) {
   if (Platform.OS !== 'android') return null;

@@ -261,6 +261,12 @@ app verifies the binding before displaying a notification or updating its
 widget. Switching servers or turning alerts off invalidates the old binding
 on the device, including while a remote revocation is pending.
 
+The Android widget defaults to phase, progress, and a countdown. In Plano
+Settings, choose **Show flight details on widget** to include the applicable
+gate, terminal, and seat from the next flight update. This setting applies to
+the device. Details can be visible on a lock screen that supports widgets.
+**Hide flight details on widget** removes the details from the widget cache.
+
 ## Local radar and sharing
 
 With `PLANO_ADSB_URL` configured, the receiver worker samples matching
