@@ -22,23 +22,6 @@ CREATE TABLE IF NOT EXISTS passport_archive (
 
 const maxPassportArchiveFlights = 10_000
 
-const fillPassportArchiveTimesSQL = `UPDATE passport_archive
-SET snapshot=json_patch(snapshot,json_object(
-  'scheduledDeparture',json_extract(?3,'$.scheduledDeparture'),
-  'scheduledArrival',json_extract(?3,'$.scheduledArrival'),
-  'actualDeparture',json_extract(?3,'$.actualDeparture'),
-  'actualArrival',json_extract(?3,'$.actualArrival')
-))
-WHERE owner=?1 AND id=?2 AND flight_date=json_extract(?3,'$.historyDate')
-  AND json_extract(snapshot,'$.source')='flighty_csv'
-  AND json_extract(snapshot,'$.number')=json_extract(?3,'$.number')
-  AND json_extract(snapshot,'$.origin')=json_extract(?3,'$.origin')
-  AND json_extract(snapshot,'$.destination')=json_extract(?3,'$.destination')
-  AND json_extract(snapshot,'$.scheduledDeparture') IS NULL
-  AND json_extract(snapshot,'$.scheduledArrival') IS NULL
-  AND json_extract(snapshot,'$.actualDeparture') IS NULL
-  AND json_extract(snapshot,'$.actualArrival') IS NULL`
-
 var (
 	ErrPassportArchiveFull     = errors.New("passport archive flight limit reached")
 	ErrPassportArchiveConflict = errors.New("passport archive flight changed")
@@ -95,9 +78,9 @@ VALUES(?,?,?,?) ON CONFLICT(owner,id) DO NOTHING`)
 			return 0, 0, err
 		}
 		if count == 0 {
-			// A reimport can fill timing data omitted by the legacy parser.
+			// A reimport can fill timing data missing from the saved export.
 			if source == "flighty_csv" && (flight.ScheduledDeparture != nil || flight.ScheduledArrival != nil || flight.ActualDeparture != nil || flight.ActualArrival != nil) {
-				if _, err := tx.ExecContext(ctx, fillPassportArchiveTimesSQL, owner, flight.ID, string(snapshot)); err != nil {
+				if err := fillPassportArchiveTimes(ctx, tx, owner, flight); err != nil {
 					return 0, 0, err
 				}
 			}
@@ -113,6 +96,69 @@ VALUES(?,?,?,?) ON CONFLICT(owner,id) DO NOTHING`)
 		return 0, 0, err
 	}
 	return added, duplicates, nil
+}
+
+func fillPassportArchiveTimes(ctx context.Context, tx *sql.Tx, owner string, incoming feeds.Flight) error {
+	var raw []byte
+	err := tx.QueryRowContext(ctx, `SELECT snapshot FROM passport_archive
+WHERE owner=? AND id=? AND flight_date=? AND json_extract(snapshot,'$.source')='flighty_csv'`,
+		owner, incoming.ID, incoming.HistoryDate).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var saved feeds.Flight
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		return err
+	}
+	if saved.Number != incoming.Number || saved.Origin != incoming.Origin || saved.Destination != incoming.Destination {
+		return nil
+	}
+	patch := make(map[string]*time.Time, 4)
+	for _, pair := range [...]struct {
+		prefix                                       string
+		departure, arrival, newDeparture, newArrival *time.Time
+	}{
+		{"scheduled", saved.ScheduledDeparture, saved.ScheduledArrival, incoming.ScheduledDeparture, incoming.ScheduledArrival},
+		{"actual", saved.ActualDeparture, saved.ActualArrival, incoming.ActualDeparture, incoming.ActualArrival},
+	} {
+		// Avoid mixing endpoints from exports that disagree on an already
+		// recorded time. The scheduled and actual pairs can fill independently.
+		if passportTimeConflicts(pair.departure, pair.newDeparture) || passportTimeConflicts(pair.arrival, pair.newArrival) {
+			continue
+		}
+		departure, arrival := pair.departure, pair.arrival
+		if departure == nil {
+			departure = pair.newDeparture
+		}
+		if arrival == nil {
+			arrival = pair.newArrival
+		}
+		if departure != nil && arrival != nil && (!arrival.After(*departure) || arrival.Sub(*departure) > 48*time.Hour) {
+			continue
+		}
+		if pair.departure == nil && departure != nil {
+			patch[pair.prefix+"Departure"] = departure
+		}
+		if pair.arrival == nil && arrival != nil {
+			patch[pair.prefix+"Arrival"] = arrival
+		}
+	}
+	if len(patch) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE passport_archive SET snapshot=json_patch(snapshot,?) WHERE owner=? AND id=?`, string(data), owner, incoming.ID)
+	return err
+}
+
+func passportTimeConflicts(saved, incoming *time.Time) bool {
+	return saved != nil && incoming != nil && !saved.Equal(*incoming)
 }
 
 func validPassportArchiveFlight(flight feeds.Flight, source string) bool {

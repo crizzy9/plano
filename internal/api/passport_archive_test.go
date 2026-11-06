@@ -40,17 +40,22 @@ func TestPassportArchiveImportIsPrivateAndMapsWithoutProvider(t *testing.T) {
 		return response.Body.String()
 	}
 	const importPath = "/v1/passport/import"
-	const csv = `Date,Airline,Flight,From,To,Canceled,Gate Departure (Actual),Gate Arrival (Actual),Gate Arrival (Scheduled),PNR,Seat,Notes
-2019-06-02,DL,42,JFK,CDG,false,2019-06-02T20:00,2019-06-03T10:00,2019-06-03T09:45,fixture-booking,32A,fixture-private-note
-2018-05-03,,,QZX,ZZZ,false,,,,,,
-2018-05-03,UA,10,SFO,EWR,true,,,,,,
+	const csv = `Date,Airline,Flight,From,To,Canceled,Gate Departure (Scheduled),Gate Departure (Actual),Gate Arrival (Actual),Gate Arrival (Scheduled),PNR,Seat,Notes
+2019-06-02,DL,42,JFK,CDG,false,2019-06-02T19:55,2019-06-02T20:00,2019-06-03T10:00,2019-06-03T09:45,fixture-booking,32A,fixture-private-note
+2018-05-03,,,QZX,ZZZ,false,,,,,,,
+2018-05-03,UA,10,SFO,EWR,true,,,,,,,
 `
 	call(http.MethodPost, importPath, "", "text/csv", csv, 401)
 	call(http.MethodPost, importPath, owner, "text/plain", csv, 415)
 	call(http.MethodPost, importPath, owner, "text/csv", strings.Repeat("x", maxPassportCSVBytes+1), 413)
 	call(http.MethodPost, importPath, owner, "text/csv", "wrong,header\na,b\n", 422)
-	for attempt, want := range []string{`{"added":2,"duplicates":0,"skipped":1}`, `{"added":0,"duplicates":2,"skipped":1}`} {
-		if got := call(http.MethodPost, importPath, owner, "text/csv; charset=utf-8", csv, 200); strings.TrimSpace(got) != want {
+	scheduleOnly := strings.Replace(csv, "2019-06-02T20:00,2019-06-03T10:00", ",", 1)
+	for attempt, input := range []string{scheduleOnly, csv, csv} {
+		want := `{"added":0,"duplicates":2,"skipped":1}`
+		if attempt == 0 {
+			want = `{"added":2,"duplicates":0,"skipped":1}`
+		}
+		if got := call(http.MethodPost, importPath, owner, "text/csv; charset=utf-8", input, 200); strings.TrimSpace(got) != want {
 			t.Fatalf("attempt %d = %s, want %s", attempt, got, want)
 		}
 	}
@@ -59,7 +64,8 @@ func TestPassportArchiveImportIsPrivateAndMapsWithoutProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(first.Flights) != 1 || first.Flights[0].HistoryDate != "2019-06-02" || !strings.HasPrefix(first.Flights[0].HistoryKey, "a.") || first.NextCursor == "" ||
-		first.Stats.Flights != 2 || first.Stats.Hours != 8 || first.Stats.DelayMinutes != 15 || len(first.Segments) != 1 || first.Stats.Miles < 3000 || first.Coverage.MissingCoordinatesFlights != 1 {
+		first.Stats.Flights != 2 || first.Stats.Hours != 8 || first.Stats.DelayMinutes != 15 || len(first.Segments) != 1 || first.Stats.Miles < 3000 ||
+		first.Coverage.MissingCoordinatesFlights != 1 || first.Coverage.MissingDurationFlights != 1 || first.Coverage.MissingDelayFlights != 1 {
 		t.Fatalf("unexpected imported Passport summary: %+v", first)
 	}
 	var second passportHistoryPage

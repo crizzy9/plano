@@ -48,10 +48,10 @@ Plano uses the departure and arrival airports' time zones to resolve local
 gate times in Flighty exports. When the times can be resolved, Passport counts
 gate-to-gate hours and arrival delays. Missing times, clocks that repeat or
 are skipped during an offset change, and offset-free scheduled midnight
-placeholders are omitted from the time calculations. If you imported a file
-before Plano could resolve local times, import it again to fill in times for
-the matching records with no saved timestamps. Those flights still count as
-already in Passport. [Flighty CSV example](https://github.com/SSARCandy/flighty-web-viewer) · [Observed midnight placeholder](https://github.com/vlvovch/flight-ledger/blob/main/docs/importers.md#flighty)
+placeholders are omitted from the time calculations. Reimporting can fill
+missing times in matching records when the new times agree with saved times
+for that pair. The import still reports those flights as duplicates.
+[Flighty CSV example](https://github.com/SSARCandy/flighty-web-viewer) · [Observed midnight placeholder](https://github.com/vlvovch/flight-ledger/blob/main/docs/importers.md#flighty)
 
 When a completed tracked flight matches the route, flight number, and
 scheduled-departure instant, Passport shows the tracked record. The imported

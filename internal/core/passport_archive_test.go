@@ -163,6 +163,21 @@ func TestPassportArchiveReimportFillsMissingTimes(t *testing.T) {
 		reimport(copy)
 		assertHistory(owner, legacy)
 	}
+	partial := updated
+	partial.ScheduledArrival, partial.ActualArrival = nil, nil
+	reimport(partial)
+	partialWant := want
+	partialWant.ScheduledArrival, partialWant.ActualArrival = nil, nil
+	assertHistory(owner, partialWant)
+
+	conflicting := updated
+	conflicting.ScheduledDeparture = new(departure.Add(time.Minute))
+	conflicting.ActualDeparture = nil
+	conflicting.ActualArrival = new(departure.Add(time.Minute))
+	reimport(conflicting)
+	assertHistory(owner, partialWant)
+
+	updated.ScheduledDeparture = new(departure.In(time.FixedZone("export", 3600)))
 	reimport(updated)
 	assertHistory(owner, want)
 	assertHistory(other, legacy)
