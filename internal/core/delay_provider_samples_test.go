@@ -130,7 +130,7 @@ func recordProviderDelayFixture(t *testing.T, store *Store, provider string, fli
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if err := recordProviderDelaySample(ctx, tx, provider, flight, nil, nil, flight.ObservedAt, capture); err != nil {
+	if err := recordProviderDelaySample(ctx, tx, provider, flight, nil, nil, nil, flight.ObservedAt, capture); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

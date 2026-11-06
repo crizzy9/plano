@@ -29,6 +29,7 @@ type Store struct {
 	db                     *sql.DB
 	delayModel             *predict.Model
 	earlyDelayModel        *predict.Model
+	weatherForecast        *WeatherForecastCache
 	collectDelaySamples    bool
 	tfmsLegacyReplayCutoff int64
 	outboxWake             chan struct{}
@@ -60,6 +61,7 @@ type Device struct {
 type StoreOptions struct {
 	DelayModel          *predict.Model
 	EarlyDelayModel     *predict.Model
+	WeatherForecast     *WeatherForecastCache
 	CollectDelaySamples bool
 }
 
@@ -238,7 +240,8 @@ CREATE TABLE IF NOT EXISTS shares (
 		return nil, err
 	}
 	return &Store{
-		db: db, delayModel: options.DelayModel, earlyDelayModel: options.EarlyDelayModel, collectDelaySamples: options.CollectDelaySamples,
+		db: db, delayModel: options.DelayModel, earlyDelayModel: options.EarlyDelayModel,
+		weatherForecast: options.WeatherForecast, collectDelaySamples: options.CollectDelaySamples,
 		tfmsLegacyReplayCutoff: tfmsLegacyReplayCutoff, outboxWake: make(chan struct{}, 1), refreshWake: make(chan struct{}, 1),
 	}, nil
 }
@@ -408,7 +411,7 @@ EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flight
 	if d.Prediction != nil {
 		now := time.Now()
 		validUntil, valid := predictionValidity(d.Prediction, d.Flight, d.Inbound, now)
-		if !valid {
+		if !valid || !s.terminalWeatherForecastCurrent(d.Prediction, d.Flight, now) {
 			d.Prediction = nil
 		} else {
 			d.Prediction.ValidUntil = validUntil
@@ -420,6 +423,7 @@ EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flight
 				d.Prediction = nil
 			} else {
 				d.Prediction.AdvisoryEvidence = nil
+				d.Prediction.TerminalWeatherEvidence = nil
 			}
 		}
 	}
@@ -575,6 +579,7 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 		}
 	}
 	var predictionValue *Prediction
+	var terminalForecasts []AirportWeatherForecast
 	if trackedRefresh || prior.ID == "" || callbackRefresh && flightAlertRelevant("delay_prediction", flight) {
 		forecastAdvisories := advisories
 		var advisoryDeadlines map[forecastAdvisory]time.Time
@@ -592,7 +597,8 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 				advisories = forecastAdvisories
 			}
 		}
-		predictionValue = PredictWithModel(s.delayModelFor(flight, decisionAt), flight, inbound, forecastAdvisories, decisionAt)
+		terminalForecasts = s.weatherForecast.ForFlight(flight, decisionAt)
+		predictionValue = predictWithTerminalWeather(s.delayModelFor(flight, decisionAt), flight, inbound, forecastAdvisories, terminalForecasts, decisionAt)
 		capCachedAdvisoryValidity(predictionValue, advisoryDeadlines)
 	}
 	sameSchedule := !providerChanged && prior.ScheduledDeparture != nil && flight.ScheduledDeparture != nil && prior.ScheduledDeparture.Equal(*flight.ScheduledDeparture)
@@ -602,7 +608,8 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 		}
 		if predictionValue != nil {
 			validUntil, valid := predictionValidity(predictionValue, flight, inbound, decisionAt)
-			if !valid || trackedRefresh && usesInboundTiming(predictionValue) {
+			if !valid || trackedRefresh && usesInboundTiming(predictionValue) ||
+				!s.terminalWeatherForecastCurrent(predictionValue, flight, decisionAt) {
 				predictionValue = nil
 			} else {
 				predictionValue.ValidUntil = validUntil
@@ -689,7 +696,7 @@ ON CONFLICT(flight_id) DO UPDATE SET revision=flight_event_revisions.revision+1`
 	}
 
 	if s.collectDelaySamples {
-		if err := recordDelaySample(ctx, tx, flight, inbound, advisories, decisionAt, trackedRefresh); err != nil {
+		if err := recordDelaySample(ctx, tx, flight, inbound, advisories, terminalForecasts, decisionAt, trackedRefresh); err != nil {
 			return err
 		}
 	}
@@ -706,7 +713,7 @@ ON CONFLICT(flight_id) DO UPDATE SET revision=flight_event_revisions.revision+1`
 				}
 			}
 		}
-		event, cleared, err := delayForecastTransition(ctx, tx, prior, flight, oldInbound, oldPrediction, predictionValue, decisionAt, sameSchedule)
+		event, cleared, err := s.delayForecastTransition(ctx, tx, prior, flight, oldInbound, oldPrediction, predictionValue, decisionAt, sameSchedule)
 		if err != nil {
 			return err
 		}

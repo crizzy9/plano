@@ -20,15 +20,16 @@ const (
 
 // Prediction preserves the official schedule and labels the inputs behind an estimate.
 type Prediction struct {
-	Departure            *time.Time             `json:"departure,omitempty"`
-	ValidUntil           *time.Time             `json:"validUntil,omitempty"`
-	DelayMinutes         int                    `json:"delayMinutes"`
-	Reasons              []string               `json:"reasons"`
-	Method               string                 `json:"method"`
-	ModelVersion         string                 `json:"modelVersion,omitempty"`
-	BaselineMinutes      *float64               `json:"baselineMinutes,omitempty"`
-	FeatureContributions []predict.Contribution `json:"featureContributions,omitempty"`
-	AdvisoryEvidence     []forecastAdvisory     `json:"advisoryEvidence,omitempty"`
+	Departure               *time.Time               `json:"departure,omitempty"`
+	ValidUntil              *time.Time               `json:"validUntil,omitempty"`
+	DelayMinutes            int                      `json:"delayMinutes"`
+	Reasons                 []string                 `json:"reasons"`
+	Method                  string                   `json:"method"`
+	ModelVersion            string                   `json:"modelVersion,omitempty"`
+	BaselineMinutes         *float64                 `json:"baselineMinutes,omitempty"`
+	FeatureContributions    []predict.Contribution   `json:"featureContributions,omitempty"`
+	AdvisoryEvidence        []forecastAdvisory       `json:"advisoryEvidence,omitempty"`
+	TerminalWeatherEvidence *terminalWeatherEvidence `json:"terminalWeatherEvidence,omitempty"`
 }
 
 type forecastInputs struct {
@@ -55,11 +56,20 @@ func Predict(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Ad
 // trained model supports them. A missing model or an unsupported input falls back
 // to the operational estimate. Neither estimate changes published flight times.
 func PredictWithModel(model *predict.Model, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, now time.Time) *Prediction {
+	return predictWithTerminalWeather(model, flight, rotation, advisories, nil, now)
+}
+
+func predictWithTerminalWeather(model *predict.Model, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, forecasts []AirportWeatherForecast, now time.Time) *Prediction {
 	inputs, ok := delayInputs(flight, rotation, advisories, now)
 	if !ok {
 		return nil
 	}
 	features, reasons := inputs.features, inputs.reasons
+	var weather []AirportWeatherForecast
+	if model.UsesTerminalWeatherForecast() {
+		weather = prevailingTerminalWeather(forecasts)
+		features.TerminalWeatherForecast = len(weather) > 0
+	}
 	scheduled := *flight.ScheduledDeparture
 	minutes := max(features.AirlineDelayMinutes, features.InboundDelayMinutes, features.AirportDelayMinutes, features.GroundStopMinutes)
 	forecast := Prediction{Method: "operational_estimate", DelayMinutes: int(minutes)}
@@ -68,6 +78,13 @@ func PredictWithModel(model *predict.Model, flight feeds.Flight, rotation []feed
 		reasons = append(reasons, learnedReason(features, estimate.Contributions))
 		forecast = Prediction{Method: "learned_estimate", DelayMinutes: int(math.Round(minutes)), ModelVersion: model.ID(),
 			BaselineMinutes: &estimate.Baseline, FeatureContributions: estimate.Contributions}
+		if model.UsesTerminalWeatherForecast() {
+			forecast.TerminalWeatherEvidence = &terminalWeatherEvidence{Forecasts: weather}
+			for _, period := range weather {
+				reasons = append(reasons, fmt.Sprintf("NOAA forecasts %s at %s during the expected %s.", period.Conditions, period.Airport, period.Operation))
+				inputs.validUntil = earliestValidity(inputs.validUntil, period.EndsAt)
+			}
+		}
 	}
 	forecast.ValidUntil = inputs.validUntil
 	forecast.AdvisoryEvidence = inputs.advisories
@@ -100,10 +117,15 @@ func PredictWithModel(model *predict.Model, flight feeds.Flight, rotation []feed
 	return &forecast
 }
 
-// ExtractDelayFeatures gives historical snapshot exporters the same feature
-// derivation used for live forecasts. Pass only data available at observedAt.
+// ExtractDelayFeatures derives the flight and advisory features for historical
+// snapshot exporters. Pass only data available at observedAt.
 func ExtractDelayFeatures(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, observedAt time.Time) (predict.Features, bool) {
+	return extractDelayFeaturesWithTerminalWeather(flight, rotation, advisories, nil, observedAt)
+}
+
+func extractDelayFeaturesWithTerminalWeather(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, forecasts []AirportWeatherForecast, observedAt time.Time) (predict.Features, bool) {
 	inputs, ok := delayInputs(flight, rotation, advisories, observedAt)
+	inputs.features.TerminalWeatherForecast = slices.ContainsFunc(forecasts, isPrevailingTerminalWeather)
 	return inputs.features, ok
 }
 
@@ -404,13 +426,14 @@ func learnedReason(features predict.Features, contributions []predict.Contributi
 		label    string
 		observed bool
 	}{
-		"airline_delay":       {"the airline's estimate", features.AirlineDelayMinutes > 0},
-		"inbound_turnaround":  {"inbound aircraft timing", features.InboundDelayMinutes > 0},
-		"airport_delay":       {"reported airport delays", features.AirportDelayMinutes > 0},
-		"ground_stop":         {"a ground stop", features.GroundStopMinutes > 0},
-		"weather":             {"weather reports", features.Weather},
-		"air_traffic_control": {"air traffic restrictions", features.AirTrafficControl},
-		"lead_time":           {"the time until departure", true},
+		"airline_delay":             {"the airline's estimate", features.AirlineDelayMinutes > 0},
+		"inbound_turnaround":        {"inbound aircraft timing", features.InboundDelayMinutes > 0},
+		"airport_delay":             {"reported airport delays", features.AirportDelayMinutes > 0},
+		"ground_stop":               {"a ground stop", features.GroundStopMinutes > 0},
+		"weather":                   {"weather reports", features.Weather},
+		"terminal_weather_forecast": {"forecast airport weather", features.TerminalWeatherForecast},
+		"air_traffic_control":       {"air traffic restrictions", features.AirTrafficControl},
+		"lead_time":                 {"the time until departure", true},
 	}
 	var strongest predict.Contribution
 	for _, contribution := range contributions {

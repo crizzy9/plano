@@ -90,6 +90,59 @@ func TestTrainCLIFailsQualityGateWithoutWritingAnArtifact(t *testing.T) {
 	}
 }
 
+func TestTrainCLIRequiresWeatherToImproveThePairedHoldout(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		extraDelay time.Duration
+		sparse     bool
+	}{
+		{name: "predictive signal", extraDelay: 40 * time.Minute},
+		{name: "uninformative signal"},
+		{name: "too few weather outcomes", extraDelay: 40 * time.Minute, sparse: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var input, stdout, stderr bytes.Buffer
+			encoder := json.NewEncoder(&input)
+			start := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+			for i := range 100 {
+				observed := start.Add(time.Duration(i) * 3 * time.Hour)
+				departure := observed.Add(time.Hour)
+				published := time.Duration(10+(i/2)%5*5) * time.Minute
+				weather := i%2 == 0
+				if test.sparse && i >= 80 {
+					weather = i%4 == 0
+				}
+				delay := published + 20*time.Minute
+				if weather {
+					delay += test.extraDelay
+				}
+				row := predict.Example{
+					FlightID: fmt.Sprintf("weather-%d", i), ObservedAt: observed, ScheduledDeparture: departure,
+					DepartedAt: departure.Add(delay),
+					Features:   predict.Features{AirlineDelayMinutes: published.Minutes(), TerminalWeatherForecast: weather},
+				}
+				if err := encoder.Encode(row); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := run([]string{"-output", "-", "-ridge", "0.02"}, &input, &stdout, &stderr)
+			if test.extraDelay == 0 || test.sparse {
+				if err == nil || !strings.Contains(err.Error(), "terminal weather deployment gate") || stdout.Len() != 0 {
+					t.Fatalf("expected weather gate failure: %v\n%s", err, &stderr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("weather-aware fit failed: %v\n%s", err, &stderr)
+			}
+			model, err := predict.Load(&stdout)
+			if err != nil || !model.UsesTerminalWeatherForecast() {
+				t.Fatalf("weather-aware artifact failed to load: %v", err)
+			}
+		})
+	}
+}
+
 func TestTrainCLIGatesCoverageOnSignalBearingHoldoutRows(t *testing.T) {
 	const trainingRows, holdoutRows = 80, 20
 	for _, eligibleRows := range []int{8, 7} {

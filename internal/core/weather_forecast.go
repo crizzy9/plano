@@ -33,24 +33,29 @@ type AirportWeatherForecast struct {
 	Probability int       `json:"probability,omitempty"`
 }
 
+type stationWeatherForecast struct {
+	availableAt time.Time
+	periods     []feeds.TAFPeriod
+}
+
 // WeatherForecastCache holds forecast periods for public stations near
 // tracked flight operations. Its worker runs separately from observation polls.
 type WeatherForecastCache struct {
 	provider  TAFProvider
 	mu        sync.RWMutex
-	byStation map[string][]feeds.TAFPeriod
+	byStation map[string]stationWeatherForecast
 	after     string
 }
 
 func NewWeatherForecastCache(provider TAFProvider) *WeatherForecastCache {
-	return &WeatherForecastCache{provider: provider, byStation: make(map[string][]feeds.TAFPeriod)}
+	return &WeatherForecastCache{provider: provider, byStation: make(map[string]stationWeatherForecast)}
 }
 
 func (w *WeatherForecastCache) Run(ctx context.Context, store *Store, logger *slog.Logger) {
 	tick := time.NewTicker(weatherForecastCadence)
 	defer tick.Stop()
 	for ctx.Err() == nil {
-		if err := w.refresh(ctx, store, time.Now().UTC()); err != nil && ctx.Err() == nil {
+		if err := w.refresh(ctx, store, time.Now().UTC(), time.Now); err != nil && ctx.Err() == nil {
 			logger.Warn("airport weather forecast refresh unavailable")
 		}
 		select {
@@ -61,15 +66,15 @@ func (w *WeatherForecastCache) Run(ctx context.Context, store *Store, logger *sl
 	}
 }
 
-func (w *WeatherForecastCache) refresh(ctx context.Context, store *Store, now time.Time) error {
+func (w *WeatherForecastCache) refresh(ctx context.Context, store *Store, now time.Time, clock func() time.Time) error {
 	w.mu.Lock()
-	for station, periods := range w.byStation {
-		active := slices.DeleteFunc(periods, func(period feeds.TAFPeriod) bool { return !period.EndsAt.After(now) })
-		if len(active) == 0 {
+	for station, report := range w.byStation {
+		report.periods = slices.DeleteFunc(report.periods, func(period feeds.TAFPeriod) bool { return !period.EndsAt.After(now) })
+		if len(report.periods) == 0 {
 			delete(w.byStation, station)
 			continue
 		}
-		w.byStation[station] = active
+		w.byStation[station] = report
 	}
 	w.mu.Unlock()
 
@@ -101,12 +106,16 @@ func (w *WeatherForecastCache) refresh(ctx context.Context, store *Store, now ti
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	availableAt := clock().UTC()
+	if availableAt.Before(now) {
+		availableAt = now
+	}
 	for station, stationPeriods := range batch {
 		if len(stationPeriods) == 0 {
 			delete(w.byStation, station)
 			continue
 		}
-		w.byStation[station] = stationPeriods
+		w.byStation[station] = stationWeatherForecast{availableAt: availableAt, periods: stationPeriods}
 	}
 	return nil
 }
@@ -166,8 +175,14 @@ func (w *WeatherForecastCache) ForFlight(flight feeds.Flight, now time.Time) []A
 		if at.Before(now) {
 			at = now
 		}
+		report := w.byStation[airport]
+		// An older flight observation cannot use a forecast accepted later,
+		// even when its product was issued before that observation.
+		if report.availableAt.After(now) {
+			return
+		}
 		remaining := weatherForecastRowLimit
-		for _, period := range w.byStation[airport] {
+		for _, period := range report.periods {
 			if period.IssuedAt.After(now) || period.StartsAt.After(at) || !period.EndsAt.After(at) {
 				continue
 			}

@@ -178,6 +178,77 @@ WHERE o.flight_id=? AND o.done=0 AND json_extract(e.data,'$.kind')='delay_predic
 	}
 }
 
+func TestFlightAlertDispatcherRechecksTerminalWeatherForecastAmendment(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		amended bool
+	}{
+		{name: "current forecast delivers"},
+		{name: "amended forecast retires leased alerts", amended: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, flight := flightAlertDispatchFixture(t)
+			ctx := t.Context()
+			now := time.Now().UTC()
+			flight.OriginICAO, flight.ScheduledDeparture = "KJFK", new(now.Add(3*time.Hour))
+			period := feeds.TAFPeriod{
+				Airport: "KJFK", Conditions: "thunderstorms", Qualifier: "prevailing",
+				IssuedAt: now.Add(-time.Hour), StartsAt: now.Add(2 * time.Hour), EndsAt: now.Add(4 * time.Hour),
+			}
+			cache := NewWeatherForecastCache(nil)
+			cache.byStation["KJFK"] = stationWeatherForecast{availableAt: now, periods: []feeds.TAFPeriod{period}}
+			store.weatherForecast = cache
+			forecasts := cache.ForFlight(flight, now)
+			if len(forecasts) != 1 {
+				t.Fatalf("weather fixture returned %d forecasts, want 1", len(forecasts))
+			}
+			forecast, err := json.Marshal(Prediction{
+				Departure: new(flight.ScheduledDeparture.Add(45 * time.Minute)), ValidUntil: &period.EndsAt, DelayMinutes: 45,
+				Reasons: []string{"NOAA forecasts thunderstorms at KJFK during the expected departure."}, Method: "learned_estimate",
+				TerminalWeatherEvidence: &terminalWeatherEvidence{Forecasts: forecasts},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := json.Marshal(flight)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx, err := store.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err := tx.ExecContext(ctx, `UPDATE flights SET snapshot=?, prediction=? WHERE id=?`, string(snapshot), string(forecast), flight.ID); err != nil {
+				t.Fatal(err)
+			}
+			const title, body = "Departure delay predicted", "AA2 · 45 min later"
+			if err := saveEvent(ctx, tx, flight.ID, Event{Kind: "delay_prediction", Title: title, Body: body, At: now}, true); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			jobs := claimFlightAlertJobs(t, store, 2)
+			if tc.amended {
+				// The amendment arrived after claim, with the same hazard text
+				// but a different issuance. The saved forecast still uses the old one.
+				period.IssuedAt = now.Add(-time.Minute)
+				cache.byStation["KJFK"] = stationWeatherForecast{availableAt: time.Now().UTC(), periods: []feeds.TAFPeriod{period}}
+				assertFlightAlertSends(t, store, jobs)
+			} else {
+				assertFlightAlertSends(t, store, jobs, title+"|"+body)
+			}
+			var pending int
+			err = store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE flight_id=? AND done=0`, flight.ID).Scan(&pending)
+			if err != nil || pending != 0 {
+				t.Fatalf("pending delay jobs = %d, error = %v", pending, err)
+			}
+			assertFlightAlertHistory(t, store, flight.ID, "delay_prediction|"+body)
+		})
+	}
+}
+
 func TestFlightAlertDispatcherReoffersUnclaimedCheckInAfterReinstatement(t *testing.T) {
 	store, flight := flightAlertDispatchFixture(t)
 	flight.ScheduledDeparture = new(flight.ObservedAt.Add(time.Hour))

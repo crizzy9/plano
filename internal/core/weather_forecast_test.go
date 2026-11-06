@@ -66,10 +66,14 @@ func TestWeatherForecastCacheReplacesSuccessfulBatches(t *testing.T) {
 			return nil, nil
 		}
 	}))
-	if err := cache.refresh(ctx, store, now); err != nil {
+	availableAt := now.Add(time.Second)
+	if err := cache.refresh(ctx, store, now, func() time.Time { return availableAt }); err != nil {
 		t.Fatal(err)
 	}
-	initial := cache.ForFlight(flight, now)
+	if got := cache.ForFlight(flight, now); len(got) != 0 {
+		t.Fatalf("forecast reached an observation before cache acceptance: %+v", got)
+	}
+	initial := cache.ForFlight(flight, availableAt)
 	if len(initial) != 2 || initial[0].Operation != "departure" || initial[0].Conditions != "low visibility" ||
 		initial[1].Operation != "arrival" || initial[1].Qualifier != "temporary" || initial[1].Probability != 30 {
 		t.Fatalf("unexpected forecasts: %+v", initial)
@@ -77,14 +81,14 @@ func TestWeatherForecastCacheReplacesSuccessfulBatches(t *testing.T) {
 	if got := cache.ForFlight(untracked, now); len(got) != 0 {
 		t.Fatalf("unexpected unrequested forecast: %+v", got)
 	}
-	if err := cache.refresh(ctx, store, now.Add(weatherForecastCadence)); !errors.Is(err, feeds.ErrUnavailable) {
+	if err := refreshFixtureForecast(ctx, cache, store, now.Add(weatherForecastCadence)); !errors.Is(err, feeds.ErrUnavailable) {
 		t.Fatalf("unexpected outage error %v", err)
 	}
 	if got := cache.ForFlight(flight, now.Add(weatherForecastCadence)); !slices.Equal(got, initial) {
 		t.Fatalf("outage changed current forecasts: %+v", got)
 	}
 	amendedAt := now.Add(2 * weatherForecastCadence)
-	if err := cache.refresh(ctx, store, amendedAt); err != nil {
+	if err := refreshFixtureForecast(ctx, cache, store, amendedAt); err != nil {
 		t.Fatal(err)
 	}
 	if got := cache.ForFlight(flight, amendedAt); len(got) != 1 || got[0].Conditions != "freezing fog" || !got[0].IssuedAt.Equal(amendedAt) {
@@ -93,7 +97,7 @@ func TestWeatherForecastCacheReplacesSuccessfulBatches(t *testing.T) {
 	if got := cache.ForFlight(flight, amendedAt.Add(time.Minute)); len(got) != 0 {
 		t.Fatalf("expired forecast remained visible: %+v", got)
 	}
-	if err := cache.refresh(ctx, store, now.Add(3*weatherForecastCadence)); err != nil {
+	if err := refreshFixtureForecast(ctx, cache, store, now.Add(3*weatherForecastCadence)); err != nil {
 		t.Fatal(err)
 	}
 	if len(cache.byStation) != 0 || calls != 4 {
@@ -109,7 +113,7 @@ func TestWeatherForecastCacheUsesPendingOperationAndHalfOpenWindow(t *testing.T)
 		StartsAt: now, EndsAt: change}
 	second := feeds.TAFPeriod{Airport: "KSFO", Conditions: "low ceiling", Qualifier: "prevailing", IssuedAt: now,
 		StartsAt: change, EndsAt: now.Add(2 * time.Hour)}
-	cache.byStation["KSFO"] = []feeds.TAFPeriod{first, second}
+	cache.byStation["KSFO"] = stationWeatherForecast{availableAt: now, periods: []feeds.TAFPeriod{first, second}}
 	flight := feeds.Flight{Status: "scheduled", OriginICAO: "KSFO", DestinationICAO: "KSFO", ScheduledDeparture: new(now),
 		ScheduledArrival: &change}
 	if got := cache.ForFlight(flight, now); len(got) != 2 || got[0].Operation != "departure" || got[0].Conditions != first.Conditions ||
@@ -164,13 +168,17 @@ func TestWeatherForecastCacheRotatesFullStationBatches(t *testing.T) {
 		return nil, nil
 	}))
 	for i := range wanted {
-		if err := cache.refresh(ctx, store, now.Add(time.Duration(i)*weatherForecastCadence)); err != nil {
+		if err := refreshFixtureForecast(ctx, cache, store, now.Add(time.Duration(i)*weatherForecastCadence)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if batches != len(wanted) {
 		t.Fatalf("got %d forecast batches, want %d", batches, len(wanted))
 	}
+}
+
+func refreshFixtureForecast(ctx context.Context, cache *WeatherForecastCache, store *Store, now time.Time) error {
+	return cache.refresh(ctx, store, now, func() time.Time { return now })
 }
 
 func openWeatherForecastFixtureStore(t *testing.T) (*Store, string) {

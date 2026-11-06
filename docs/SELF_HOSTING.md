@@ -363,6 +363,11 @@ A valid correction keeps the original forecast features and schedule. Exports ha
 the flight ID and omit legacy schedule aliases whose capture identity cannot
 be verified. Export the standard cohort from the running Compose project.
 
+Enable `PLANO_TAF=true` while collecting data to evaluate terminal weather.
+Plano records whether a prevailing adverse forecast was already available in
+its cache for the expected departure or arrival. Temporary conditions,
+published probabilities, and weather transitions remain visible as context.
+
 ```sh
 umask 077
 docker compose exec -T plano plano export-delay-samples > examples.jsonl
@@ -375,6 +380,11 @@ or more holdout rows with an operational or advisory signal and learned coverage
 of at least 50% within that group. Mean absolute error across the full holdout
 must beat both baselines. Mount a validated artifact read-only and
 set `PLANO_DELAY_MODEL_FILE` to its container path. [Delay model training](../cmd/plano-train/README.md)
+
+A weather-aware artifact also has to beat a fit trained on the same examples
+without the terminal weather term. That comparison covers both the full
+holdout and the weather-bearing flights. Keep `PLANO_TAF=true` when running
+either a standard or early weather-aware artifact.
 
 Export and fit the early cohort separately.
 

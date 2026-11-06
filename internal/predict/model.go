@@ -14,18 +14,23 @@ import (
 )
 
 const (
-	schemaVersion   = 1
-	maxDelayMinutes = 24 * 60
-	minLeadMinutes  = -120
-	maxLeadMinutes  = 25 * 60
-	minTrainingRows = 24
-	minTestRows     = 8
-	maxRows         = 100_000
-	maxArtifactSize = 64 << 10
+	baselineSchemaVersion        = 1
+	terminalWeatherSchemaVersion = 2
+	maxDelayMinutes              = 24 * 60
+	minLeadMinutes               = -120
+	maxLeadMinutes               = 25 * 60
+	minTrainingRows              = 24
+	minTestRows                  = 8
+	maxRows                      = 100_000
+	maxArtifactSize              = 64 << 10
+	leadTimeIndex                = 6
+	terminalWeatherIndex         = 7
+	baselineFeatureCount         = terminalWeatherIndex
 )
 
 var featureNames = [...]string{
 	"airline_delay", "inbound_turnaround", "airport_delay", "ground_stop", "weather", "air_traffic_control", "lead_time",
+	"terminal_weather_forecast",
 }
 
 const featureCount = len(featureNames)
@@ -33,12 +38,13 @@ const featureCount = len(featureNames)
 // Features holds only information available at the forecast observation time.
 // The delay fields express minutes later than the published departure schedule.
 type Features struct {
-	AirlineDelayMinutes float64 `json:"airlineDelayMinutes"`
-	InboundDelayMinutes float64 `json:"inboundDelayMinutes"`
-	AirportDelayMinutes float64 `json:"airportDelayMinutes"`
-	GroundStopMinutes   float64 `json:"groundStopMinutes"`
-	Weather             bool    `json:"weather"`
-	AirTrafficControl   bool    `json:"airTrafficControl"`
+	AirlineDelayMinutes     float64 `json:"airlineDelayMinutes"`
+	InboundDelayMinutes     float64 `json:"inboundDelayMinutes"`
+	AirportDelayMinutes     float64 `json:"airportDelayMinutes"`
+	GroundStopMinutes       float64 `json:"groundStopMinutes"`
+	Weather                 bool    `json:"weather"`
+	AirTrafficControl       bool    `json:"airTrafficControl"`
+	TerminalWeatherForecast bool    `json:"terminalWeatherForecast,omitempty"`
 }
 
 func (f Features) values(leadMinutes float64) ([featureCount]float64, bool) {
@@ -48,6 +54,9 @@ func (f Features) values(leadMinutes float64) ([featureCount]float64, bool) {
 	}
 	if f.AirTrafficControl {
 		values[5] = 1
+	}
+	if f.TerminalWeatherForecast {
+		values[terminalWeatherIndex] = 1
 	}
 	for _, value := range values[:4] {
 		if !within(value, 0, maxDelayMinutes) {
@@ -69,8 +78,8 @@ func (f Features) operationalBaseline() float64 {
 	return max(f.physicalFloor(), f.AirlineDelayMinutes, f.AirportDelayMinutes)
 }
 
-func (f Features) hasSignal() bool {
-	return f.operationalBaseline() > 0 || f.Weather || f.AirTrafficControl
+func (f Features) hasSignal(useTerminalWeather bool) bool {
+	return f.operationalBaseline() > 0 || f.Weather || f.AirTrafficControl || useTerminalWeather && f.TerminalWeatherForecast
 }
 
 // ElapsedDepartureDelay is the delay already observed on a flight awaiting
@@ -107,16 +116,30 @@ type Model struct {
 }
 
 func newModel(value artifact) (*Model, error) {
-	if value.SchemaVersion != schemaVersion || value.TrainingRows < minTrainingRows || value.TrainingRows > maxRows ||
-		value.TrainingUntil.IsZero() || !validRidge(value.Ridge) || !within(value.Intercept, 0, maxDelayMinutes) || len(value.Terms) != featureCount {
+	var expectedTerms int
+	switch value.SchemaVersion {
+	case baselineSchemaVersion:
+		expectedTerms = baselineFeatureCount
+	case terminalWeatherSchemaVersion:
+		expectedTerms = featureCount
+	default:
+		return nil, errors.New("unsupported delay model artifact schema")
+	}
+	if value.TrainingRows < minTrainingRows || value.TrainingRows > maxRows || value.TrainingUntil.IsZero() ||
+		!validRidge(value.Ridge) || !within(value.Intercept, 0, maxDelayMinutes) || len(value.Terms) != expectedTerms {
 		return nil, errors.New("invalid delay model artifact metadata")
 	}
 	for i, t := range value.Terms {
 		low, high := float64(0), float64(maxDelayMinutes)
-		if i == 4 || i == 5 {
+		switch i {
+		case 4, 5:
 			high = 1
-		}
-		if i == featureCount-1 {
+		case terminalWeatherIndex:
+			high = 1
+			if t.Min != 0 || t.Max != 1 {
+				return nil, errors.New("terminal weather term must support both forecast states")
+			}
+		case leadTimeIndex:
 			low, high = minLeadMinutes, maxLeadMinutes
 		}
 		if t.Feature != featureNames[i] || !within(t.Min, low, high) || !within(t.Max, t.Min, high) ||
@@ -130,7 +153,8 @@ func newModel(value artifact) (*Model, error) {
 		return nil, err
 	}
 	digest := sha256.Sum256(payload)
-	return &Model{artifact: value, id: "delay-ridge-v1-" + hex.EncodeToString(digest[:8])}, nil
+	id := fmt.Sprintf("delay-ridge-v%d-%s", value.SchemaVersion, hex.EncodeToString(digest[:8]))
+	return &Model{artifact: value, id: id}, nil
 }
 
 func validRidge(value float64) bool { return within(value, 1e-6, 100) }
@@ -159,12 +183,17 @@ func (m *Model) Save(output io.Writer) error {
 
 func (m *Model) ID() string { return m.id }
 
+// UsesTerminalWeatherForecast reports whether the fitted artifact includes TAF.
+func (m *Model) UsesTerminalWeatherForecast() bool {
+	return m != nil && m.artifact.SchemaVersion == terminalWeatherSchemaVersion
+}
+
 // MaxLeadMinutes reports the earliest forecast lead supported by the fit.
 func (m *Model) MaxLeadMinutes() float64 {
 	if m == nil || m.id == "" {
 		return 0
 	}
-	return m.artifact.Terms[featureCount-1].Max
+	return m.artifact.Terms[leadTimeIndex].Max
 }
 
 // Contribution is a signed change from the historical training baseline.
@@ -180,19 +209,20 @@ type Estimate struct {
 }
 
 // Estimate declines extrapolation beyond the feature ranges seen at training.
-// It also declines flights with no positive observed operational signal.
+// It also declines flights with no positive signal supported by the artifact.
 func (m *Model) Estimate(features Features, observedAt, scheduledDeparture time.Time) (Estimate, bool) {
-	if m == nil || m.id == "" || !observedAt.After(m.artifact.TrainingUntil) || scheduledDeparture.IsZero() || !features.hasSignal() {
+	if m == nil || m.id == "" || !observedAt.After(m.artifact.TrainingUntil) || scheduledDeparture.IsZero() ||
+		!features.hasSignal(m.UsesTerminalWeatherForecast()) {
 		return Estimate{}, false
 	}
 	values, valid := features.values(scheduledDeparture.Sub(observedAt).Minutes())
 	if !valid {
 		return Estimate{}, false
 	}
-	result := Estimate{Baseline: m.artifact.Intercept, Contributions: make([]Contribution, 0, featureCount+1)}
+	result := Estimate{Baseline: m.artifact.Intercept, Contributions: make([]Contribution, 0, len(m.artifact.Terms)+1)}
 	delay := result.Baseline
-	for i, value := range values {
-		t := m.artifact.Terms[i]
+	for i, t := range m.artifact.Terms {
+		value := values[i]
 		if !within(value, t.Min-1e-8, t.Max+1e-8) {
 			return Estimate{}, false
 		}

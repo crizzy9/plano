@@ -257,10 +257,13 @@ func TestCheckConfigEarlyDelayModel(t *testing.T) {
 	for _, tc := range []struct {
 		name, demo, wantError string
 		lead                  time.Duration
+		weather, taf          bool
 	}{
 		{name: "invalid artifact", demo: "false", wantError: "PLANO_EARLY_DELAY_MODEL_FILE"},
 		{name: "standard artifact", demo: "false", lead: 2 * time.Hour, wantError: "above 120 minutes"},
 		{name: "early artifact", demo: "false", lead: 3 * time.Hour},
+		{name: "early weather artifact requires TAF", demo: "false", lead: 3 * time.Hour, weather: true, wantError: "requires PLANO_TAF=true"},
+		{name: "early weather artifact with TAF", demo: "false", lead: 3 * time.Hour, weather: true, taf: true},
 		{name: "demo skips invalid artifact", demo: "true"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -270,6 +273,9 @@ func TestCheckConfigEarlyDelayModel(t *testing.T) {
 			t.Setenv("PLANO_ENROLLMENT_CODE", "fixture-enrollment-code")
 			t.Setenv("PLANO_AEROAPI_KEY", "fixture-aeroapi-key")
 			t.Setenv("PLANO_ADDR", "127.0.0.1:0")
+			if tc.taf {
+				t.Setenv("PLANO_TAF", "true")
+			}
 			path := filepath.Join(t.TempDir(), "early-delay-model.json")
 			var data bytes.Buffer
 			if tc.lead == 0 {
@@ -281,7 +287,7 @@ func TestCheckConfigEarlyDelayModel(t *testing.T) {
 					examples[i] = predict.Example{
 						FlightID: fmt.Sprintf("fixture-%d", i), ObservedAt: scheduled.Add(-tc.lead),
 						ScheduledDeparture: scheduled, DepartedAt: scheduled.Add(15 * time.Minute),
-						Features: predict.Features{AirlineDelayMinutes: 10},
+						Features: predict.Features{AirlineDelayMinutes: 10, TerminalWeatherForecast: tc.weather && i%2 == 0},
 					}
 				}
 				model, _, err := predict.Fit(examples, predict.Options{HoldoutFraction: 0.2, Ridge: 0.1})

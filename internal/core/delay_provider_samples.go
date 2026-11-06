@@ -23,7 +23,8 @@ const providerDelayAliasesSQL = `WITH aliases(id) AS (
   SELECT 1 FROM aero_instance_keys WHERE flight_id=@provider)
 ) `
 
-func recordProviderDelaySample(ctx context.Context, tx *sql.Tx, provider string, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, decision time.Time, capture bool) error {
+func recordProviderDelaySample(ctx context.Context, tx *sql.Tx, provider string, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory,
+	forecasts []AirportWeatherForecast, decision time.Time, capture bool) error {
 	// A direct legacy ID proves which flight was sampled. A schedule alias's
 	// current mapping does not prove what the alias meant at capture time.
 	var adopted bool
@@ -68,7 +69,7 @@ WHERE s.flight_id=? AND substr(f.id,1,10)<>'scheduled_' AND (
 	if !capture || !outcome.observedAt.IsZero() {
 		return nil
 	}
-	tables, raw, err := delaySampleFeatures(provider, flight, rotation, advisories, decision)
+	tables, raw, err := delaySampleFeatures(provider, flight, rotation, advisories, forecasts, decision)
 	if err != nil || raw == nil {
 		return err
 	}

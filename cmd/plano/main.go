@@ -413,6 +413,12 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		if earlyDelayModel != nil && earlyDelayModel.MaxLeadMinutes() <= 120 {
 			return errors.New("PLANO_EARLY_DELAY_MODEL_FILE requires a model trained with lead times above 120 minutes")
 		}
+		if weatherForecast == nil && delayModel.UsesTerminalWeatherForecast() {
+			return errors.New("the terminal weather feature in PLANO_DELAY_MODEL_FILE requires PLANO_TAF=true")
+		}
+		if weatherForecast == nil && earlyDelayModel.UsesTerminalWeatherForecast() {
+			return errors.New("the terminal weather feature in PLANO_EARLY_DELAY_MODEL_FILE requires PLANO_TAF=true")
+		}
 	}
 	var historicalRisk *historicalrisk.Model
 	if path := os.Getenv("PLANO_HISTORICAL_RISK_FILE"); path != "" {
@@ -439,7 +445,7 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		return nil
 	}
 	store, err := core.OpenWithOptions(env("PLANO_DB", "plano.db"), core.StoreOptions{
-		DelayModel: delayModel, EarlyDelayModel: earlyDelayModel, CollectDelaySamples: collectSamples && !demo,
+		DelayModel: delayModel, EarlyDelayModel: earlyDelayModel, WeatherForecast: weatherForecast, CollectDelaySamples: collectSamples && !demo,
 	})
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)

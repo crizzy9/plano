@@ -2,8 +2,10 @@ package predict
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -117,7 +119,7 @@ func TestEstimateContributionsAndUnsupportedFeatures(t *testing.T) {
 	}
 	row := rows[73]
 	got, ok := model.Estimate(row.Features, row.ObservedAt, row.ScheduledDeparture)
-	if !ok || got.DelayMinutes < row.Features.physicalFloor() || len(got.Contributions) < featureCount {
+	if !ok || got.DelayMinutes < row.Features.physicalFloor() || len(got.Contributions) < baselineFeatureCount {
 		t.Fatalf("estimate = %+v, %t", got, ok)
 	}
 	sum := got.Baseline
@@ -138,6 +140,117 @@ func TestEstimateContributionsAndUnsupportedFeatures(t *testing.T) {
 	row = rows[73]
 	if _, ok := model.Estimate(Features{}, row.ObservedAt, row.ScheduledDeparture); ok {
 		t.Fatal("forecast without a usable observed signal")
+	}
+}
+
+func TestFitUsesTerminalWeatherOnlyWhenItVariesInFittedRows(t *testing.T) {
+	rows := syntheticExamples()
+	rows[63].LabelObservedAt = new(rows[64].ObservedAt.Add(time.Hour))
+	options := Options{HoldoutFraction: 0.2, Ridge: 0.01}
+	baseline, baselineReport, err := Fit(rows, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name       string
+		forecastAt func(int) bool
+	}{
+		{"variation only outside fit", func(i int) bool { return i >= 63 }},
+		{"constant positive flag", func(_ int) bool { return true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			samples := slices.Clone(rows)
+			for i := range samples {
+				samples[i].Features.TerminalWeatherForecast = tc.forecastAt(i)
+			}
+			model, report, err := Fit(samples, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if model.UsesTerminalWeatherForecast() || model.ID() != baseline.ID() || report != baselineReport {
+				t.Fatalf("fit without terminal weather variation changed the baseline: %+v", report)
+			}
+		})
+	}
+	row := rows[73]
+	without, supported := baseline.Estimate(row.Features, row.ObservedAt, row.ScheduledDeparture)
+	row.Features.TerminalWeatherForecast = true
+	with, alsoSupported := baseline.Estimate(row.Features, row.ObservedAt, row.ScheduledDeparture)
+	if !supported || !alsoSupported || with.DelayMinutes != without.DelayMinutes || !slices.Equal(with.Contributions, without.Contributions) {
+		t.Fatalf("v1 estimate changed with terminal weather: %+v vs %+v", without, with)
+	}
+	if _, ok := baseline.Estimate(Features{TerminalWeatherForecast: true}, row.ObservedAt, row.ScheduledDeparture); ok {
+		t.Fatal("v1 model treated terminal weather alone as a supported signal")
+	}
+}
+
+func TestTerminalWeatherModelRoundTripAndBacktest(t *testing.T) {
+	rows := syntheticExamples()
+	for i := range rows {
+		rows[i].Features = Features{TerminalWeatherForecast: i%2 == 0}
+		rows[i].DepartedAt = rows[i].ScheduledDeparture
+		if rows[i].Features.TerminalWeatherForecast {
+			rows[i].DepartedAt = rows[i].DepartedAt.Add(30 * time.Minute)
+		}
+	}
+	var input bytes.Buffer
+	encoder := json.NewEncoder(&input)
+	for _, row := range rows {
+		if err := encoder.Encode(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	samples, err := ReadExamples(&input)
+	if err != nil || len(samples) != len(rows) || samples[0].Features != rows[0].Features || samples[1].Features != rows[1].Features {
+		t.Fatalf("terminal weather JSONL round trip failed: %v", err)
+	}
+	model, report, err := Fit(samples, Options{HoldoutFraction: 0.2, Ridge: 0.01})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !model.UsesTerminalWeatherForecast() || !strings.HasPrefix(model.ID(), "delay-ridge-v2-") || model.MaxLeadMinutes() != 50 {
+		t.Fatalf("unexpected terminal weather artifact %s, maximum lead %v", model.ID(), model.MaxLeadMinutes())
+	}
+	if report.EligibleRows != 8 || report.LearnedRows != 8 || report.EligibleCoverage != 1 || report.LearnedOrFallback.MeanAbsoluteMinutes > 1 {
+		t.Fatalf("terminal weather backtest = %+v", report)
+	}
+	weather := report.TerminalWeather
+	if weather == nil || weather.HoldoutRows != 8 || weather.LearnedRows != 8 || weather.LearnedCoverage != 1 ||
+		weather.LearnedOrFallback == nil || weather.LearnedOrFallback.MeanAbsoluteMinutes > 1 {
+		t.Fatalf("weather-bearing holdout = %+v", weather)
+	}
+	paired := weather.WithoutTerminalWeather
+	if paired == nil || paired.AllFlights.MeanAbsoluteMinutes != 15 ||
+		paired.WeatherFlights == nil || paired.WeatherFlights.MeanAbsoluteMinutes != 30 {
+		t.Fatalf("paired non-TAF baseline = %+v", paired)
+	}
+	var artifact bytes.Buffer
+	if err := model.Save(&artifact); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(bytes.NewReader(artifact.Bytes()))
+	if err != nil || loaded.ID() != model.ID() || !loaded.UsesTerminalWeatherForecast() {
+		t.Fatalf("terminal weather artifact round trip failed: %v", err)
+	}
+	review, err := Evaluate(loaded, rows[64:])
+	expected := report
+	weatherOnly := *weather
+	weatherOnly.WithoutTerminalWeather = nil
+	expected.TerminalWeather = &weatherOnly
+	if err != nil || !reflect.DeepEqual(review.Backtest, expected) {
+		t.Fatalf("loaded terminal weather evaluation = %+v, %v", review, err)
+	}
+	row := rows[72]
+	estimate, ok := loaded.Estimate(row.Features, row.ObservedAt, row.ScheduledDeparture)
+	if !ok || math.Abs(estimate.DelayMinutes-30) > 1 || len(estimate.Contributions) != featureCount {
+		t.Fatalf("terminal weather-only estimate = %+v, %t", estimate, ok)
+	}
+	contribution := estimate.Contributions[terminalWeatherIndex]
+	if contribution.Feature != "terminal_weather_forecast" || contribution.Minutes <= 0 {
+		t.Fatalf("terminal weather contribution = %+v", contribution)
+	}
+	if _, ok := loaded.Estimate(row.Features, row.ObservedAt, row.ObservedAt.Add(51*time.Minute)); ok {
+		t.Fatal("terminal weather model extrapolated beyond its supported lead time")
 	}
 }
 

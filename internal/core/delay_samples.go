@@ -41,9 +41,10 @@ var (
 	delaySampleCohorts        = [...]delaySampleTables{standardDelaySampleTables, earlyDelaySampleTables}
 )
 
-func recordDelaySample(ctx context.Context, tx *sql.Tx, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, decision time.Time, capture bool) error {
+func recordDelaySample(ctx context.Context, tx *sql.Tx, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory,
+	forecasts []AirportWeatherForecast, decision time.Time, capture bool) error {
 	if provider := flight.AeroProviderID(); provider != "" {
-		return recordProviderDelaySample(ctx, tx, provider, flight, rotation, advisories, decision, capture)
+		return recordProviderDelaySample(ctx, tx, provider, flight, rotation, advisories, forecasts, decision, capture)
 	}
 	// An unresolved schedule ID is a reference to a timetable entry. Its
 	// eventual provider mapping cannot prove which flight a forecast described.
@@ -61,7 +62,7 @@ func recordDelaySample(ctx context.Context, tx *sql.Tx, flight feeds.Flight, rot
 	if !capture {
 		return nil
 	}
-	tables, raw, err := delaySampleFeatures(flight.ID, flight, rotation, advisories, decision)
+	tables, raw, err := delaySampleFeatures(flight.ID, flight, rotation, advisories, forecasts, decision)
 	if err != nil || raw == nil {
 		return err
 	}
@@ -104,7 +105,8 @@ func delaySampleTarget(identity string, tables delaySampleTables) time.Duration 
 	return minimum + time.Duration(seed%minutes)*time.Minute
 }
 
-func delaySampleFeatures(identity string, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, decision time.Time) (delaySampleTables, []byte, error) {
+func delaySampleFeatures(identity string, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory,
+	forecasts []AirportWeatherForecast, decision time.Time) (delaySampleTables, []byte, error) {
 	if flight.ScheduledDeparture == nil {
 		return delaySampleTables{}, nil, nil
 	}
@@ -119,7 +121,7 @@ func delaySampleFeatures(identity string, flight feeds.Flight, rotation []feeds.
 	if lead > delaySampleTarget(identity, tables) {
 		return delaySampleTables{}, nil, nil
 	}
-	features, ok := ExtractDelayFeatures(flight, rotation, advisories, decision)
+	features, ok := extractDelayFeaturesWithTerminalWeather(flight, rotation, advisories, forecasts, decision)
 	if !ok || max(features.AirlineDelayMinutes, features.InboundDelayMinutes, features.AirportDelayMinutes, features.GroundStopMinutes) > 1440 {
 		return delaySampleTables{}, nil, nil
 	}

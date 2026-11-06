@@ -98,6 +98,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		report.LearnedOrFallback.MeanAbsoluteMinutes >= report.Published.MeanAbsoluteMinutes) {
 		return errors.New("backtest failed the deployment gate. Need at least eight signal-bearing holdout rows, 50% learned coverage among them, and lower all-flight holdout MAE than both baselines")
 	}
+	if weather := report.TerminalWeather; !*allowRegression && weather != nil {
+		paired := weather.WithoutTerminalWeather
+		const tolerance = 1e-8
+		if weather.HoldoutRows < 8 || weather.LearnedCoverage < 0.5 || weather.LearnedOrFallback == nil ||
+			paired == nil || paired.WeatherFlights == nil ||
+			report.LearnedOrFallback.MeanAbsoluteMinutes+tolerance >= paired.AllFlights.MeanAbsoluteMinutes ||
+			weather.LearnedOrFallback.MeanAbsoluteMinutes+tolerance >= paired.WeatherFlights.MeanAbsoluteMinutes {
+			return errors.New("backtest failed the terminal weather deployment gate. Need at least eight holdout flights with adverse terminal weather, 50% learned coverage among them, and lower MAE than the paired fit both overall and on those flights")
+		}
+	}
 	return writeArtifact(*outputPath, stdout, model.Save)
 }
 

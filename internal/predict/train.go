@@ -59,19 +59,36 @@ type ErrorMetrics struct {
 }
 
 type Backtest struct {
-	ModelVersion      string       `json:"modelVersion"`
-	TrainingRows      int          `json:"trainingRows"`
-	TrainingUntil     time.Time    `json:"trainingUntil"`
-	HoldoutFrom       time.Time    `json:"holdoutFrom"`
-	HoldoutRows       int          `json:"holdoutRows"`
-	PurgedRows        int          `json:"purgedRows"`
-	LearnedRows       int          `json:"learnedRows"`
-	LearnedCoverage   float64      `json:"learnedCoverage"`
-	EligibleRows      int          `json:"eligibleRows"`
-	EligibleCoverage  float64      `json:"eligibleCoverage"`
-	Operational       ErrorMetrics `json:"operationalBaseline"`
-	Published         ErrorMetrics `json:"publishedEstimateBaseline"`
-	LearnedOrFallback ErrorMetrics `json:"learnedOrFallback"`
+	ModelVersion      string                   `json:"modelVersion"`
+	TrainingRows      int                      `json:"trainingRows"`
+	TrainingUntil     time.Time                `json:"trainingUntil"`
+	HoldoutFrom       time.Time                `json:"holdoutFrom"`
+	HoldoutRows       int                      `json:"holdoutRows"`
+	PurgedRows        int                      `json:"purgedRows"`
+	LearnedRows       int                      `json:"learnedRows"`
+	LearnedCoverage   float64                  `json:"learnedCoverage"`
+	EligibleRows      int                      `json:"eligibleRows"`
+	EligibleCoverage  float64                  `json:"eligibleCoverage"`
+	Operational       ErrorMetrics             `json:"operationalBaseline"`
+	Published         ErrorMetrics             `json:"publishedEstimateBaseline"`
+	LearnedOrFallback ErrorMetrics             `json:"learnedOrFallback"`
+	TerminalWeather   *TerminalWeatherBacktest `json:"terminalWeather,omitempty"`
+}
+
+// TerminalWeatherBacktest scores the held-out flights with adverse TAF evidence.
+type TerminalWeatherBacktest struct {
+	HoldoutRows            int                      `json:"holdoutRows"`
+	LearnedRows            int                      `json:"learnedRows"`
+	LearnedCoverage        float64                  `json:"learnedCoverage"`
+	LearnedOrFallback      *ErrorMetrics            `json:"learnedOrFallback,omitempty"`
+	WithoutTerminalWeather *TerminalWeatherBaseline `json:"withoutTerminalWeather,omitempty"`
+}
+
+// TerminalWeatherBaseline scores a fit that uses the same examples and ridge
+// penalty with the terminal weather term excluded.
+type TerminalWeatherBaseline struct {
+	AllFlights     ErrorMetrics  `json:"allFlights"`
+	WeatherFlights *ErrorMetrics `json:"weatherFlights,omitempty"`
 }
 
 type Evaluation struct {
@@ -136,11 +153,18 @@ func Fit(examples []Example, options Options) (*Model, Backtest, error) {
 	if len(training) < minTrainingRows {
 		return nil, Backtest{}, errors.New("not enough earlier flights with outcomes known before the holdout")
 	}
-	model, err := train(training, latestLabel, options.Ridge)
+	model, err := train(training, latestLabel, options.Ridge, true)
 	if err != nil {
 		return nil, Backtest{}, err
 	}
-	return model, backtest(model, holdout, boundary, purged), nil
+	var withoutTerminalWeather *Model
+	if model.UsesTerminalWeatherForecast() {
+		withoutTerminalWeather, err = train(training, latestLabel, options.Ridge, false)
+		if err != nil {
+			return nil, Backtest{}, err
+		}
+	}
+	return model, backtest(model, withoutTerminalWeather, holdout, boundary, purged), nil
 }
 
 // Evaluate scores an existing model on observations after its latest fitted label.
@@ -165,7 +189,7 @@ func Evaluate(model *Model, examples []Example) (Evaluation, error) {
 	}
 	sortExamples(eligible)
 	return Evaluation{
-		Backtest:                backtest(model, eligible, eligible[0].ObservedAt.UTC(), 0),
+		Backtest:                backtest(model, nil, eligible, eligible[0].ObservedAt.UTC(), 0),
 		ExcludedThroughTraining: len(examples) - len(eligible),
 	}, nil
 }
@@ -193,23 +217,30 @@ func sortExamples(rows []Example) {
 	})
 }
 
-func train(points []trainingPoint, through time.Time, ridge float64) (*Model, error) {
-	terms := make([]term, featureCount)
+func train(points []trainingPoint, through time.Time, ridge float64, allowTerminalWeather bool) (*Model, error) {
+	schema, termCount := baselineSchemaVersion, baselineFeatureCount
+	firstWeather := points[0].features[terminalWeatherIndex]
+	if allowTerminalWeather && slices.ContainsFunc(points[1:], func(point trainingPoint) bool {
+		return point.features[terminalWeatherIndex] != firstWeather
+	}) {
+		schema, termCount = terminalWeatherSchemaVersion, featureCount
+	}
+	terms := make([]term, termCount)
 	count := float64(len(points))
-	for i, name := range featureNames {
+	for i, name := range featureNames[:termCount] {
 		terms[i] = term{Feature: name, Min: points[0].features[i], Max: points[0].features[i]}
 	}
 	var meanLabel float64
 	for _, point := range points {
 		meanLabel += point.label / count
-		for i, value := range point.features {
+		for i, value := range point.features[:termCount] {
 			terms[i].Mean += value / count
 			terms[i].Min = min(terms[i].Min, value)
 			terms[i].Max = max(terms[i].Max, value)
 		}
 	}
 	for _, point := range points {
-		for i, value := range point.features {
+		for i, value := range point.features[:termCount] {
 			delta := value - terms[i].Mean
 			terms[i].Scale += delta * delta / count
 		}
@@ -224,33 +255,33 @@ func train(points []trainingPoint, through time.Time, ridge float64) (*Model, er
 	var rhs [featureCount]float64
 	for _, point := range points {
 		var standardized [featureCount]float64
-		for i, value := range point.features {
+		for i, value := range point.features[:termCount] {
 			standardized[i] = (value - terms[i].Mean) / terms[i].Scale
 		}
-		for i, value := range standardized {
+		for i, value := range standardized[:termCount] {
 			rhs[i] += value * (point.label - meanLabel) / count
 			for j := range i + 1 {
 				gram[i][j] += value * standardized[j] / count
 			}
 		}
 	}
-	for i := range gram {
+	for i := range termCount {
 		gram[i][i] += ridge
 	}
-	weights, err := solvePositiveDefinite(gram, rhs)
+	weights, err := solvePositiveDefinite(gram, rhs, termCount)
 	if err != nil {
 		return nil, err
 	}
-	for i, weight := range weights {
+	for i, weight := range weights[:termCount] {
 		terms[i].Coefficient = weight
 	}
-	return newModel(artifact{SchemaVersion: schemaVersion, TrainingRows: len(points), TrainingUntil: through, Ridge: ridge, Intercept: min(meanLabel, maxDelayMinutes), Terms: terms})
+	return newModel(artifact{SchemaVersion: schema, TrainingRows: len(points), TrainingUntil: through, Ridge: ridge, Intercept: min(meanLabel, maxDelayMinutes), Terms: terms})
 }
 
 // Cholesky solves the positive-definite ridge normal equations in fixed memory.
-func solvePositiveDefinite(matrix [featureCount][featureCount]float64, rhs [featureCount]float64) ([featureCount]float64, error) {
+func solvePositiveDefinite(matrix [featureCount][featureCount]float64, rhs [featureCount]float64, size int) ([featureCount]float64, error) {
 	var lower [featureCount][featureCount]float64
-	for i := range matrix {
+	for i := range size {
 		for j := range i + 1 {
 			value := matrix[i][j]
 			for k := range j {
@@ -266,14 +297,14 @@ func solvePositiveDefinite(matrix [featureCount][featureCount]float64, rhs [feat
 			}
 		}
 	}
-	for i := range rhs {
+	for i := range size {
 		for j := range i {
 			rhs[i] -= lower[i][j] * rhs[j]
 		}
 		rhs[i] /= lower[i][i]
 	}
-	for i := len(rhs) - 1; i >= 0; i-- {
-		for j := i + 1; j < len(rhs); j++ {
+	for i := size - 1; i >= 0; i-- {
+		for j := i + 1; j < size; j++ {
 			rhs[i] -= lower[j][i] * rhs[j]
 		}
 		rhs[i] /= lower[i][i]
@@ -281,26 +312,51 @@ func solvePositiveDefinite(matrix [featureCount][featureCount]float64, rhs [feat
 	return rhs, nil
 }
 
-func backtest(model *Model, holdout []Example, boundary time.Time, purged int) Backtest {
+func backtest(model, withoutTerminalWeather *Model, holdout []Example, boundary time.Time, purged int) Backtest {
 	result := Backtest{
 		ModelVersion: model.ID(), TrainingRows: model.artifact.TrainingRows, TrainingUntil: model.artifact.TrainingUntil,
 		HoldoutFrom: boundary, HoldoutRows: len(holdout), PurgedRows: purged,
+	}
+	var weather *TerminalWeatherBacktest
+	var paired *TerminalWeatherBaseline
+	var weatherErrors, pairedWeatherErrors ErrorMetrics
+	if model.UsesTerminalWeatherForecast() {
+		weather = &TerminalWeatherBacktest{}
+		if withoutTerminalWeather != nil {
+			paired = &TerminalWeatherBaseline{}
+			weather.WithoutTerminalWeather = paired
+		}
+		result.TerminalWeather = weather
 	}
 	for _, row := range holdout {
 		point, _ := row.point()
 		elapsed := ElapsedDepartureDelay(row.ScheduledDeparture, row.ObservedAt)
 		operational := max(row.Features.operationalBaseline(), elapsed)
-		prediction := operational
-		if row.Features.hasSignal() {
+		prediction, learned := estimateOrFallback(model, row, elapsed, operational)
+		if row.Features.hasSignal(model.UsesTerminalWeatherForecast()) {
 			result.EligibleRows++
 		}
-		if estimate, ok := model.Estimate(row.Features, row.ObservedAt, row.ScheduledDeparture); ok {
-			prediction = max(estimate.DelayMinutes, elapsed)
+		if learned {
 			result.LearnedRows++
 		}
 		result.Operational.record(operational - point.label)
 		result.Published.record(row.Features.AirlineDelayMinutes - point.label)
 		result.LearnedOrFallback.record(prediction - point.label)
+		hasTerminalWeather := weather != nil && row.Features.TerminalWeatherForecast
+		if hasTerminalWeather {
+			weather.HoldoutRows++
+			if learned {
+				weather.LearnedRows++
+			}
+			weatherErrors.record(prediction - point.label)
+		}
+		if paired != nil {
+			prediction, _ := estimateOrFallback(withoutTerminalWeather, row, elapsed, operational)
+			paired.AllFlights.record(prediction - point.label)
+			if hasTerminalWeather {
+				pairedWeatherErrors.record(prediction - point.label)
+			}
+		}
 	}
 	result.LearnedCoverage = float64(result.LearnedRows) / float64(result.HoldoutRows)
 	if result.EligibleRows > 0 {
@@ -309,7 +365,26 @@ func backtest(model *Model, holdout []Example, boundary time.Time, purged int) B
 	result.Operational.average(result.HoldoutRows)
 	result.Published.average(result.HoldoutRows)
 	result.LearnedOrFallback.average(result.HoldoutRows)
+	if paired != nil {
+		paired.AllFlights.average(result.HoldoutRows)
+	}
+	if weather != nil && weather.HoldoutRows > 0 {
+		weather.LearnedCoverage = float64(weather.LearnedRows) / float64(weather.HoldoutRows)
+		weatherErrors.average(weather.HoldoutRows)
+		weather.LearnedOrFallback = &weatherErrors
+		if paired != nil {
+			pairedWeatherErrors.average(weather.HoldoutRows)
+			paired.WeatherFlights = &pairedWeatherErrors
+		}
+	}
 	return result
+}
+
+func estimateOrFallback(model *Model, row Example, elapsed, fallback float64) (float64, bool) {
+	if estimate, ok := model.Estimate(row.Features, row.ObservedAt, row.ScheduledDeparture); ok {
+		return max(estimate.DelayMinutes, elapsed), true
+	}
+	return fallback, false
 }
 
 func (m *ErrorMetrics) record(errorMinutes float64) {

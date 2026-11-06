@@ -84,9 +84,10 @@ func (s *Store) applyAeroInbound(ctx context.Context, providerID string, incomin
 		if err != nil {
 			return err
 		}
-		forecast := PredictWithModel(s.delayModelFor(flight, now), flight, rotation, advisories, now)
+		terminalForecasts := s.weatherForecast.ForFlight(flight, now)
+		forecast := predictWithTerminalWeather(s.delayModelFor(flight, now), flight, rotation, advisories, terminalForecasts, now)
 		capCachedAdvisoryValidity(forecast, deadlines)
-		event, cleared, err := delayForecastTransition(ctx, tx, flight, flight, t.rotation, t.prediction, forecast, now, true)
+		event, cleared, err := s.delayForecastTransition(ctx, tx, flight, flight, t.rotation, t.prediction, forecast, now, true)
 		if err != nil {
 			return err
 		}
@@ -209,27 +210,33 @@ func retainAircraftMetadata(next *feeds.Flight, previous feeds.Flight, previousP
 	return changed
 }
 
-func delayForecastTransition(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight, previousInbound, previousPrediction []byte,
+func (s *Store) delayForecastTransition(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight, previousInbound, previousPrediction []byte,
 	forecast *Prediction, decisionAt time.Time, sameSchedule bool) (Event, bool, error) {
 	var old *Prediction
 	if err := json.Unmarshal(previousPrediction, &old); err != nil {
 		return Event{}, false, err
 	}
-	var inboundExpired bool
-	if old != nil && forecast != nil && sameSchedule && usesInboundTiming(old) {
+	previousExpired := old != nil && !s.terminalWeatherForecastCurrent(old, prior, decisionAt)
+	if previousExpired && forecast != nil && sameSchedule &&
+		old.DelayMinutes == forecast.DelayMinutes && slices.Equal(old.Reasons, forecast.Reasons) {
+		// A new bulletin can support the same warning. Keep it without
+		// sending passengers another copy of the same estimate.
+		return Event{}, false, nil
+	}
+	if !previousExpired && old != nil && forecast != nil && sameSchedule && usesInboundTiming(old) {
 		var rotation []feeds.Flight
 		if err := json.Unmarshal(previousInbound, &rotation); err != nil {
 			return Event{}, false, err
 		}
 		// Recovery can replace an expired warning even if the minutes hardly change.
 		_, valid := predictionValidity(old, prior, rotation, decisionAt)
-		inboundExpired = !valid
+		previousExpired = !valid
 	}
 	cleared := old != nil && old.DelayMinutes >= flightDelayAlertMinutes &&
-		(!sameSchedule || inboundExpired || forecast == nil || forecast.DelayMinutes < flightDelayAlertMinutes ||
+		(!sameSchedule || previousExpired || forecast == nil || forecast.DelayMinutes < flightDelayAlertMinutes ||
 			old.DelayMinutes-forecast.DelayMinutes >= flightDelayAlertMinutes)
 	if forecast == nil || forecast.DelayMinutes < flightDelayAlertMinutes ||
-		(sameSchedule && !inboundExpired && old != nil && forecast.DelayMinutes < old.DelayMinutes+flightDelayAlertMinutes && slices.Equal(forecast.Reasons, old.Reasons)) {
+		(sameSchedule && !previousExpired && old != nil && forecast.DelayMinutes < old.DelayMinutes+flightDelayAlertMinutes && slices.Equal(forecast.Reasons, old.Reasons)) {
 		return Event{}, cleared, nil
 	}
 	var latest sql.NullInt64

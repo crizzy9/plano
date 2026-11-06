@@ -813,7 +813,7 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 				}
 			}
 			validUntil, valid := predictionValidity(forecast, current, rotation, now)
-			if !valid {
+			if !valid || !s.terminalWeatherForecastCurrent(forecast, current, now) {
 				s.removeObsoletePush(ctx, logger, job)
 				return
 			}
