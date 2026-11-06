@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecodeNOTAMConservesClosureScopeAndQualifiers(t *testing.T) {
@@ -56,6 +57,61 @@ E) RWY 09L/27R CLSD (EXC TAX))`
 	got, ok = DecodeNOTAM("(A1234/26 NOTAMC A1233/26\nA) EGLL\nE) AD CLSD)")
 	if !ok || got.Scope != "cancellation" || got.FullAirportClosure || strings.Contains(got.Text, "closed") {
 		t.Fatalf("cancelled notice decoded as %+v, %t", got, ok)
+	}
+}
+
+func TestDecodeNOTAMValidity(t *testing.T) {
+	const start = "2026-11-05T19:00:00Z"
+	const end = "2026-11-05T23:00:00Z"
+	for _, test := range []struct {
+		name, raw, start, end string
+		present, fixed, full  bool
+	}{
+		{"standalone", "AD CLSD", "", "", false, false, true},
+		{"domestic", "!SFO SFO AD AP CLSD 2611051900-2611052300", start, end, true, true, true},
+		{"domestic year rollover", "!SFO SFO AD AP CLSD 6812312359 ‐ 6901010000", "2068-12-31T23:59:00Z", "2069-01-01T00:00:00Z", true, true, true},
+		{"domestic estimate", "!SFO SFO AD AP CLSD 2611051900-2611052300EST", start, end, true, false, true},
+		{"domestic permanent", "!SFO SFO AD AP CLSD 2611051900 - PERM", start, "", true, false, true},
+		{"domestic indefinite", "!SFO SFO AD AP CLSD 2611051900-UFN", start, "", true, false, true},
+		{"domestic truncated end", "!SFO SFO AD AP CLSD 2611051900-261105230", start, "", true, false, false},
+		{"ICAO", "(A1234/26 NOTAMN\nA) EGLL B) 2611051900 C) 2611052300\nE) AD CLSD)", start, end, true, true, true},
+		{"ICAO recurring", "A) EGLL B) 2611051900 C) 2611052300 D) DLY 1900-2000 E) AD CLSD", start, end, true, true, false},
+		{"ICAO empty schedule", "A) EGLL B) 2611051900 C) 2611052300 D) E) AD CLSD", start, end, true, true, false},
+		{"ICAO estimate", "A) EGLL B) 2611051900 C) 2611052300 EST E) AD CLSD", start, end, true, false, true},
+		{"ICAO partial", "A) EGLL C) 2611052300 E) AD CLSD", "", end, true, false, true},
+		{"ICAO missing bounds", "A) EGLL E) AD CLSD", "", "", true, false, true},
+		{"ICAO header missing bounds", "A1234/26 NOTAMN\nE) AD CLSD", "", "", true, false, true},
+		{"ICAO missing location", "A1234/26 NOTAMN\nB) 2611051900 C) 2611052300 E) AD CLSD", "", "", true, false, true},
+		{"ICAO ambiguous location", "A) EGLL EGGW B) 2611051900 C) 2611052300 E) AD CLSD", "", "", true, false, true},
+		{"ICAO embedded domestic header", "A) EGLL B) 2611051900 C) 2611052300 E) !SFO SFO AD CLSD", "", "", true, false, true},
+		{"ICAO embedded domestic range", "A) EGLL E) AD CLSD 2611051900-2611052300", "", "", true, false, true},
+		{"ICAO contradictory embedded range", "A) EGLL B) 2611051900 C) 2611052300 E) AD CLSD 2611051930-2611052300EST", "", "", true, false, true},
+		{"ICAO empty start", "A) EGLL B) C) 2611052300 E) AD CLSD", "", end, true, false, true},
+		{"ICAO duplicate", "A) EGLL B) 2611051900 C) 2611052300 C) 2611052300 E) AD CLSD", "", "", true, false, true},
+		{"ICAO out of order", "A) EGLL C) 2611052300 B) 2611051900 E) AD CLSD", "", "", true, false, true},
+		{"ICAO timing in free text", "A) EGLL E) AD CLSD B) 2611051900 C) 2611052300", "", "", true, false, true},
+		{"ICAO calendar overflow", "A) EGLL B) 2602301900 C) 2611052300 E) AD CLSD", "", end, true, false, true},
+		{"ICAO zero day", "A) EGLL B) 2611001900 C) 2611052300 E) AD CLSD", "", end, true, false, true},
+		{"ICAO hour overflow", "A) EGLL B) 2611051900 C) 2611052400 E) AD CLSD", start, "", true, false, true},
+		{"ICAO reverse bounds", "A) EGLL B) 2611052300 C) 2611051900 E) AD CLSD", end, start, true, false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := DecodeNOTAM(test.raw)
+			if !ok || got.HasValidity != test.present || got.FixedValidity != test.fixed || got.FullAirportClosure != test.full {
+				t.Fatalf("decoded = %+v, %t", got, ok)
+			}
+			checkTime := func(name string, got *time.Time, want string) {
+				t.Helper()
+				if got == nil && want == "" {
+					return
+				}
+				if got == nil || got.Location() != time.UTC || got.Format(time.RFC3339) != want {
+					t.Errorf("%s = %v, want UTC %q", name, got, want)
+				}
+			}
+			checkTime("start", got.StartsAt, test.start)
+			checkTime("end", got.EndsAt, test.end)
+		})
 	}
 }
 

@@ -145,6 +145,79 @@ func TestPredictionUsesOverlappingFullDepartureClosures(t *testing.T) {
 	}
 }
 
+func TestPredictionChecksPublishedNOTAMWindow(t *testing.T) {
+	now := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)
+	start, end := now.Add(30*time.Minute), now.Add(2*time.Hour)
+	flight := feeds.Flight{Status: "scheduled", Origin: "SFO", OriginICAO: "KSFO", ScheduledDeparture: new(now.Add(time.Hour))}
+	const icao = "(A1234/26 NOTAMN\nA) KSFO B) 2611051830 C) 2611052000\nE) AD CLSD)"
+	for _, tc := range []struct {
+		name, raw  string
+		start, end time.Time
+		wantFloor  bool
+	}{
+		{"matching ICAO window", icao, start, end, true},
+		{"matching domestic window", "!SFO SFO AD AP CLSD 2611051830-2611052000", start, end, true},
+		{"legacy structured window", "AD CLSD", start, end, true},
+		{"conflicting start", icao, start.Add(15 * time.Minute), end, false},
+		{"conflicting end", icao, start, end.Add(15 * time.Minute), false},
+		{"missing published end", "(A1234/26 NOTAMN\nA) KSFO B) 2611051830\nE) AD CLSD)", start, end, false},
+		{"invalid published end", "(A1234/26 NOTAMN\nA) KSFO B) 2611051830 C) 2611312000\nE) AD CLSD)", start, end, false},
+		{"estimated published end", "(A1234/26 NOTAMN\nA) KSFO B) 2611051830 C) 2611052000EST\nE) AD CLSD)", start, end, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			advisory := feeds.Advisory{Airport: "KSFO", Kind: "airport_closure", Source: feeds.FAASWIM,
+				RawReason: tc.raw, ObservedAt: now, StartsAt: &tc.start, EndsAt: &tc.end}
+			got := Predict(flight, nil, []feeds.Advisory{advisory}, now)
+			if tc.wantFloor {
+				if got == nil || !got.Departure.Equal(end) {
+					t.Fatalf("forecast = %+v, want departure at %s", got, end)
+				}
+			} else if got != nil {
+				t.Fatalf("uncertain published window changed the forecast: %+v", got)
+			}
+		})
+	}
+}
+
+func TestPredictionFromBridgeNOTAMWindow(t *testing.T) {
+	now := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)
+	end := now.Add(2 * time.Hour)
+	flight := feeds.Flight{Status: "scheduled", Origin: "SFO", OriginICAO: "KSFO", ScheduledDeparture: new(now.Add(time.Hour))}
+	for _, tc := range []struct {
+		name, window string
+		wantFloor    bool
+	}{
+		{"fixed window", "B) 2611051830 C) 2611052000", true},
+		{"partial window", "B) 2611051830", false},
+		{"estimated window", "B) 2611051830 C) 2611052000 EST", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := "(A1234/26 NOTAMN\nA) KSFO " + tc.window + "\nE) AD CLSD)"
+			body := fmt.Sprintf(`{"version":1,"source":"faa_swim","advisory":{"id":"fixture","airport":"KSFO","kind":"airport_closure","observedAt":%q,"rawReason":%q}}`,
+				now.Format(time.RFC3339), raw)
+			advisory, err := feeds.DecodeAdvisoryIngress(strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantFloor && (advisory.StartsAt == nil || !advisory.StartsAt.Equal(now.Add(30*time.Minute)) ||
+				advisory.EndsAt == nil || !advisory.EndsAt.Equal(end)) {
+				t.Fatalf("bridge did not fill the published window: %+v", advisory)
+			}
+			if !tc.wantFloor && (advisory.StartsAt != nil || advisory.EndsAt != nil) {
+				t.Fatalf("bridge filled an uncertain published window: %+v", advisory)
+			}
+			got := Predict(flight, nil, []feeds.Advisory{advisory}, now)
+			if tc.wantFloor {
+				if got == nil || !got.Departure.Equal(end) {
+					t.Fatalf("bridge forecast = %+v, want departure at %s", got, end)
+				}
+			} else if got != nil {
+				t.Fatalf("uncertain bridge window changed the forecast: %+v", got)
+			}
+		})
+	}
+}
+
 func TestPredictionLeavesAmbiguousAndUnrelatedNoticesAsContext(t *testing.T) {
 	now := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)
 	departure := now.Add(time.Hour)

@@ -3,6 +3,7 @@ package feeds
 import (
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -13,6 +14,16 @@ type NOTAMSummary struct {
 	Text               string
 	Airport            string
 	FullAirportClosure bool
+	StartsAt           *time.Time
+	EndsAt             *time.Time
+	HasValidity        bool // A date range or structured ICAO notice was present.
+	FixedValidity      bool // Both bounds are unambiguous and the end is definitive.
+}
+
+// MatchesValidity reports whether a definitive published window agrees with
+// every supplied structured bound. Either structured bound may be absent.
+func (s NOTAMSummary) MatchesValidity(start, end *time.Time) bool {
+	return s.FixedValidity && (start == nil || start.Equal(*s.StartsAt)) && (end == nil || end.Equal(*s.EndsAt))
 }
 
 var (
@@ -20,10 +31,12 @@ var (
 	// domestic contractions, movement area qualifiers, and ICAO fields.
 	notamDomesticHeader = regexp.MustCompile(`^![A-Za-z0-9]{2,7} (?:[0-9]{1,2}/[0-9]{3,4} )?([A-Za-z0-9]{2,7}) (.+)$`)
 	notamICAOHeader     = regexp.MustCompile(`^\(?[A-Z][0-9]{4}/[0-9]{2}\s+NOTAM([NRC])(?:\s+[A-Z][0-9]{4}/[0-9]{2})?$`)
-	notamField          = regexp.MustCompile(`(?:^|[\t\r\n ])([QABCDEFG])\)[\t ]*`)
+	notamICAOLocation   = regexp.MustCompile(`^[A-Z]{4}$`)
+	notamField          = regexp.MustCompile(`(?:^|[\t\r\n ])([QABCDEFG])\)`)
 	notamToken          = regexp.MustCompile(`[A-Za-z0-9]+(?:/[A-Za-z0-9]+)?`)
 	notamUnit           = regexp.MustCompile(`^([0-9]+)(FT|HR|MIN)$`)
-	notamFullClosure    = regexp.MustCompile(`^(?:CLSD|CLOSED)(?: [0-9]{10} ?[-–] ?(?:[0-9]{10}(?: ?EST)?|PERM))?[.]?$`)
+	notamFullClosure    = regexp.MustCompile(`^(?:CLSD|CLOSED)(?: [0-9]{10} ?[-‐‑–] ?(?:[0-9]{10}(?: ?EST)?|PERM|UFN))?[.]?$`)
+	notamDomesticRange  = regexp.MustCompile(`(?i)(?:^| )([0-9]{8,12}) ?[-‐‑–] ?([0-9]{0,12}(?: ?[A-Z]{1,4})?)[.]?$`)
 	notamNonScheduled   = regexp.MustCompile(`(?i)\bNON[- ]SKED\b`)
 )
 
@@ -54,21 +67,23 @@ var notamContractions = map[string]string{
 }
 
 // DecodeNOTAM expands a bounded set of FAA and ICAO contractions. It decodes
-// the plain-text E field when available and keeps any D-field schedule. A Q
-// code alone cannot establish closure scope or applicability. The caller keeps
-// the original notice and uses structured advisory fields for dates and impact.
+// the plain-text E field, D-field schedule, and explicit UTC validity bounds
+// when available. A Q code alone cannot establish scope or applicability.
 func DecodeNOTAM(raw string) (NOTAMSummary, bool) {
 	if len(raw) > 8192 || !utf8.ValidString(raw) {
 		return NOTAMSummary{}, false
 	}
-	body, schedule, airport, cancelled := notamText(raw)
-	if cancelled {
+	parts := notamText(raw)
+	if parts.cancelled {
 		return NOTAMSummary{Scope: "cancellation", Text: "This NOTAM cancels an earlier notice."}, true
 	}
-	body = advisoryPlainText(body)
-	if header := notamDomesticHeader.FindStringSubmatchIndex(body); header != nil {
-		airport = strings.ToUpper(body[header[2]:header[3]])
-		body = body[header[4]:]
+	body, airport := advisoryPlainText(parts.body), parts.airport
+	domesticHeader := notamDomesticHeader.FindStringSubmatchIndex(body)
+	if domesticHeader != nil {
+		if !parts.structured {
+			airport = strings.ToUpper(body[domesticHeader[2]:domesticHeader[3]])
+		}
+		body = body[domesticHeader[4]:]
 	}
 	if !airportCode.MatchString(airport) {
 		airport = ""
@@ -80,39 +95,62 @@ func DecodeNOTAM(raw string) (NOTAMSummary, bool) {
 		}
 		details := body[size+1:]
 		text := subject.text + " " + expandNOTAMText(details)
-		if schedule != "" {
-			text = strings.TrimRight(text, ".") + ". Published schedule " + expandNOTAMText(schedule) + "."
+		if parts.schedule != "" {
+			text = strings.TrimRight(text, ".") + ". Published schedule " + expandNOTAMText(parts.schedule) + "."
 		}
 		if len(text) > 4096 {
 			return NOTAMSummary{}, false
 		}
-		return NOTAMSummary{
+		summary := NOTAMSummary{
 			Scope: subject.scope, Text: text, Airport: airport,
-			FullAirportClosure: subject.scope == "airport" && schedule == "" && notamFullClosure.MatchString(strings.ToUpper(details)),
-		}, true
+			FullAirportClosure: subject.scope == "airport" && !parts.hasSchedule && notamFullClosure.MatchString(strings.ToUpper(details)),
+		}
+		validity := notamDomesticRange.FindStringSubmatch(details)
+		if parts.structured {
+			summary.HasValidity = true
+			// ICAO dates belong in B and C. A second window in E can contradict
+			// those dates or qualify the apparent closure in the free text.
+			if !parts.invalidOrder && validity == nil && domesticHeader == nil && notamICAOLocation.MatchString(airport) {
+				summary.setValidity(parts.start, parts.end)
+			}
+		} else if validity != nil {
+			summary.setValidity(validity[1], validity[2])
+		}
+		return summary, true
 	}
 	return NOTAMSummary{}, false
 }
 
-func notamText(raw string) (body, schedule, airport string, cancelled bool) {
+type notamParts struct {
+	body, schedule, airport, start, end              string
+	structured, hasSchedule, cancelled, invalidOrder bool
+}
+
+func notamText(raw string) notamParts {
 	fields := notamField.FindAllStringSubmatchIndex(raw, -1)
 	if len(fields) == 0 {
 		if header := notamICAOHeader.FindStringSubmatch(strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(raw)), ")")); header != nil && header[1] == "C" {
-			return "", "", "", true
+			return notamParts{cancelled: true}
 		}
-		return raw, "", "", false
+		return notamParts{body: raw}
 	}
 	prefix := strings.ToUpper(strings.TrimSpace(raw[:fields[0][0]]))
 	if prefix != "" {
 		header := notamICAOHeader.FindStringSubmatch(prefix)
 		if header == nil {
-			return raw, "", "", false
+			return notamParts{body: raw}
 		}
 		if header[1] == "C" {
-			return "", "", "", true
+			return notamParts{cancelled: true}
 		}
 	}
+	parts := notamParts{structured: prefix != "" || len(fields) > 1 || raw[fields[0][2]] != 'E'}
+	lastField := -1
 	for i, match := range fields {
+		field := raw[match[2]]
+		position := strings.IndexByte("QABCDEFG", field)
+		parts.invalidOrder = parts.invalidOrder || position <= lastField
+		lastField = position
 		end := len(raw)
 		if i+1 < len(fields) {
 			end = fields[i+1][0]
@@ -121,16 +159,42 @@ func notamText(raw string) (body, schedule, airport string, cancelled bool) {
 		if i+1 == len(fields) && strings.HasPrefix(prefix, "(") {
 			value = strings.TrimSpace(strings.TrimSuffix(value, ")"))
 		}
-		switch raw[match[2]] {
+		switch field {
 		case 'A':
-			airport = strings.ToUpper(value)
+			parts.airport = strings.ToUpper(value)
+		case 'B':
+			parts.start = value
+		case 'C':
+			parts.end = value
 		case 'D':
-			schedule = advisoryPlainText(value)
+			parts.schedule = advisoryPlainText(value)
+			parts.hasSchedule = true
 		case 'E':
-			body = value
+			parts.body = value
 		}
 	}
-	return body, schedule, airport, false
+	return parts
+}
+
+func (summary *NOTAMSummary) setValidity(start, end string) {
+	summary.HasValidity = true
+	end = strings.ToUpper(end)
+	endTime, estimated := strings.CutSuffix(end, "EST")
+	summary.StartsAt = notamTimestamp(start)
+	summary.EndsAt = notamTimestamp(strings.TrimSpace(endTime))
+	summary.FixedValidity = !estimated && summary.StartsAt != nil && summary.EndsAt != nil && summary.EndsAt.After(*summary.StartsAt)
+}
+
+func notamTimestamp(value string) *time.Time {
+	if len(value) != 10 {
+		return nil
+	}
+	// Explicitly interpret YY in 2000–2099 instead of Go's two-digit-year pivot.
+	parsed, err := time.Parse("200601021504", "20"+value)
+	if err != nil {
+		return nil
+	}
+	return &parsed
 }
 
 func expandNOTAMText(value string) string {
@@ -157,6 +221,9 @@ func applyNOTAMSummary(row *Advisory) {
 	summary, ok := DecodeNOTAM(row.RawReason)
 	if !ok {
 		return
+	}
+	if summary.MatchesValidity(row.StartsAt, row.EndsAt) {
+		row.StartsAt, row.EndsAt = summary.StartsAt, summary.EndsAt
 	}
 	if row.Kind == "airport_closure" && !summary.FullAirportClosure {
 		row.Kind = "airport_restriction"

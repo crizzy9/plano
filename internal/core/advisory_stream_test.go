@@ -4,12 +4,51 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
 	"github.com/crizzy9/plano/internal/push"
 )
+
+func TestAdvisoryEventChecksPublishedNOTAMWindow(t *testing.T) {
+	now := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)
+	start, end := now.Add(5*time.Minute), now.Add(20*time.Minute)
+	flight := feeds.Flight{ID: "flight", Status: "scheduled", Origin: "SFO", OriginICAO: "KSFO", Destination: "JFK", DestinationICAO: "KJFK",
+		ScheduledDeparture: new(now.Add(10 * time.Minute))}
+	const fixed = "(A1234/26 NOTAMN\nA) KSFO B) 2611051805 C) 2611051820\nE) AD CLSD)"
+	const estimated = "(A1234/26 NOTAMN\nA) KSFO B) 2611051805 C) 2611051820EST\nE) AD CLSD)"
+	for _, tc := range []struct {
+		name, raw  string
+		start, end *time.Time
+		wantAlert  bool
+	}{
+		{"matching normalized window", fixed, &start, &end, true},
+		{"fixed raw window only", fixed, nil, nil, true},
+		{"published window at arrival airport", strings.Replace(fixed, "KSFO", "KJFK", 1), nil, nil, false},
+		{"conflicting normalized window", fixed, &start, new(end.Add(5 * time.Minute)), false},
+		{"estimated published window", estimated, &start, &end, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			advisory := feeds.Advisory{ID: "closure", Kind: "airport_closure", Source: feeds.FAASWIM, Airport: "KSFO",
+				RawReason: tc.raw, ObservedAt: now, StartsAt: tc.start, EndsAt: tc.end}
+			event, ok := advisoryEvent(flight, advisory, now)
+			if ok != tc.wantAlert {
+				t.Fatalf("alert eligibility = %t, want %t", ok, tc.wantAlert)
+			}
+			if !ok {
+				return
+			}
+			if event.validUntil == nil || !event.validUntil.Equal(end) {
+				t.Fatalf("alert validity = %v, want %s", event.validUntil, end)
+			}
+			if len(event.advisoryEvidence) != 1 || event.advisoryEvidence[0] != advisoryEvidence(advisory) {
+				t.Fatalf("alert did not retain original advisory evidence: %+v", event.advisoryEvidence)
+			}
+		})
+	}
+}
 
 func TestEndedAdvisorySurvivesDelayedReplayAndSuppressesOldPoll(t *testing.T) {
 	ctx := context.Background()

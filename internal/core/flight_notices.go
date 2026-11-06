@@ -130,9 +130,16 @@ SELECT source,id,observed_ns,expires_ns,data FROM (
 		if err := json.Unmarshal(raw, &a); err != nil {
 			return nil, err
 		}
-		summary, decodedAirport, ok := flightNoticeSummary(a)
+		summary, decoded, ok := flightNoticeSummary(a)
 		if !ok {
 			continue
+		}
+		validUntil := time.Unix(0, expires).UTC()
+		if a.Kind == "airport_closure" && decoded.FullAirportClosure && decoded.FixedValidity {
+			// Show the published context and respect its expiry, even if the
+			// normalized times conflict and prevent a flight prediction.
+			a.StartsAt, a.EndsAt = decoded.StartsAt, decoded.EndsAt
+			validUntil = earliestTime(validUntil, *a.EndsAt)
 		}
 		for _, operation := range []struct {
 			name, code, icao string
@@ -142,7 +149,7 @@ SELECT source,id,observed_ns,expires_ns,data FROM (
 			{"arrival", flight.Destination, flight.DestinationICAO, arrival},
 		} {
 			if operation.at == nil || a.Airport != operation.code && a.Airport != operation.icao ||
-				decodedAirport != "" && decodedAirport != operation.code && decodedAirport != operation.icao ||
+				decoded.Airport != "" && decoded.Airport != operation.code && decoded.Airport != operation.icao ||
 				a.Direction != "" && a.Direction != operation.name {
 				continue
 			}
@@ -156,7 +163,7 @@ SELECT source,id,observed_ns,expires_ns,data FROM (
 			notices = append(notices, FlightNotice{
 				ID: hash(source + "\x00" + id + "\x00" + operation.name), Airport: a.Airport, Operation: operation.name,
 				Kind: a.Kind, Source: source, Summary: summary, ObservedAt: time.Unix(0, observed).UTC(),
-				ValidUntil: time.Unix(0, expires).UTC(), StartsAt: a.StartsAt, EndsAt: a.EndsAt,
+				ValidUntil: validUntil, StartsAt: a.StartsAt, EndsAt: a.EndsAt,
 			})
 			if len(notices) == maxFlightNotices {
 				return notices, rows.Close()
@@ -195,16 +202,16 @@ func flightNoticeAppliesAt(a feeds.Advisory, at *time.Time, now time.Time) bool 
 	return (a.StartsAt == nil || !a.StartsAt.After(operation)) && end.After(operation)
 }
 
-func flightNoticeSummary(a feeds.Advisory) (summary, airport string, ok bool) {
+func flightNoticeSummary(a feeds.Advisory) (summary string, decoded feeds.NOTAMSummary, ok bool) {
 	if advisoryCancelled(a.Kind) {
-		return "", "", false
+		return "", decoded, false
 	}
 	summary = a.Reason
-	if decoded, ok := feeds.DecodeNOTAM(a.RawReason); ok {
+	decoded, recognized := feeds.DecodeNOTAM(a.RawReason)
+	if recognized {
 		if decoded.Scope == "cancellation" {
-			return "", "", false
+			return "", decoded, false
 		}
-		airport = decoded.Airport
 		if summary == "" || summary == a.RawReason {
 			summary = decoded.Text
 		}
@@ -228,5 +235,5 @@ func flightNoticeSummary(a feeds.Advisory) (summary, airport string, ok bool) {
 	if summary == "" {
 		summary = strings.ReplaceAll(a.Kind, "_", " ")
 	}
-	return truncate(summary, 1024), airport, true
+	return truncate(summary, 1024), decoded, true
 }

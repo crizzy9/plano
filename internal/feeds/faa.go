@@ -176,7 +176,7 @@ func (e faaAirportEvent) advisory(kind, direction string) Advisory {
 
 var (
 	faaDuration = regexp.MustCompile(`(?i)^(?:(\d{1,2})\s*(?:hours?|hrs?|h)(?:\s+and\s+|\s*))?(?:(\d{1,4})\s*(?:minutes?|mins?|m))?$\z`)
-	notamRange  = regexp.MustCompile(`\b([0-9]{10}) ?[-–] ?([0-9]{10})(?: ?EST)?\b`)
+	notamRange  = regexp.MustCompile(`\b([0-9]{10}) ?[-‐‑–] ?([0-9]{10})(?: ?EST)?\b`)
 	faaZulu     = regexp.MustCompile(`^([0-9]{2})([0-9]{2})([0-9]{2})Z$\z`)
 )
 
@@ -245,12 +245,11 @@ func notamTimes(raw string) (*time.Time, *time.Time) {
 	if parts == nil {
 		return nil, nil
 	}
-	start, startErr := time.Parse("0601021504", parts[1])
-	end, endErr := time.Parse("0601021504", parts[2])
-	if startErr != nil || endErr != nil || !end.After(start) {
+	start, end := notamTimestamp(parts[1]), notamTimestamp(parts[2])
+	if start == nil || end == nil || !end.After(*start) {
 		return nil, nil
 	}
-	return &start, &end
+	return start, end
 }
 
 func explainClosure(raw string) string {

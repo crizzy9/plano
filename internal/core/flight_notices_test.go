@@ -84,6 +84,31 @@ func TestFlightNoticesMatchPublishedOperationAndWindow(t *testing.T) {
 	}
 }
 
+func TestFlightNoticesExpireAtPublishedNOTAMEnd(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "notices.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Date(2026, 11, 6, 3, 0, 0, 0, time.UTC)
+	start, end := now.Add(5*time.Minute), now.Add(15*time.Minute)
+	row := feeds.Advisory{ID: "closure", Source: feeds.FAASWIM, Kind: "airport_closure", Airport: "KSFO",
+		ObservedAt: now, StartsAt: &start, EndsAt: new(now.Add(time.Hour)),
+		RawReason: "(A1234/26 NOTAMN\nA) KSFO B) 2611060305 C) 2611060315\nE) AD CLSD)"}
+	if err := s.PublishAdvisory(t.Context(), row, now); err != nil {
+		t.Fatal(err)
+	}
+	flight := noticeFlight(now)
+	notices, err := s.FlightNotices(t.Context(), flight, now)
+	if err != nil || len(notices) != 1 || notices[0].StartsAt == nil || !notices[0].StartsAt.Equal(start) ||
+		notices[0].EndsAt == nil || !notices[0].EndsAt.Equal(end) || !notices[0].ValidUntil.Equal(end) {
+		t.Fatalf("notices = %+v, %v, want published window %s to %s", notices, err, start, end)
+	}
+	if notices, err := s.FlightNotices(t.Context(), flight, end); err != nil || len(notices) != 0 {
+		t.Fatalf("notices at published end = %+v, %v", notices, err)
+	}
+}
+
 func TestFlightNoticesPreferSignedRevisionAndKeepEndedTombstone(t *testing.T) {
 	ctx := t.Context()
 	s, err := Open(filepath.Join(t.TempDir(), "notices.db"))

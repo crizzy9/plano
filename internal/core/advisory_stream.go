@@ -13,11 +13,24 @@ import (
 )
 
 func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, bool) {
+	// Keep the original payload for dispatch-time revision checks, even when
+	// an older record needs its fixed NOTAM times supplied at this boundary.
+	original := a
+	var decodedAirport string
+	if decoded, ok := feeds.DecodeNOTAM(a.RawReason); ok {
+		if decoded.Scope == "cancellation" {
+			return Event{}, false
+		}
+		if a.Kind == "airport_closure" && decoded.HasValidity {
+			if !decoded.FullAirportClosure || !decoded.MatchesValidity(a.StartsAt, a.EndsAt) {
+				return Event{}, false
+			}
+			a.StartsAt, a.EndsAt = decoded.StartsAt, decoded.EndsAt
+			decodedAirport = decoded.Airport
+		}
+	}
 	validUntil := advisoryForecastValidity(a, at)
 	if !validUntil.After(at) {
-		return Event{}, false
-	}
-	if decoded, ok := feeds.DecodeNOTAM(a.RawReason); ok && decoded.Scope == "cancellation" {
 		return Event{}, false
 	}
 	target := advisoryTime(flight, a)
@@ -26,6 +39,13 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, 
 	}
 	arrivalProgram := a.Kind != "ground_stop" && a.Direction != "departure" &&
 		(a.Airport == flight.Destination || a.Airport == flight.DestinationICAO)
+	code, icao := flight.Origin, flight.OriginICAO
+	if arrivalProgram {
+		code, icao = flight.Destination, flight.DestinationICAO
+	}
+	if decodedAirport != "" && decodedAirport != code && decodedAirport != icao {
+		return Event{}, false
+	}
 	if arrivalProgram && (flight.ActualArrival != nil || finished(flight)) || !arrivalProgram && !flightBeforeDeparture(flight) {
 		return Event{}, false
 	}
@@ -40,7 +60,7 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, 
 		body = flight.Number
 	}
 	family := hash(flight.ID + "\x00advisory\x00" + a.Source + "\x00" + a.ID)
-	evidence := advisoryEvidence(a)
+	evidence := advisoryEvidence(original)
 	return Event{ID: hash(family + "\x00" + evidence.StateHash), Kind: a.Kind,
 		Title: fmt.Sprintf("%s · %s", a.Airport, strings.ReplaceAll(a.Kind, "_", " ")), Body: body, At: at,
 		validUntil: &validUntil, collapseID: family, advisoryEvidence: []forecastAdvisory{evidence}}, true

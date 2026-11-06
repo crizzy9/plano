@@ -96,6 +96,38 @@ func TestStoredAdvisoryForecastExpiresOrLosesItsRevision(t *testing.T) {
 	}
 }
 
+func TestStoredClosureEvidenceChecksPublishedWindow(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "forecast.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Date(2026, 11, 5, 18, 0, 0, 0, time.UTC)
+	end := now.Add(20 * time.Minute)
+	for _, tc := range []struct {
+		id      string
+		end     time.Time
+		revised bool
+	}{
+		{"agrees", end, false},
+		{"conflicts", end.Add(time.Minute), true},
+	} {
+		row := feeds.Advisory{ID: tc.id, Kind: "airport_closure", Airport: "KSFO", Source: feeds.FAASWIM, ObservedAt: now,
+			EndsAt: &tc.end, RawReason: "(A1234/26 NOTAMN\nA) KSFO B) 2611051800 C) 2611051820\nE) AD CLSD)"}
+		if err := s.PublishAdvisory(t.Context(), row, now); err != nil {
+			t.Fatal(err)
+		}
+		forecast := &Prediction{AdvisoryEvidence: []forecastAdvisory{advisoryEvidence(row)}}
+		revised, err := forecastAdvisoryRevised(t.Context(), s.db, forecast, now)
+		if err != nil || revised != tc.revised {
+			t.Fatalf("%s closure revision = %t, %v, want %t", tc.id, revised, err, tc.revised)
+		}
+		if revised, err := forecastAdvisoryRevised(t.Context(), s.db, forecast, end); err != nil || !revised {
+			t.Fatalf("%s closure revision at published end = %t, %v", tc.id, revised, err)
+		}
+	}
+}
+
 func TestLearnedReasonNamesAnObservedSignal(t *testing.T) {
 	contributions := []predict.Contribution{{Feature: "weather", Minutes: 10}, {Feature: "ground_stop", Minutes: 8}, {Feature: "airline_delay", Minutes: 4}}
 	if reason := learnedReason(predict.Features{AirlineDelayMinutes: 4}, contributions); !strings.Contains(reason, "airline's estimate") {

@@ -122,6 +122,15 @@ SELECT json_group_array(json_object('stateHash',state_hash,'advisory',json(data)
 		if revision.StateHash == "" || advisoryStateHash(revision.Advisory) != revision.StateHash {
 			return true, nil
 		}
+		// Evidence stored before the timing guard can match the latest row
+		// while still using a conflicting or expired published closure window.
+		a := revision.Advisory
+		if a.Kind == "airport_closure" {
+			if decoded, ok := feeds.DecodeNOTAM(a.RawReason); ok && decoded.HasValidity &&
+				(!decoded.FullAirportClosure || !decoded.MatchesValidity(a.StartsAt, a.EndsAt) || !decoded.EndsAt.After(now)) {
+				return true, nil
+			}
+		}
 	}
 	return false, nil
 }

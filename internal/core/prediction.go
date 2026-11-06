@@ -177,17 +177,8 @@ func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now
 	}
 	var closures []closureWindow
 	for _, a := range advisories {
-		freshUntil := advisoryForecastValidity(a, now)
 		if a.Kind != "airport_closure" || a.Direction != "" && a.Direction != "departure" ||
-			a.Airport == "" || a.Airport != flight.Origin && a.Airport != flight.OriginICAO ||
-			!freshUntil.After(now) || a.EndsAt == nil {
-			continue
-		}
-		start := a.ObservedAt
-		if a.StartsAt != nil {
-			start = *a.StartsAt
-		}
-		if !a.EndsAt.After(start) {
+			a.Airport == "" || a.Airport != flight.Origin && a.Airport != flight.OriginICAO {
 			continue
 		}
 		summary, ok := feeds.DecodeNOTAM(a.RawReason)
@@ -195,13 +186,27 @@ func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now
 			summary.Airport != "" && summary.Airport != flight.Origin && summary.Airport != flight.OriginICAO {
 			continue
 		}
-		// The decoder checks closure scope. An estimated or indefinite validity
-		// marker, including in an ICAO C field, cannot set a departure floor.
-		words := strings.FieldsFunc(strings.ToUpper(a.RawReason), func(r rune) bool { return r < 'A' || r > 'Z' })
-		if slices.Contains(words, "EST") || slices.Contains(words, "PERM") || slices.Contains(words, "UFN") {
+		// Older bridge records may still be missing structured validity. Keep
+		// their original state as evidence so revision checks compare like data.
+		timed := a
+		if summary.HasValidity {
+			if !summary.MatchesValidity(a.StartsAt, a.EndsAt) {
+				continue
+			}
+			timed.StartsAt, timed.EndsAt = summary.StartsAt, summary.EndsAt
+		}
+		freshUntil := advisoryForecastValidity(timed, now)
+		if !freshUntil.After(now) || timed.EndsAt == nil {
 			continue
 		}
-		closures = append(closures, closureWindow{start: start, end: *a.EndsAt, freshUntil: freshUntil,
+		start := timed.ObservedAt
+		if timed.StartsAt != nil {
+			start = *timed.StartsAt
+		}
+		if !timed.EndsAt.After(start) {
+			continue
+		}
+		closures = append(closures, closureWindow{start: start, end: *timed.EndsAt, freshUntil: freshUntil,
 			airport: a.Airport, source: a.Source, evidence: advisoryEvidence(a)})
 	}
 	slices.SortStableFunc(closures, func(a, b closureWindow) int { return a.start.Compare(b.start) })
