@@ -1,45 +1,60 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { View } from 'react-native';
 import type { PickupLink, PlanoAPI } from './api';
 import { errorText, formatDay, formatTime } from './flight';
 import { Action, Body, ErrorMessage, Heading, Loading, layout } from './ui';
 
-export function PickupLinks({ api, flightId }: { api: PlanoAPI; flightId: string }) {
+export function PickupLinks({ api, flightId, refreshRevision }: { api: PlanoAPI; flightId: string; refreshRevision: number }) {
   const [open, setOpen] = useState(false);
   const [links, setLinks] = useState<PickupLink[]>();
-  const [error, setError] = useState<string>();
+  const [listError, setListError] = useState<string>();
+  const [revokeError, setRevokeError] = useState<string>();
   const [revokeId, setRevokeId] = useState<string>();
   const [revision, setRevision] = useState(0);
+  const mutation = useRef({ pending: false, version: 0 });
+  const error = revokeError ?? listError;
 
   useEffect(() => {
-    if (!open) return;
-    let current = true;
-    setError(undefined);
+    if (!open || mutation.current.pending) return;
+    let active = true;
+    const version = mutation.current.version;
+    const current = () => active && version === mutation.current.version;
+    setListError(undefined);
     setLinks(undefined);
     void api.pickupLinks(flightId).then((result) => {
-      if (current) setLinks(result.links);
+      if (current()) setLinks(result.links);
     }).catch((cause: unknown) => {
-      if (current) setError(errorText(cause));
+      if (current()) setListError(errorText(cause));
     });
-    return () => { current = false; };
-  }, [api, flightId, open, revision]);
+    return () => { active = false; };
+  }, [api, flightId, open, refreshRevision, revision]);
 
   async function revoke(id: string) {
+    if (mutation.current.pending) return;
+    // Invalidate any read that began before the DELETE and defer new reads
+    // until it settles, even if the panel closes or the parent refreshes.
+    mutation.current.pending = true;
+    mutation.current.version += 1;
     setRevokeId(id);
-    setError(undefined);
+    setRevokeError(undefined);
     try {
       await api.revokePickupLink(id);
       setLinks((current) => current?.filter((link) => link.id !== id));
     } catch (cause) {
-      setError(errorText(cause));
+      setRevokeError(errorText(cause));
     } finally {
+      mutation.current.pending = false;
       setRevokeId(undefined);
+      setRevision((value) => value + 1);
     }
   }
 
   return (
     <View style={layout.section}>
-      <Action label={open ? 'Hide pickup links' : 'Manage pickup links'} onPress={() => setOpen(!open)} secondary />
+      <Action label={open ? 'Hide pickup links' : 'Manage pickup links'} onPress={() => {
+        setRevokeError(undefined);
+        setOpen((value) => !value);
+      }} secondary />
       {open && (
         <>
           <Heading>Public pickup links</Heading>
@@ -55,7 +70,10 @@ export function PickupLinks({ api, flightId }: { api: PlanoAPI; flightId: string
             </View>
           ))}
           <ErrorMessage message={error} />
-          <Action label="Refresh links" secondary disabled={revokeId !== undefined} onPress={() => setRevision((value) => value + 1)} />
+          <Action label="Refresh links" secondary disabled={revokeId !== undefined} onPress={() => {
+            setRevokeError(undefined);
+            setRevision((value) => value + 1);
+          }} />
         </>
       )}
     </View>

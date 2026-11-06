@@ -918,7 +918,13 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
     }),
     pickupLinks: (flightId: string) =>
       authenticated<{ links: PickupLink[] }>(`/v1/shares?${new URLSearchParams({ flightId })}`),
-    revokePickupLink: (id: string) => authenticated<void>(`/v1/shares/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    async revokePickupLink(id: string) {
+      try {
+        await authenticated<void>(`/v1/shares/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      } catch (error) {
+        if (!(error instanceof APIError && error.status === 404 && !error.routeMissing)) throw error;
+      }
+    },
     passport: () => authenticated<Passport>(passportPath),
     passportHistory: (cursor: string) => authenticated<PassportHistory>(`${passportPath}&${new URLSearchParams({ cursor })}`),
     async addManualPassportFlight(details: ManualPassportFlight, requestId: string) {

@@ -383,7 +383,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
             <Body>{widgetFinished ? 'The widget is still set to this flight.' : 'The widget shows this flight when a fresh update is available.'}</Body>
           )}
           <ErrorMessage message={actionError} />
-          {value?.tracked && !savedAt && <PickupLinks key={pickupRevision} api={api} flightId={id} />}
+          {value?.tracked && !savedAt && <PickupLinks key={id} api={api} flightId={id} refreshRevision={pickupRevision} />}
           {(aircraft || aircraftAge != null || flight.tailNumber || flight.baggage) && (
             <View style={layout.section}>
               <Heading>Flight details</Heading>
