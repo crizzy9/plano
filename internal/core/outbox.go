@@ -20,7 +20,8 @@ var (
 )
 
 func (s *Store) Register(ctx context.Context, owner string, device Device, now time.Time) error {
-	if device.LiveSlot == "" && device.LiveRevision != 0 ||
+	if device.LiveSlot == "" && device.LiveRevision != 0 &&
+		(device.LiveRevision < 0 || device.Platform != "ios" || device.Kind != "alert" || device.FlightID != "" || device.Binding != "") ||
 		device.LiveSlot != "" && (device.LiveRevision <= 0 || device.Platform != "ios" || device.Binding != "" ||
 			!(device.Kind == "live_start" && device.LiveSlot == "start" && device.FlightID == "" ||
 				device.Kind == "live_update" && device.FlightID != "" && activityLiveSlot.MatchString(device.LiveSlot))) {
@@ -31,6 +32,22 @@ func (s *Store) Register(ctx context.Context, owner string, device Device, now t
 		return err
 	}
 	defer tx.Rollback()
+	if device.Platform == "ios" {
+		// Check the installation floor before a late request can take ownership
+		// of the same token from a different installation.
+		var ignored bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM ios_device_floors WHERE owner=? AND revision>=?
+) OR EXISTS(
+SELECT 1 FROM devices d JOIN ios_alert_revisions r ON d.id=r.device_id
+WHERE d.owner=? AND d.platform='ios' AND d.kind=? AND d.token=? AND r.revision>=?
+)`, owner, device.LiveRevision, owner, device.Kind, device.Token, device.LiveRevision).Scan(&ignored); err != nil {
+			return err
+		}
+		if ignored {
+			return nil
+		}
+	}
 	var priorDeviceID int64
 	if device.LiveSlot != "" {
 		var ignored bool
@@ -67,6 +84,11 @@ ON CONFLICT(platform,token,kind) DO UPDATE SET registered=excluded.registered RE
 	}
 	if device.LiveSlot != "" {
 		if err := bindLiveSlot(ctx, tx, owner, device, deviceID, priorDeviceID); err != nil {
+			return err
+		}
+	} else if device.LiveRevision > 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ios_alert_revisions(device_id,revision) VALUES(?,?)
+ON CONFLICT(device_id) DO UPDATE SET revision=excluded.revision`, deviceID, device.LiveRevision); err != nil {
 			return err
 		}
 	}
@@ -591,6 +613,30 @@ func (s *Store) RemoveDevice(ctx context.Context, owner string, d Device) error 
 AND (token=? OR (?='' AND ?<>''))
 AND (?='' OR EXISTS(SELECT 1 FROM device_bindings WHERE device_id=devices.id AND binding=?))`, owner, d.Platform, d.Kind, d.FlightID, d.Token, d.Token, d.Binding, d.Binding, d.Binding)
 	return err
+}
+
+// RemoveIOSDevicesThroughRevision fences requests issued before the iOS
+// installation opted out, including requests the server has yet to receive.
+func (s *Store) RemoveIOSDevicesThroughRevision(ctx context.Context, owner string, revision int64) error {
+	if revision <= 0 {
+		return ErrInvalidLiveSlot
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO ios_device_floors(owner,revision) VALUES(?,?)
+ON CONFLICT(owner) DO UPDATE SET revision=MAX(ios_device_floors.revision,excluded.revision)`, owner, revision); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE owner=? AND platform='ios'
+AND COALESCE((SELECT revision FROM ios_alert_revisions WHERE device_id=devices.id),
+             (SELECT revision FROM device_live_slots WHERE device_id=devices.id),0)
+ <= (SELECT revision FROM ios_device_floors WHERE owner=?)`, owner, owner); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) RemoveDevices(ctx context.Context, owner string) error {

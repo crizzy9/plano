@@ -2,16 +2,41 @@ import { useEffect } from 'react';
 import * as SecureStore from 'expo-secure-store';
 import { AppState, Platform } from 'react-native';
 import {
-  deferAndroidPushRetirement, disableAndroidPushForOrigin, initializeAndroidPushOrigin, removeRetiredDevices, runAndroidDeviceRequest,
-  serverStorageKey, withActiveAndroidPushOrigin, type PlanoAPI,
+  beginIOSPushIntent, deferAndroidPushRetirement, disableAndroidPushForOrigin, disableIOSPushForOrigin, initializeAndroidPushOrigin,
+  removeRetiredDevices, runAndroidDeviceRequest, serverStorageKey, withActiveAndroidPushOrigin, withActiveIOSPushOrigin,
+  type Flight, type PlanoAPI,
 } from './api';
 import {
-  androidPushStatus, clearLiveActivities, configureLiveActivities, disableAndroidPush, enableAndroidPush,
+  androidPushStatus, canFenceIOSPush, clearLiveActivities, configureLiveActivities, disableAndroidPush, enableAndroidPush,
+  nextIOSPushRevision, startLiveActivity,
   type RetiredAndroidPush,
 } from './live';
 
 function currentPlatform() {
   return Platform.OS === 'ios' || Platform.OS === 'android' ? Platform.OS : undefined;
+}
+
+function registerIOSDevice(api: PlanoAPI, token: string, explicit: boolean, active: () => boolean) {
+  return withActiveIOSPushOrigin(api.server, async () => {
+    if (!active() || !explicit && !await wantsFlightAlerts(api)) return false;
+    const liveRevision = canFenceIOSPush ? await nextIOSPushRevision() : undefined;
+    await api.registerDevice({ platform: 'ios', token, kind: 'alert', liveRevision });
+    if (!active()) return false;
+    if (explicit) await SecureStore.setItemAsync(preferenceKey(api), 'on');
+    if (explicit || canFenceIOSPush) await configureLiveActivities(api);
+    return true;
+  });
+}
+
+export async function startIOSFlightActivity(api: PlanoAPI, flight: Flight, seat: string) {
+  const started = await withActiveIOSPushOrigin(api.server, async () => {
+    if (canFenceIOSPush && !await wantsFlightAlerts(api)) {
+      throw new Error('Enable flight alerts in Plano Settings before starting a Live Activity.');
+    }
+    await startLiveActivity(api, flight, seat);
+    return true;
+  });
+  if (!started) throw new Error('The active server changed. Try starting the Live Activity again.');
 }
 
 function preferenceKey(api: PlanoAPI) {
@@ -71,13 +96,18 @@ async function registerAndroidDevice(
 export async function changeFlightAlerts(api: PlanoAPI, enable: boolean) {
   const platform = currentPlatform();
   if (!platform) return;
+  const iosIntentIsCurrent = platform === 'ios' ? beginIOSPushIntent() : undefined;
   if (!enable) {
     if (platform === 'android') {
       await disableAndroidPushForOrigin(api.server);
+    } else if (canFenceIOSPush) {
+      await disableIOSPushForOrigin(api.server);
     } else {
-      await api.revokeDevices();
-      await SecureStore.deleteItemAsync(preferenceKey(api));
-      await clearLiveActivities();
+      await withActiveIOSPushOrigin(api.server, async () => {
+        await api.revokeDevices();
+        await SecureStore.deleteItemAsync(preferenceKey(api));
+        await clearLiveActivities();
+      });
     }
     return;
   }
@@ -101,9 +131,9 @@ export async function changeFlightAlerts(api: PlanoAPI, enable: boolean) {
     }
     return;
   }
-  await api.registerDevice({ platform, token: device.data, kind: 'alert' });
-  await SecureStore.setItemAsync(preferenceKey(api), 'on');
-  await configureLiveActivities(api);
+  if (!iosIntentIsCurrent || !await registerIOSDevice(api, device.data, true, iosIntentIsCurrent)) {
+    throw new Error('The active server or alert settings changed. Try enabling alerts again.');
+  }
 }
 
 export function useFlightAlerts(api: PlanoAPI) {
@@ -132,7 +162,7 @@ export function useFlightAlerts(api: PlanoAPI) {
             await registerAndroidDevice(api, token, status.generation, false, () => active);
           }
         } else {
-          await api.registerDevice({ platform, token, kind: 'alert' });
+          await registerIOSDevice(api, token, false, () => active);
         }
       }
       async function refresh() {

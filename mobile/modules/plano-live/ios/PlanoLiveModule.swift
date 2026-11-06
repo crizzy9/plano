@@ -17,6 +17,14 @@ public final class PlanoLiveModule: Module {
       await PlanoActivityCoordinator.shared.clear()
     }
 
+    AsyncFunction("nextIOSPushRevision") { () async throws -> String in
+      try await PlanoActivityCoordinator.shared.nextPushRevision()
+    }
+
+    AsyncFunction("retireIOSPush") { (server: String, token: String) async throws -> String in
+      try await PlanoActivityCoordinator.shared.retirePush(server: server, token: token)
+    }
+
     AsyncFunction("start") { (stateJSON: String) async throws in
       try await PlanoActivityCoordinator.shared.start(stateJSON: stateJSON)
     }
@@ -115,8 +123,12 @@ private enum LiveKeychain {
   }
 
   static func load() -> ActivityRegistration? {
-    guard let data = try? read(matching: query) else { return nil }
-    return try? JSONDecoder().decode(ActivityRegistration.self, from: data)
+    try? loadChecked()
+  }
+
+  static func loadChecked() throws -> ActivityRegistration? {
+    guard let data = try read(matching: query) else { return nil }
+    return try JSONDecoder().decode(ActivityRegistration.self, from: data)
   }
 
   static func nextTokenRevision() throws -> Int64 {
@@ -140,8 +152,9 @@ private enum LiveKeychain {
     return data
   }
 
-  static func clear() {
-    SecItemDelete(query as CFDictionary)
+  static func clear() throws {
+    let status = SecItemDelete(query as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else { throw RegistrationError.keychain }
   }
 }
 
@@ -154,6 +167,7 @@ private final class PlanoActivityCoordinator {
   }
 
   private var registration: ActivityRegistration?
+  private var configuring: ActivityRegistration?
   private var mayRestore = true
   private var generation = UUID()
   private var startTokens: Task<Void, Never>?
@@ -189,9 +203,12 @@ private final class PlanoActivityCoordinator {
     }
     if (registration ?? LiveKeychain.load()) != next {
       let change = invalidateRegistration()
+      try? LiveKeychain.clear()
+      configuring = next
       await retireActivities()
       if registration == next { return }
       guard change == generation else { throw RegistrationError.superseded }
+      configuring = nil
     }
     try LiveKeychain.save(next)
     install(next)
@@ -240,8 +257,8 @@ private final class PlanoActivityCoordinator {
     cancelObservers()
     generation = UUID()
     registration = nil
+    configuring = nil
     mayRestore = false
-    LiveKeychain.clear()
     return generation
   }
 
@@ -262,7 +279,31 @@ private final class PlanoActivityCoordinator {
 
   func clear() async {
     _ = invalidateRegistration()
+    try? LiveKeychain.clear()
     await retireActivities()
+  }
+
+  func nextPushRevision() throws -> String {
+    String(try LiveKeychain.nextTokenRevision())
+  }
+
+  func retirePush(server: String, token: String) async throws -> String {
+    let target = ActivityRegistration(server: server, token: token)
+    guard !server.isEmpty, !token.isEmpty else { throw RegistrationError.invalidServer }
+
+    let saved = Result { try LiveKeychain.loadChecked() }
+    let ownsActivities = registration == target || configuring == target ||
+      (registration == nil && configuring == nil && (try? saved.get()) == target)
+    if ownsActivities { _ = invalidateRegistration() }
+
+    // Allocate the floor in the same actor turn that stops matching uploads.
+    // ActivityKit teardown can suspend and let a later enable start work.
+    let floor = Result {
+      if try saved.get() == target { try LiveKeychain.clear() }
+      return try nextPushRevision()
+    }
+    if ownsActivities { await retireActivities() }
+    return try floor.get()
   }
 
   func start(stateJSON: String) throws {

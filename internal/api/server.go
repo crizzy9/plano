@@ -276,6 +276,13 @@ func (s Server) device(w http.ResponseWriter, r *http.Request, owner string) err
 		w.WriteHeader(204)
 		return nil
 	}
+	if r.Method == http.MethodDelete && d.LiveRevision > 0 && d == (core.Device{Platform: "ios", LiveRevision: d.LiveRevision}) {
+		if err := s.Store.RemoveIOSDevicesThroughRevision(r.Context(), owner, d.LiveRevision); err != nil {
+			return err
+		}
+		w.WriteHeader(204)
+		return nil
+	}
 	if (d.LiveSlot != "" || d.LiveRevision != 0) && r.Method != http.MethodPost {
 		return errInvalid
 	}

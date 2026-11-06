@@ -22,6 +22,8 @@ type NativeLive = {
   disableAndroidPush?: (origin: string, expected: string | null, suppress: boolean) => Promise<RetiredAndroidPush | null>;
   androidWidgetDetailsEnabled?: () => Promise<boolean>;
   setAndroidWidgetDetailsEnabled?: (enabled: boolean) => Promise<void>;
+  nextIOSPushRevision?: () => Promise<string>;
+  retireIOSPush?: (origin: string, token: string) => Promise<string>;
 };
 
 const native = Platform.OS === 'web' ? null : requireOptionalNativeModule<NativeLive>('PlanoLive');
@@ -29,6 +31,23 @@ const native = Platform.OS === 'web' ? null : requireOptionalNativeModule<Native
 export const canStartLiveActivity = Boolean(native?.start);
 export const canCustomizeAndroidWidget = Platform.OS === 'android'
   && !!native?.androidWidgetDetailsEnabled && !!native?.setAndroidWidgetDetailsEnabled;
+export const canFenceIOSPush = Platform.OS === 'ios' && !!native?.nextIOSPushRevision && !!native?.retireIOSPush;
+
+function iosPushRevision(value: string) {
+  const revision = Number(value);
+  if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(revision)) throw new Error('Invalid iOS alert revision.');
+  return revision;
+}
+
+export async function nextIOSPushRevision() {
+  if (!native?.nextIOSPushRevision) throw new Error('Protected flight alerts require a current iOS build of Plano.');
+  return iosPushRevision(await native.nextIOSPushRevision());
+}
+
+export async function retireIOSPush(origin: string, token: string) {
+  if (!native?.retireIOSPush) throw new Error('Protected flight alerts require a current iOS build of Plano.');
+  return iosPushRevision(await native.retireIOSPush(origin, token));
+}
 
 export async function androidWidgetDetailsEnabled() {
   if (!native?.androidWidgetDetailsEnabled) throw new Error('Widget settings require a current Android build of Plano.');

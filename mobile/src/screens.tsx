@@ -7,10 +7,10 @@ import { saveServer, type Flight, type PlanoAPI, type Position } from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
 import { usePalette } from './theme';
 import { PickupLinks } from './pickup-links';
-import { changeFlightAlerts, flightAlertsEnabled } from './alerts';
+import { changeFlightAlerts, flightAlertsEnabled, startIOSFlightActivity } from './alerts';
 import {
-  androidWidgetDetailsEnabled, canCustomizeAndroidWidget, canStartLiveActivity, clearLiveActivities,
-  setAndroidWidgetDetailsEnabled, startLiveActivity, stopLiveActivity,
+  androidWidgetDetailsEnabled, canCustomizeAndroidWidget, canStartLiveActivity,
+  setAndroidWidgetDetailsEnabled, stopLiveActivity,
 } from './live';
 import { Action, Body, Chart, ErrorMessage, FlightRow, FlightStrip, Heading, Input, Loading, RoutePlot, layout } from './ui';
 
@@ -268,7 +268,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
                 disabled={!!operation && operation !== 'live'} onPress={() => {
                   setOperation('live');
                   setActionError(undefined);
-                  void startLiveActivity(api, flight, seat).catch((cause: unknown) => setActionError(errorText(cause)))
+                  void startIOSFlightActivity(api, flight, seat).catch((cause: unknown) => setActionError(errorText(cause)))
                     .finally(() => setOperation(undefined));
                 }} />
             )}
@@ -483,7 +483,6 @@ export function ServerSettings({ api, error, onChange }: {
     setPending(true);
     try {
       const url = await saveServer(server, enrollmentCode.trim(), api.server);
-      if (api.server !== url && Platform.OS !== 'android') await clearLiveActivities();
       setEnrollmentCode('');
       setConnected(true);
       onChange(url);

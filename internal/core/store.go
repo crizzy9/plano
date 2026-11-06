@@ -118,6 +118,14 @@ CREATE TABLE IF NOT EXISTS device_live_slots (
   device_id INTEGER UNIQUE REFERENCES devices(id) ON DELETE SET NULL,
   PRIMARY KEY(owner,slot)
 );
+CREATE TABLE IF NOT EXISTS ios_device_floors (
+  owner TEXT PRIMARY KEY REFERENCES installations(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL CHECK(revision>0)
+);
+CREATE TABLE IF NOT EXISTS ios_alert_revisions (
+  device_id INTEGER PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL CHECK(revision>0)
+);
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY, flight_id TEXT NOT NULL REFERENCES flights(id), at_ns INTEGER NOT NULL, data TEXT NOT NULL
 );

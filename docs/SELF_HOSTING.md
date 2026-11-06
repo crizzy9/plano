@@ -262,6 +262,12 @@ same installation and Live Activity slot when it accepts the rotated token.
 The app persists a registration counter in Keychain so the server can ignore
 an older write that arrives out of order.
 
+Turning off alerts or switching servers records a cutoff for the previous
+installation. Plano retries a pending revocation when the app returns to the
+foreground. Once the server receives it, earlier iOS registrations are retired
+and late requests at or below the cutoff are ignored. Registrations made after
+re-enabling alerts use newer revisions.
+
 ## Android delivery binding
 
 Use the current backend and Android build together for flight alerts and the

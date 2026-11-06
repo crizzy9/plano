@@ -27,6 +27,7 @@ func TestDeviceLiveSlotRequestValidation(t *testing.T) {
 	}
 	handler := (api.Server{Store: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler()
 	start := core.Device{Platform: "ios", Kind: "live_start", Token: "fixture-start-token-for-test", LiveSlot: "start", LiveRevision: 1}
+	alert := core.Device{Platform: "ios", Kind: "alert", Token: "fixture-alert-token-for-test", LiveRevision: 2}
 	activity := "activity:" + strings.Repeat("a", 64)
 	for _, tt := range []struct {
 		name, method string
@@ -45,6 +46,12 @@ func TestDeviceLiveSlotRequestValidation(t *testing.T) {
 		{"valid update requires a tracked flight", http.MethodPost, core.Device{Platform: "ios", Kind: "live_update", FlightID: "flight", Token: start.Token, LiveSlot: activity, LiveRevision: 1}, 404},
 		{"slot cannot register an alert", http.MethodPost, core.Device{Platform: "ios", Kind: "alert", Token: start.Token, LiveSlot: "start", LiveRevision: 1}, 400},
 		{"slot cannot register Android", http.MethodPost, core.Device{Platform: "android", Kind: "alert", Token: start.Token, LiveSlot: "start", LiveRevision: 1}, 400},
+		{"iOS alert registration carries a revision", http.MethodPost, alert, 204},
+		{"revision deletion requires an empty token and kind", http.MethodDelete, alert, 400},
+		{"revision deletion requires iOS", http.MethodDelete, core.Device{Platform: "android", LiveRevision: 2}, 400},
+		{"revision deletion requires a positive revision", http.MethodDelete, core.Device{Platform: "ios", LiveRevision: -2}, 400},
+		{"iOS revision deletion", http.MethodDelete, core.Device{Platform: "ios", LiveRevision: 2}, 204},
+		{"late slot registration is acknowledged", http.MethodPost, start, 204},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			body, err := json.Marshal(tt.device)
