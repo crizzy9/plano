@@ -125,19 +125,22 @@ type apnsAlert struct {
 	Body  string `json:"body"`
 }
 
+type apnsActivityAttributes struct {
+	FlightID        string `json:"flightId"`
+	ActivityBinding string `json:"activityBinding,omitempty"`
+}
+
 type apnsAPS struct {
-	Alert          *apnsAlert `json:"alert,omitempty"`
-	Sound          string     `json:"sound,omitempty"`
-	Timestamp      int64      `json:"timestamp,omitempty"`
-	Event          Kind       `json:"event,omitempty"`
-	ContentState   *LiveState `json:"content-state,omitempty"`
-	AttributesType string     `json:"attributes-type,omitempty"`
-	Attributes     *struct {
-		FlightID string `json:"flightId"`
-	} `json:"attributes,omitempty"`
-	InputPushToken int   `json:"input-push-token,omitempty"`
-	StaleDate      int64 `json:"stale-date,omitempty"`
-	DismissalDate  int64 `json:"dismissal-date,omitempty"`
+	Alert          *apnsAlert              `json:"alert,omitempty"`
+	Sound          string                  `json:"sound,omitempty"`
+	Timestamp      int64                   `json:"timestamp,omitempty"`
+	Event          Kind                    `json:"event,omitempty"`
+	ContentState   *LiveState              `json:"content-state,omitempty"`
+	AttributesType string                  `json:"attributes-type,omitempty"`
+	Attributes     *apnsActivityAttributes `json:"attributes,omitempty"`
+	InputPushToken int                     `json:"input-push-token,omitempty"`
+	StaleDate      int64                   `json:"stale-date,omitempty"`
+	DismissalDate  int64                   `json:"dismissal-date,omitempty"`
 }
 
 func (a *APNs) request(m Message) ([]byte, http.Header, error) {
@@ -182,9 +185,7 @@ func (a *APNs) request(m Message) ([]byte, http.Header, error) {
 		switch m.Kind {
 		case LiveStart:
 			aps.AttributesType = "PlanoActivityAttributes"
-			aps.Attributes = &struct {
-				FlightID string `json:"flightId"`
-			}{FlightID: m.FlightID}
+			aps.Attributes = &apnsActivityAttributes{FlightID: m.FlightID, ActivityBinding: m.binding}
 			title, body := m.Title, m.Body
 			if title == "" {
 				title = "Flight tracking started"

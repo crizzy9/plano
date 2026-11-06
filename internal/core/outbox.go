@@ -18,14 +18,16 @@ import (
 var (
 	ErrInvalidLiveSlot = errors.New("invalid Live Activity registration slot")
 	activityLiveSlot   = regexp.MustCompile(`^activity:[0-9a-f]{64}$`)
+	liveSessionBinding = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 )
 
 func (s *Store) Register(ctx context.Context, owner string, device Device, now time.Time) error {
 	if device.LiveSlot == "" && device.LiveRevision != 0 &&
 		(device.LiveRevision < 0 || device.Platform != "ios" || device.Kind != "alert" || device.FlightID != "" || device.Binding != "") ||
-		device.LiveSlot != "" && (device.LiveRevision <= 0 || device.Platform != "ios" || device.Binding != "" ||
+		device.LiveSlot != "" && (device.LiveRevision <= 0 || device.Platform != "ios" ||
 			!(device.Kind == "live_start" && device.LiveSlot == "start" && device.FlightID == "" ||
-				device.Kind == "live_update" && device.FlightID != "" && activityLiveSlot.MatchString(device.LiveSlot))) {
+				device.Kind == "live_update" && device.FlightID != "" && activityLiveSlot.MatchString(device.LiveSlot))) ||
+		device.Platform == "ios" && device.Binding != "" && (device.LiveSlot == "" || !liveSessionBinding.MatchString(device.Binding)) {
 		return ErrInvalidLiveSlot
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -48,6 +50,18 @@ WHERE d.owner=? AND d.platform='ios' AND d.kind=? AND d.token=? AND r.revision>=
 		if ignored {
 			return nil
 		}
+		if device.Kind == "live_start" && device.LiveSlot == "" {
+			// A request from before slot registration cannot take a bound token
+			// back from a newer client, including after its delivery row is gone.
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM ios_live_start_bindings WHERE owner=? AND binding<>''
+) OR EXISTS(
+SELECT 1 FROM devices d JOIN device_bindings b ON b.device_id=d.id
+WHERE d.platform='ios' AND d.kind='live_start' AND d.token=? AND b.binding<>''
+)`, owner, device.Token).Scan(&ignored); err != nil || ignored {
+				return err
+			}
+		}
 	}
 	var priorDeviceID int64
 	if device.LiveSlot != "" {
@@ -60,6 +74,14 @@ WHERE d.owner=? AND d.platform='ios' AND d.kind=? AND d.token=? AND r.revision>=
 	var flight feeds.Flight
 	var seat string
 	if device.Kind == "live_update" {
+		// An update from a prior session can finish after the new start slot.
+		// A newer local activity may register before its own start token exists.
+		var retired bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM device_live_slots l JOIN ios_live_start_bindings b USING(owner)
+WHERE l.owner=? AND l.slot='start' AND l.revision>=? AND b.binding<>?)`,
+			owner, device.LiveRevision, device.Binding).Scan(&retired); err != nil || retired {
+			return err
+		}
 		var raw []byte
 		err = tx.QueryRowContext(ctx, `SELECT f.snapshot,t.seat FROM flights f JOIN tracked t ON t.flight_id=f.id WHERE f.id=? AND t.owner=?`, device.FlightID, owner).Scan(&raw, &seat)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -99,6 +121,19 @@ ON CONFLICT(device_id) DO UPDATE SET revision=excluded.revision`, deviceID, devi
 		}
 	}
 	if device.Kind == "live_start" {
+		if device.LiveSlot == "start" {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO ios_live_start_bindings VALUES(?,?)
+ON CONFLICT(owner) DO UPDATE SET binding=excluded.binding`, owner, device.Binding); err != nil {
+				return err
+			}
+		}
+		if device.Binding != "" {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM devices AS d WHERE d.owner=? AND d.platform='ios' AND d.kind IN ('live_start','live_update')
+AND COALESCE((SELECT binding FROM device_bindings WHERE device_id=d.id),'')<>?
+AND COALESCE((SELECT revision FROM device_live_slots WHERE device_id=d.id),0)<?`, owner, device.Binding, device.LiveRevision); err != nil {
+				return err
+			}
+		}
 		if device.RequestUpdateToken {
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO live_token_requests VALUES(?)`, deviceID); err != nil {
 				return err
@@ -111,7 +146,8 @@ ON CONFLICT(device_id) DO UPDATE SET revision=excluded.revision`, deviceID, devi
 		// A locally started activity can provide its token before a queued
 		// push-to-start is delivered. Suppress that duplicate start.
 		if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE flight_id=? AND done=0 AND lease_until=0
-AND json_extract(message,'$.Kind')=? AND device_id IN (SELECT id FROM devices WHERE owner=? AND kind='live_start')`, flight.ID, push.LiveStart, owner); err != nil {
+AND json_extract(message,'$.Kind')=? AND device_id IN (SELECT d.id FROM devices d LEFT JOIN device_bindings b ON b.device_id=d.id
+WHERE d.owner=? AND d.kind='live_start' AND COALESCE(b.binding,'')=?)`, flight.ID, push.LiveStart, owner, device.Binding); err != nil {
 			return err
 		}
 		kind := push.LiveUpdate
@@ -162,10 +198,10 @@ AND julianday(COALESCE(json_extract(f.snapshot,'$.estimatedDeparture'),json_extr
 func priorLiveSlotDevice(ctx context.Context, tx *sql.Tx, owner string, device Device) (int64, bool, error) {
 	var prior sql.NullInt64
 	var revision int64
-	var flight, token string
-	err := tx.QueryRowContext(ctx, `SELECT l.device_id,l.flight_id,l.revision,COALESCE(d.token,'')
-FROM device_live_slots l LEFT JOIN devices d ON d.id=l.device_id WHERE l.owner=? AND l.slot=?`, owner, device.LiveSlot).
-		Scan(&prior, &flight, &revision, &token)
+	var flight, token, binding string
+	err := tx.QueryRowContext(ctx, `SELECT l.device_id,l.flight_id,l.revision,COALESCE(d.token,''),COALESCE(b.binding,'')
+FROM device_live_slots l LEFT JOIN devices d ON d.id=l.device_id LEFT JOIN device_bindings b ON b.device_id=d.id
+WHERE l.owner=? AND l.slot=?`, owner, device.LiveSlot).Scan(&prior, &flight, &revision, &token, &binding)
 	if err == nil {
 		if device.LiveRevision < revision {
 			return 0, true, nil
@@ -174,7 +210,7 @@ FROM device_live_slots l LEFT JOIN devices d ON d.id=l.device_id WHERE l.owner=?
 			return 0, false, ErrInvalidLiveSlot
 		}
 		if device.LiveRevision == revision {
-			if prior.Valid && token != device.Token {
+			if prior.Valid && (token != device.Token || binding != device.Binding) {
 				return 0, false, ErrInvalidLiveSlot
 			}
 			return 0, true, nil
@@ -208,8 +244,15 @@ ON CONFLICT(device_id,flight_id) DO UPDATE SET wire_epoch=MAX(live_wire_clocks.w
 			return err
 		}
 		if device.Kind == "live_start" {
-			if err := carryConfirmedStarts(ctx, tx, deviceID, priorID); err != nil {
+			var sameBinding bool
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT binding FROM device_bindings WHERE device_id=?),'')=?`,
+				priorID, device.Binding).Scan(&sameBinding); err != nil {
 				return err
+			}
+			if sameBinding {
+				if err := carryConfirmedStarts(ctx, tx, deviceID, priorID); err != nil {
+					return err
+				}
 			}
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE id=?`, priorID); err != nil {
@@ -331,13 +374,17 @@ func enqueueLive(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight, re
 	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.platform,d.kind,t.seat,l.device_id IS NOT NULL, q.device_id IS NOT NULL,
 recent.message, COALESCE(recent.done=0,0)
 FROM devices d JOIN tracked t ON t.owner=d.owner
+LEFT JOIN device_bindings b ON b.device_id=d.id
 LEFT JOIN live_started l ON l.device_id=d.id AND l.flight_id=t.flight_id
 LEFT JOIN live_token_requests q ON q.device_id=d.id
 LEFT JOIN outbox recent ON NOT ? AND recent.id=(SELECT o.id FROM outbox o
 WHERE o.device_id=d.id AND o.flight_id=t.flight_id AND o.expires>CASE WHEN d.platform='android' THEN ? ELSE ? END
 AND (json_extract(o.message,'$.Kind') IN ('start','update') OR d.platform='android' AND json_extract(o.message,'$.Kind')='end')
 ORDER BY o.id DESC LIMIT 1)
-WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='live_start' AND NOT EXISTS (SELECT 1 FROM devices u WHERE u.owner=d.owner AND u.kind='live_update' AND u.flight_id=t.flight_id)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, remapped, now.UnixNano(), recentExpiry.UnixNano(), flight.ID)
+WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='live_start' AND NOT EXISTS (
+  SELECT 1 FROM devices u LEFT JOIN device_bindings ub ON ub.device_id=u.id
+  WHERE u.owner=d.owner AND u.kind='live_update' AND u.flight_id=t.flight_id AND COALESCE(ub.binding,'')=COALESCE(b.binding,'')
+)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, remapped, now.UnixNano(), recentExpiry.UnixNano(), flight.ID)
 	if err != nil {
 		return err
 	}
@@ -936,9 +983,13 @@ func (s *Store) RemoveDevice(ctx context.Context, owner string, d Device) error 
 	if d.LiveSlot != "" || d.LiveRevision != 0 {
 		return ErrInvalidLiveSlot
 	}
+	// Bound iOS slots use revision-based revocation so a delayed exact-token
+	// deletion cannot remove a newer session that reused the token.
 	_, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE owner=? AND platform=? AND kind=? AND flight_id=?
 AND (token=? OR (?='' AND ?<>''))
-AND (?='' OR EXISTS(SELECT 1 FROM device_bindings WHERE device_id=devices.id AND binding=?))`, owner, d.Platform, d.Kind, d.FlightID, d.Token, d.Token, d.Binding, d.Binding, d.Binding)
+AND (?='' OR EXISTS(SELECT 1 FROM device_bindings WHERE device_id=devices.id AND binding=?))
+AND (platform<>'ios' OR NOT EXISTS(SELECT 1 FROM device_bindings WHERE device_id=devices.id))`,
+		owner, d.Platform, d.Kind, d.FlightID, d.Token, d.Token, d.Binding, d.Binding, d.Binding)
 	return err
 }
 

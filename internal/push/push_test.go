@@ -108,6 +108,7 @@ func TestAPNsWireRequests(t *testing.T) {
 		t.Fatal("APNs transport must use HTTP/2 only")
 	}
 	const token = "aabbccddeeff00112233445566778899"
+	const binding = "0af06679-3c08-4f26-9a5b-15f31d4904ab"
 	now := time.Now().Truncate(time.Second)
 	collapsed := fixtureAlert(now)
 	collapsed.APNsCollapseID = strings.Repeat("a", 64)
@@ -115,14 +116,15 @@ func TestAPNsWireRequests(t *testing.T) {
 		name, topic, pushType, priority, collapse string
 		message                                   Message
 		inputToken                                int
+		binding                                   string
 	}{
-		{"alert", "com.example.plano", "alert", "10", "event-fixture", fixtureOrderedAlert(now), 0},
-		{"collapsed alert", "com.example.plano", "alert", "10", collapsed.APNsCollapseID, collapsed, 0},
-		{"connection alert", "com.example.plano", "alert", "10", "event-fixture", fixtureConnectionAlert(now), 0},
-		{"start", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 0},
-		{"start requests update token", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 1},
-		{"update", "com.example.plano.push-type.liveactivity", "liveactivity", "5", "flight-update", fixtureActivity(LiveUpdate, now), 0},
-		{"end", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveEnd, now), 0},
+		{"alert", "com.example.plano", "alert", "10", "event-fixture", fixtureOrderedAlert(now), 0, binding},
+		{"collapsed alert", "com.example.plano", "alert", "10", collapsed.APNsCollapseID, collapsed, 0, ""},
+		{"connection alert", "com.example.plano", "alert", "10", "event-fixture", fixtureConnectionAlert(now), 0, ""},
+		{"legacy start", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 0, ""},
+		{"bound start requests update token", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 1, binding},
+		{"update", "com.example.plano.push-type.liveactivity", "liveactivity", "5", "flight-update", fixtureActivity(LiveUpdate, now), 0, binding},
+		{"end", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveEnd, now), 0, binding},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0
@@ -181,6 +183,13 @@ func TestAPNsWireRequests(t *testing.T) {
 					t.Fatal(err)
 				}
 				aps := wire.APS
+				wantBinding := test.message.Kind == LiveStart && test.binding != ""
+				if got, present := aps.Attributes["activityBinding"]; present != wantBinding || present && got != test.binding {
+					t.Errorf("unexpected APNs activity binding: %s", body)
+				}
+				if count := strings.Count(string(body), `"activityBinding"`); count > 1 || !wantBinding && count != 0 {
+					t.Errorf("APNs activity binding appeared outside start attributes: %s", body)
+				}
 				if want := test.message.ConnectionInboundID; want == "" && wire.ConnectionInboundID != nil ||
 					want != "" && (wire.ConnectionInboundID == nil || *wire.ConnectionInboundID != want) {
 					t.Errorf("invalid APNs connection route: %s", body)
@@ -220,7 +229,8 @@ func TestAPNsWireRequests(t *testing.T) {
 			})}
 			message := test.message
 			message.RequestUpdateToken = test.inputToken != 0
-			if err := client.Send(t.Context(), token, message); err != nil || calls != 1 {
+			target := Target{Platform: "ios", Token: token, Binding: test.binding}
+			if err := (Sender{APNs: client}).Send(t.Context(), target, message); err != nil || calls != 1 {
 				t.Fatalf("APNs send: calls=%d, error=%v", calls, err)
 			}
 		})

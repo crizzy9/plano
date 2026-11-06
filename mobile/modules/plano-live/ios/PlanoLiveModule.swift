@@ -46,9 +46,21 @@ public final class PlanoLiveAppDelegateSubscriber: ExpoAppDelegateSubscriber {
   }
 }
 
-private struct ActivityRegistration: Codable, Equatable {
+private struct ActivityRegistration: Codable {
   let server: String
   let token: String
+  let binding: String?
+
+  init(server: String, token: String, binding: String? = nil) {
+    self.server = server
+    self.token = token
+    self.binding = binding
+  }
+
+  func matches(_ other: ActivityRegistration?) -> Bool {
+    guard let other else { return false }
+    return server == other.server && token == other.token
+  }
 
   var baseURL: URL? {
     guard let components = URLComponents(string: server),
@@ -72,6 +84,7 @@ private struct DeviceRegistration: Encodable {
   let requestUpdateToken: Bool?
   let liveSlot: String
   let liveRevision: Int64
+  let binding: String
 }
 
 private enum RegistrationError: LocalizedError {
@@ -183,7 +196,8 @@ private final class PlanoActivityCoordinator {
   }()
 
   func restore() {
-    guard mayRestore, registration == nil, retirement == nil, let saved = LiveKeychain.load(), saved.baseURL != nil else { return }
+    guard mayRestore, registration == nil, retirement == nil, let saved = LiveKeychain.load(),
+          saved.baseURL != nil, saved.binding != nil else { return }
     install(saved)
   }
 
@@ -195,21 +209,26 @@ private final class PlanoActivityCoordinator {
   }
 
   func configure(server: String, token: String) async throws {
-    let next = ActivityRegistration(server: server, token: token)
-    guard next.baseURL != nil, !token.isEmpty else { throw RegistrationError.invalidServer }
-    if next == registration {
+    let target = ActivityRegistration(server: server, token: token)
+    guard target.baseURL != nil, !token.isEmpty else { throw RegistrationError.invalidServer }
+    if target.matches(registration) {
       resume()
       return
     }
-    if (registration ?? LiveKeychain.load()) != next {
-      let change = invalidateRegistration()
-      try? LiveKeychain.clear()
-      configuring = next
-      await retireActivities()
-      if registration == next { return }
-      guard change == generation else { throw RegistrationError.superseded }
-      configuring = nil
+    if mayRestore, registration == nil, retirement == nil, let saved = LiveKeychain.load(),
+       target.matches(saved), saved.binding != nil {
+      install(saved)
+      return
     }
+
+    let next = ActivityRegistration(server: server, token: token, binding: UUID().uuidString.lowercased())
+    let change = invalidateRegistration()
+    try? LiveKeychain.clear()
+    configuring = next
+    await retireActivities()
+    if target.matches(registration) { return }
+    guard change == generation else { throw RegistrationError.superseded }
+    configuring = nil
     try LiveKeychain.save(next)
     install(next)
   }
@@ -292,14 +311,14 @@ private final class PlanoActivityCoordinator {
     guard !server.isEmpty, !token.isEmpty else { throw RegistrationError.invalidServer }
 
     let saved = Result { try LiveKeychain.loadChecked() }
-    let ownsActivities = registration == target || configuring == target ||
-      (registration == nil && configuring == nil && (try? saved.get()) == target)
+    let ownsActivities = target.matches(registration) || target.matches(configuring) ||
+      (registration == nil && configuring == nil && target.matches(try? saved.get()))
     if ownsActivities { _ = invalidateRegistration() }
 
     // Allocate the floor in the same actor turn that stops matching uploads.
     // ActivityKit teardown can suspend and let a later enable start work.
     let floor = Result {
-      if try saved.get() == target { try LiveKeychain.clear() }
+      if target.matches(try saved.get()) { try LiveKeychain.clear() }
       return try nextPushRevision()
     }
     if ownsActivities { await retireActivities() }
@@ -307,16 +326,19 @@ private final class PlanoActivityCoordinator {
   }
 
   func start(stateJSON: String) throws {
-    guard let registration else { throw RegistrationError.notConfigured }
+    guard let registration, let binding = registration.binding else { throw RegistrationError.notConfigured }
     guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw RegistrationError.disabled }
     let state = try JSONDecoder().decode(PlanoActivityAttributes.ContentState.self, from: Data(stateJSON.utf8))
     guard !["arrived", "cancelled"].contains(state.status) else { throw RegistrationError.inactive }
-    if Activity<PlanoActivityAttributes>.activities.contains(where: { $0.attributes.flightId == state.flightId }) { return }
+    if Activity<PlanoActivityAttributes>.activities.contains(where: {
+      $0.attributes.flightId == state.flightId && $0.attributes.activityBinding == binding &&
+        !locallyEnding.contains($0.id) && $0.activityState != .ended && $0.activityState != .dismissed
+    }) { return }
     let now = Date.now
     let observedAt = Date(timeIntervalSince1970: TimeInterval(state.observedEpoch))
     let staleDate = state.observedEpoch > 0 ? min(observedAt, now).addingTimeInterval(600) : now
     let activity = try Activity.request(
-      attributes: PlanoActivityAttributes(flightId: state.flightId),
+      attributes: PlanoActivityAttributes(flightId: state.flightId, activityBinding: binding),
       content: ActivityContent(state: state, staleDate: staleDate),
       pushType: .token
     )
@@ -325,11 +347,15 @@ private final class PlanoActivityCoordinator {
 
   func stop(flightId: String) async {
     for activity in Activity<PlanoActivityAttributes>.activities where activity.attributes.flightId == flightId {
-      guard locallyEnding.insert(activity.id).inserted else { continue }
-      removeObservation(for: activity)
-      await activity.end(nil, dismissalPolicy: .immediate)
-      locallyEnding.remove(activity.id)
+      await endActivity(activity)
     }
+  }
+
+  private func endActivity(_ activity: Activity<PlanoActivityAttributes>) async {
+    guard locallyEnding.insert(activity.id).inserted else { return }
+    removeObservation(for: activity)
+    await activity.end(nil, dismissalPolicy: .immediate)
+    locallyEnding.remove(activity.id)
   }
 
   private func isCurrent(_ current: UUID) -> Bool {
@@ -338,8 +364,17 @@ private final class PlanoActivityCoordinator {
 
   private func observe(_ activity: Activity<PlanoActivityAttributes>, using registration: ActivityRegistration, generation: UUID) {
     let id = activity.id
-    guard isCurrent(generation), observers[id] == nil, !locallyEnding.contains(id),
+    guard isCurrent(generation), let binding = registration.binding, observers[id] == nil, !locallyEnding.contains(id),
           activity.activityState != .ended, activity.activityState != .dismissed else { return }
+    guard activity.attributes.activityBinding == binding else {
+      // A delayed remote start can arrive after the registration changes.
+      // Its immutable attributes cannot authorize token upload in this session.
+      Task {
+        guard isCurrent(generation) else { return }
+        await endActivity(activity)
+      }
+      return
+    }
     let slot = ActivityTokenSlot.update(activityID: id, flightID: activity.attributes.flightId)
     let tokens = Task {
       if let token = activity.pushToken {
@@ -387,7 +422,7 @@ private final class PlanoActivityCoordinator {
   }
 
   private func register(data: Data, slot: ActivityTokenSlot, revision: Int64, using registration: ActivityRegistration, generation: UUID) async -> Bool {
-    guard let base = registration.baseURL else { return true }
+    guard let base = registration.baseURL, let binding = registration.binding else { return true }
     let token = data.map { String(format: "%02x", $0) }.joined()
     let payload: DeviceRegistration
     switch slot {
@@ -396,11 +431,11 @@ private final class PlanoActivityCoordinator {
       if #available(iOS 18.0, *) { requestUpdateToken = true }
       else { requestUpdateToken = nil }
       payload = DeviceRegistration(token: token, kind: "live_start", flightId: nil, requestUpdateToken: requestUpdateToken,
-                                   liveSlot: "start", liveRevision: revision)
+                                   liveSlot: "start", liveRevision: revision, binding: binding)
     case let .update(activityID, flightID):
       let digest = SHA256.hash(data: Data(activityID.utf8)).map { String(format: "%02x", $0) }.joined()
       payload = DeviceRegistration(token: token, kind: "live_update", flightId: flightID, requestUpdateToken: nil,
-                                   liveSlot: "activity:\(digest)", liveRevision: revision)
+                                   liveSlot: "activity:\(digest)", liveRevision: revision, binding: binding)
     }
     guard let body = try? JSONEncoder().encode(payload) else { return true }
     var request = URLRequest(url: base.appendingPathComponent("v1").appendingPathComponent("devices"), timeoutInterval: 8)

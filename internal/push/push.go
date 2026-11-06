@@ -84,7 +84,7 @@ type Message struct {
 
 	// AndroidLiveHeartbeat marks a routine refresh for immediate delivery only.
 	AndroidLiveHeartbeat bool   `json:",omitempty"`
-	binding              string // Android delivery generation, added at dispatch from its device registration.
+	binding              string // Opaque session binding from the destination device registration.
 }
 
 type Sender struct {
@@ -110,6 +110,7 @@ func (e *DeliveryError) Error() string {
 }
 
 func (s Sender) Send(ctx context.Context, target Target, m Message) error {
+	m.binding = target.Binding
 	switch target.Platform {
 	case "ios":
 		if s.APNs == nil {
@@ -120,7 +121,6 @@ func (s Sender) Send(ctx context.Context, target Target, m Message) error {
 		if s.FCM == nil {
 			return &DeliveryError{Provider: "FCM", Code: "NotConfigured", Retryable: true}
 		}
-		m.binding = target.Binding
 		return s.FCM.Send(ctx, target.Token, m)
 	default:
 		return errors.New("unsupported push target platform")

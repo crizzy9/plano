@@ -3,6 +3,7 @@ import Foundation
 
 struct PlanoActivityAttributes: ActivityAttributes {
   let flightId: String
+  let activityBinding: String?
 
   struct ContentState: Codable, Hashable {
     let flightId: String
