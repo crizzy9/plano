@@ -28,7 +28,20 @@ var (
 	eurocontrolPositionRelay = radarPositionRelay{feeds.Eurocontrol, eurocontrolPositionKeyFile, "PLANO_EUROCONTROL_POSITION_RELAY_URL", "/v1/webhooks/eurocontrol-position"}
 )
 
-func (relay radarPositionRelay) fromEnv(ctx context.Context, input io.Reader) (int, error) {
+func (relay radarPositionRelay) fromEnv(ctx context.Context, input io.Reader, args []string) (int, error) {
+	if len(args) != 0 {
+		if relay.source != feeds.FAASWIM {
+			return relayConfigError, errors.New("usage: plano forward-eurocontrol-position")
+		}
+		if len(args) != 2 || args[0] != "sfdps-track" {
+			return relayConfigError, errors.New("usage: plano forward-swim-position [sfdps-track <binding-file>]")
+		}
+		converted, status, err := sfdpsPositionRelayInput(input, args[1], time.Now().UTC())
+		if converted == nil || err != nil {
+			return status, err
+		}
+		input = converted
+	}
 	key, err := readWebhookKeyFile(relay.keyFile)
 	if err != nil {
 		return relayConfigError, err

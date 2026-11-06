@@ -72,8 +72,8 @@ same empty response.
 
 An authorized FAA SWIM subscriber can relay permitted airborne position
 reports to Plano. SFDPS publishes en route flight data to authorized
-consumers. Your bridge translates the upstream reports and maps each flight
-to its exact AeroAPI instance ID. Apply the feed agreement and aircraft
+consumers. The subscriber maps each flight to its exact AeroAPI instance ID.
+Apply the feed agreement and aircraft
 privacy filters before setting `displayAllowed` to `true`. Set it only for
 fixes permitted for every enrolled installation that tracks the flight.
 Forward reported airborne fixes with their original observation times.
@@ -82,7 +82,8 @@ Forward reported airborne fixes with their original observation times.
 In live mode, mount a dedicated random signing key of at least 32 bytes and
 set `PLANO_SWIM_POSITION_KEY_FILE` to its container path. Use a different
 key from the other aviation callbacks and advisory gateway tokens. The
-relay takes one normalized JSON report from standard input.
+relay takes a normalized JSON report or a supported SFDPS XML report from
+standard input.
 
 ```sh
 export PLANO_SWIM_POSITION_RELAY_URL=https://plano.example.net/v1/webhooks/swim-position
@@ -122,6 +123,43 @@ integration is enabled and appear with the FAA SWIM source label. An aircraft
 or flight identity change clears the earlier SWIM track. Plano retains up to
 2,048 SWIM fixes per flight for seven days in private radar storage separate
 from flight status, notifications, offline detail, Friends and public pickup links.
+
+### SFDPS FIXM-NAS track reports
+
+An authorized SFDPS subscriber can feed FIXM-NAS 3.0 XML to the relay.
+Prepare one version 1 binding for the verified AeroAPI instance. Use the
+UUID from `flight/gufi` and the callsign from `flightIdentification` in the
+SFDPS record. Supply the independently verified AeroAPI scheduled gate-out
+and actual wheels-off times. `displayAllowed` has the same meaning as in
+the normalized position envelope. Keep the binding file within 4 KiB.
+
+```json
+{
+  "version": 1,
+  "displayAllowed": true,
+  "providerFlightId": "UAL88-example",
+  "originICAO": "KSFO",
+  "destinationICAO": "KEWR",
+  "scheduledDeparture": "2026-11-06T13:30:00Z",
+  "actualTakeoff": "2026-11-06T13:48:05Z",
+  "gufi": "78ea026f-0232-48c2-bb86-506463508daa",
+  "aircraftId": "UAL88"
+}
+```
+
+```sh
+plano forward-swim-position sfdps-track /run/plano/flight-binding.json < track.xml
+```
+
+The converter accepts a qualified `FlightMessage` or `MessageCollection` in
+the FAA NAS 3.0 namespace. One input can contain up to 64 messages and 32
+distinct matching fixes in 256 KiB. It uses active `TH` surveillance messages for the
+bound GUFI, callsign and airport pair. The fix comes from `positionTime` and
+the reported EPSG:4326 latitude and longitude. Reported altitude in feet and
+surveillance ground speed in knots can accompany the fix. Coasted tracks and
+target positions are excluded. The converted JSON goes through the same
+signed callback and tracked-flight checks as a normalized report.
+[FAA field mapping](https://nsrr.faa.gov/sites/default/files/enroute-ad-pub-v2/SFDPS%20Data%20Consumer%20Reference%20Manual%20v2.1.4.pdf) · [FIXM-NAS schema](https://fixm.aero/releases/US_Ext-3.0/doc/diagrams/Nas.html) · [Worked report, appendix A](https://docs.ogc.org/per/20-020.pdf)
 
 ## EUROCONTROL radar positions
 

@@ -193,8 +193,10 @@ JSON, supported FAA TFMData FlightControl XML, and EUROCONTROL ADEXP slot
 messages. [Takeoff slot relay](AVIATION_CALLBACKS.md#flight-specific-takeoff-slots)
 
 An authorized FAA SWIM bridge can also send normalized airborne positions
-with `plano forward-swim-position`. The relay uses its own signing key and
-delivers fixes to private radar for verified tracked legs. [Radar relay](AVIATION_CALLBACKS.md#faa-swim-radar-positions)
+with `plano forward-swim-position`. Its `sfdps-track` mode accepts supported
+FIXM-NAS 3.0 surveillance reports with an operator-supplied flight binding.
+The relay uses its own signing key and delivers fixes to private radar for
+verified tracked legs. [Radar relay](AVIATION_CALLBACKS.md#faa-swim-radar-positions)
 
 An authorized EUROCONTROL bridge can relay observed airborne fixes with
 `plano forward-eurocontrol-position`. Mount its dedicated signing key on the

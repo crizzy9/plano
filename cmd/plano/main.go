@@ -66,15 +66,11 @@ func main() {
 		os.Exit(status)
 	}
 	if len(os.Args) > 1 && (os.Args[1] == "forward-swim-position" || os.Args[1] == "forward-eurocontrol-position") {
-		if len(os.Args) != 2 {
-			fmt.Fprintf(os.Stderr, "usage: plano %s\n", os.Args[1])
-			os.Exit(relayConfigError)
-		}
 		relay := swimPositionRelay
 		if os.Args[1] == "forward-eurocontrol-position" {
 			relay = eurocontrolPositionRelay
 		}
-		status, err := relay.fromEnv(context.Background(), os.Stdin)
+		status, err := relay.fromEnv(context.Background(), os.Stdin, os.Args[2:])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}

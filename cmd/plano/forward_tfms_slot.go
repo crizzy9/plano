@@ -35,26 +35,33 @@ func tfmsATFMSlotRelayInput(input io.Reader, bindingPath string, now time.Time) 
 }
 
 func readTFMSATFMBinding(path string) (feeds.TFMSATFMSlotBinding, error) {
-	const maxBindingBytes = 4 << 10
 	invalid := errors.New("FAA FlightControl binding must be a readable JSON file of at most 4 KiB")
+	var binding feeds.TFMSATFMSlotBinding
+	if err := readRelayBinding(path, &binding, invalid); err != nil || binding.Version != 1 {
+		return feeds.TFMSATFMSlotBinding{}, invalid
+	}
+	return binding, nil
+}
+
+func readRelayBinding(path string, binding any, invalid error) error {
+	const maxBindingBytes = 4 << 10
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxBindingBytes {
-		return feeds.TFMSATFMSlotBinding{}, invalid
+		return invalid
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return feeds.TFMSATFMSlotBinding{}, invalid
+		return invalid
 	}
 	defer file.Close()
 	body, err := io.ReadAll(io.LimitReader(file, maxBindingBytes+1))
 	if err != nil || len(body) > maxBindingBytes || !utf8.Valid(body) {
-		return feeds.TFMSATFMSlotBinding{}, invalid
+		return invalid
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
-	var binding feeds.TFMSATFMSlotBinding
-	if decoder.Decode(&binding) != nil || decoder.Decode(new(any)) != io.EOF || binding.Version != 1 {
-		return feeds.TFMSATFMSlotBinding{}, invalid
+	if decoder.Decode(binding) != nil || decoder.Decode(new(any)) != io.EOF {
+		return invalid
 	}
-	return binding, nil
+	return nil
 }
