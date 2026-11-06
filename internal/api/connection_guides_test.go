@@ -27,6 +27,8 @@ func TestBuiltInConnectionMapsUseReportedAirportCodes(t *testing.T) {
 		{"LAX", "KLAX", "https://www.flylax.com/lax-terminal-maps"},
 		{"ORD", "KORD", "https://maps.ord.flychicago.com/"},
 		{"DEN", "KDEN", "https://maps.flydenver.com/"},
+		{"AMS", "EHAM", "https://www.schiphol.nl/en/airport-maps/"},
+		{"CDG", "LFPG", "https://www.parisaeroport.fr/en/passengers/at-the-airport/terminals-map/cdg"},
 	} {
 		t.Run(tc.iata, func(t *testing.T) {
 			for _, codes := range []struct{ primary, icao string }{{primary: strings.ToLower(tc.iata)}, {icao: tc.icao}} {
@@ -41,6 +43,37 @@ func TestBuiltInConnectionMapsUseReportedAirportCodes(t *testing.T) {
 			out := feeds.Flight{Origin: tc.iata, OriginICAO: "KXZZ"}
 			if route, _ := rules.routeForConnection(in, out); route.MapURL != "" {
 				t.Fatalf("conflicting airport received map %+v", route)
+			}
+		})
+	}
+}
+
+func TestBuiltInSchengenTransferPlanning(t *testing.T) {
+	now := time.Date(2027, time.March, 16, 12, 0, 0, 0, time.UTC)
+	arrival := now.Add(10 * time.Minute)
+	for _, tc := range []struct {
+		name, airport, icao, arrivingTerminal, arrivingGate, departingTerminal, departingGate, destination string
+		available, planning                                                                                int
+		instruction                                                                                        string
+	}{
+		{"Schiphol Pier D border", "AMS", "EHAM", "1", "D65", "1", "D26", "BOS", 60, 80, "passport control"},
+		{"CDG border and renamed gates", "CDG", "LFPG", "2F", "F26", "2E", "K35", "BOS", 85, 90, "Terminal 5, Gates D"},
+		{"CDG remote terminal", "CDG", "LFPG", "2F", "F26", "7", "N31", "NTE", 105, 120, "secure Orange shuttle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			departure := arrival.Add(time.Duration(tc.available) * time.Minute)
+			in := feeds.Flight{Origin: "FRA", Destination: tc.airport, DestinationICAO: tc.icao, ArrivalTerminal: tc.arrivingTerminal,
+				ArrivalGate: tc.arrivingGate, ScheduledArrival: &arrival}
+			out := feeds.Flight{Origin: tc.airport, OriginICAO: tc.icao, Destination: tc.destination, DepartureTerminal: tc.departingTerminal,
+				DepartureGate: tc.departingGate, ScheduledDeparture: &departure}
+			got, _, err := (Server{}).assessConnection(t.Context(), in, out, now,
+				func(context.Context, feeds.Flight, bool, time.Time) (*core.GatePrediction, error) { return nil, nil })
+			instructions := strings.Join(got.Instructions, " ")
+			if err != nil || got.Precision != "generic" || got.Risk != "Risky" || got.TransferMinutes+got.BoardingReserveMinutes != tc.planning ||
+				got.BoardingReserveMinutes != defaultConnectionBoardingReserveMinutes || got.GuideURL == "" || got.MapURL == "" ||
+				!strings.Contains(instructions, tc.instruction) || !strings.Contains(instructions, "Your reported departure gate is "+tc.departingGate+".") ||
+				strings.Contains(instructions, "Continue to gate ") {
+				t.Fatalf("unexpected transfer plan %+v, %v", got, err)
 			}
 		})
 	}

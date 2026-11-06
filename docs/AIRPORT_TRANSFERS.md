@@ -9,8 +9,8 @@ the connection risk score.
 ## Official maps and connection directions
 
 Plano links to official terminal maps by default at SEA, DFW, ATL, SFO, EWR,
-JFK, LAX, ORD, DEN, and LHR. The map opens on the airport's website. When
-reported gates or terminals identify a supported path, Plano also shows
+JFK, LAX, ORD, DEN, LHR, AMS, and CDG. The map opens on the airport's website.
+When reported gates or terminals identify a supported path, Plano also shows
 directions. Secure routes apply when the traveler can stay past security.
 
 - SEA directions use walkways and the Blue, Green, and Yellow train lines.
@@ -56,13 +56,27 @@ directions. Secure routes apply when the traveler can stay past security.
   Connections signs and use the free shuttle bus to change terminals. On
   separate tickets, follow Arrivals and allow time for any immigration, bag
   collection, check-in, and security. [Heathrow connections](https://www.heathrow.com/connecting-flights) · [Airport maps](https://www.heathrow.com/at-the-airport/airport-maps)
+- AMS directions follow the yellow transfer signs and account for passport
+  control between the Schengen and non-Schengen gate areas. Pier D has gates
+  in both areas, so Plano uses the gate number to distinguish them. Check
+  airport screens for the current gate and follow posted screening directions.
+  [Schiphol transfer guide](https://www.schiphol.nl/en/transfers/) · [Gate areas](https://www.schiphol.nl/en/at-schiphol/services/transferdesk/)
+- CDG directions cover Terminals 2E, 2F, and 2G. Starting March 16, 2027, the
+  airport will call these Terminals 5, 6, and 7. Follow the yellow Connections
+  signs for eligible airside transfers, allow time for passport control
+  when changing Schengen areas, and check with airport staff about shuttle
+  service between the two Schengen terminals. [Air France connection guide](https://wwws.airfrance.us/information/aeroport/conseils-correspondances-paris-cdg-ory) · [Terminal renaming](https://presse.groupeadp.fr/groupe-adp-simplifies-the-passenger-experience-at-paris-charles-de-gaulle-airport-renaming-of-all-terminals-in-march-2027/?lang=en) · [Shuttles](https://www.bonjour-ratp.fr/en/aeroports/roissy-charles-de-gaulle/acces/navette/)
 
-These directions use general estimates for risk scoring. Built-in routes that
-plan for another checkpoint use the 65-minute terminal-transfer estimate plus
-the usual boarding reserve. The official map remains available
-when location information is incomplete or a connection is disrupted. Follow
-airport staff for passport control, baggage recheck, and current screening
-requirements.
+These directions use general estimates for risk scoring. The default for
+routes that plan for screening or passport control is 65 minutes plus the
+usual boarding reserve. For supported CDG routes, Plano uses the airport's
+informational planning times, including the reserve. The total is 120 minutes
+for transfers between 2G and another supported terminal, and 90 minutes for
+the other supported pairs. [Paris Aéroport transfer times, p. 34](https://www.parisaeroport.fr/docs/default-source/professionnel-fichiers/service-aux-entreprises/cdg/adp-april2026--welcome-guide-for-our-business-customers-cdg.pdf?sfvrsn=2a7aa5bd_2#page=34)
+
+The official map remains available when location information is incomplete or
+a connection is disrupted. Follow airport staff for passport control, baggage
+recheck, and current screening requirements.
 
 Operator maps take precedence over the default map. An operator graph with
 checkpoints also takes precedence over built-in directions, including when

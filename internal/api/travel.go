@@ -224,7 +224,7 @@ func estimateConnectionRoute(in, out feeds.Flight, route ConnectionRoute, config
 	}
 	instructions = append(instructions, "Allow extra time if your itinerary requires security, passport control or baggage recheck.")
 	if out.DepartureGate != "" {
-		instructions = append(instructions, "Continue to gate "+out.DepartureGate+".")
+		instructions = append(instructions, "Your reported departure gate is "+out.DepartureGate+".")
 	}
 	precision := "generic"
 	if configured {

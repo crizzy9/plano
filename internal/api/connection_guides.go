@@ -14,10 +14,12 @@ type airportConnectionGuide struct {
 }
 
 type connectionGuideDirections struct {
-	steps              []string
-	landside           bool
-	requiresScreening  bool
-	secureSameTerminal bool
+	steps                 []string
+	transferMinutes       int
+	landside              bool
+	requiresScreening     bool
+	requiresBorderControl bool
+	secureSameTerminal    bool
 }
 
 func secureConnectionDirections(directions func(in, out feeds.Flight) []string) func(feeds.Flight, feeds.Flight) connectionGuideDirections {
@@ -38,6 +40,8 @@ var airportConnectionGuides = []airportConnectionGuide{
 	{"ORD", "KORD", "https://maps.ord.flychicago.com/", "https://www.flychicago.com/ohare/tofrom/connecting/Pages/default.aspx", ordConnectionDirections},
 	{"DEN", "KDEN", "https://maps.flydenver.com/", "https://www.flydenver.com/about-den/facilities/#train", denConnectionDirections},
 	{"LHR", "EGLL", "https://www.heathrow.com/at-the-airport/airport-maps", "https://www.heathrow.com/connecting-flights", lhrConnectionDirections},
+	{"AMS", "EHAM", "https://www.schiphol.nl/en/airport-maps/", "https://www.schiphol.nl/en/transfers/", amsConnectionDirections},
+	{"CDG", "LFPG", "https://www.parisaeroport.fr/en/passengers/at-the-airport/terminals-map/cdg", "https://wwws.airfrance.us/information/aeroport/conseils-correspondances-paris-cdg-ory", cdgConnectionDirections},
 }
 
 func (g airportConnectionGuide) matches(primary, icao string) bool {
@@ -65,7 +69,7 @@ func (r *ConnectionRules) routeForConnection(in, out feeds.Flight) (ConnectionRo
 				case directions.landside:
 					route.TransferMinutes = defaultConnectionTerminalTransferMinutes
 					route.Instructions = append([]string{"Complete any required passport control and collect checked bags as directed. Check where to recheck them before going through security."}, directions.steps...)
-				case directions.requiresScreening:
+				case directions.requiresScreening, directions.requiresBorderControl:
 					route.TransferMinutes = defaultConnectionTerminalTransferMinutes
 					route.Instructions = directions.steps
 				default:
@@ -74,6 +78,7 @@ func (r *ConnectionRules) routeForConnection(in, out feeds.Flight) (ConnectionRo
 					}
 					route.Instructions = append([]string{"Use these directions if you can stay in the secure area from your arrival gate."}, directions.steps...)
 				}
+				route.TransferMinutes = max(route.TransferMinutes, directions.transferMinutes)
 				route.GuideURL = guide.guideURL
 			}
 		}
