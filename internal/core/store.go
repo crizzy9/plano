@@ -460,14 +460,14 @@ WHERE e.flight_id=? AND COALESCE(r.revision,0)=? ORDER BY e.at_ns DESC,e.id LIMI
 }
 
 func (s *Store) Observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory) error {
-	return s.observe(ctx, flight, track, inbound, advisories, false, "")
+	return s.observe(ctx, flight, track, inbound, advisories, false, aeroObservationScope{})
 }
 
 func (s *Store) observeTracked(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory) error {
-	return s.observe(ctx, flight, track, inbound, advisories, true, "")
+	return s.observe(ctx, flight, track, inbound, advisories, true, aeroObservationScope{})
 }
 
-func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory, trackedRefresh bool, expectedAeroID string) error {
+func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory, trackedRefresh bool, scope aeroObservationScope) error {
 	if flight.ID == "" || flight.ObservedAt.IsZero() {
 		return errors.New("missing flight identity or observation time")
 	}
@@ -476,9 +476,9 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 		return err
 	}
 	defer tx.Rollback()
-	if expectedAeroID != "" {
+	if scope.providerID != "" {
 		var tracked bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT id FROM (`+aeroTargetsSQL+`) WHERE id=?)`, expectedAeroID, expectedAeroID, flight.ID).Scan(&tracked); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT id FROM (`+aeroTargetsSQL+`) WHERE id=?)`, scope.providerID, scope.providerID, flight.ID).Scan(&tracked); err != nil {
 			return err
 		}
 		if !tracked {
@@ -504,6 +504,11 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 			return err
 		}
 		if !flight.ObservedAt.After(prior.ObservedAt) {
+			return nil
+		}
+		// A diversion continuation can reuse the original AeroAPI ID. A signed
+		// snapshot with a different origin cannot replace a tracked departure.
+		if scope.sameOrigin && flightAlertAirportChanged(prior.Origin, prior.OriginICAO, flight.Origin, flight.OriginICAO) {
 			return nil
 		}
 		providerChanged = previousProvider != "" && provider != "" && provider != previousProvider

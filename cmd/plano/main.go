@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -41,6 +42,17 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "forward-advisory" {
 		status, err := runAdvisoryRelay(context.Background(), os.Stdin, os.Args[2:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		os.Exit(status)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "forward-flight-observation" {
+		if len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: plano forward-flight-observation")
+			os.Exit(relayConfigError)
+		}
+		status, err := forwardFlightObservationFromEnv(context.Background(), os.Stdin)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
@@ -88,7 +100,7 @@ func main() {
 	}
 	checkOnly := len(os.Args) == 2 && os.Args[1] == "check-config"
 	if len(os.Args) > 1 && !checkOnly {
-		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples [--early]|forward-email|forward-advisory]")
+		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples [--early]|forward-email|forward-advisory|forward-flight-observation]")
 		os.Exit(2)
 	}
 	if err := run(logger, checkOnly); err != nil {
@@ -182,7 +194,7 @@ func run(logger *slog.Logger, checkOnly bool) error {
 			return fmt.Errorf("load airport transfer rules: %w", err)
 		}
 	}
-	var aeroCallbackKey, advisoryIngressKey []byte
+	var aeroCallbackKey, advisoryIngressKey, flightObservationKey []byte
 	if !demo {
 		aeroCallbackKey, err = secret("", "PLANO_AEROALERTS_KEY_FILE")
 		if err != nil {
@@ -197,6 +209,13 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		}
 		if len(advisoryIngressKey) != 0 && len(advisoryIngressKey) < 32 {
 			return errors.New("PLANO_ADVISORY_INGRESS_KEY_FILE requires at least 32 bytes")
+		}
+		flightObservationKey, err = readFlightObservationKey()
+		if err != nil {
+			return err
+		}
+		if len(flightObservationKey) != 0 && (bytes.Equal(flightObservationKey, aeroCallbackKey) || bytes.Equal(flightObservationKey, advisoryIngressKey)) {
+			return errors.New("PLANO_FLIGHT_OBSERVATION_KEY_FILE must use a distinct key from PLANO_AEROALERTS_KEY_FILE and PLANO_ADVISORY_INGRESS_KEY_FILE")
 		}
 	}
 	var flights feeds.FlightSource
@@ -385,6 +404,7 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		BookingKey: bookingKey, ReservationSource: reservationSource, TripItSync: tripItSync, ConnectionRules: connections, Weather: weather,
 		HistoricalRisk:  historicalRisk,
 		AeroCallbackKey: aeroCallbackKey, AdvisoryIngressKey: advisoryIngressKey, Demo: demo, Logger: logger,
+		FlightObservationKey: flightObservationKey,
 	}
 	server := &http.Server{Addr: net.JoinHostPort(host, port), Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	listener, err := net.Listen("tcp", server.Addr)

@@ -9,7 +9,7 @@ import (
 	"github.com/crizzy9/plano/internal/feeds"
 )
 
-func TestAeroInboundCallbackRefreshesOnlyRotationAndForecast(t *testing.T) {
+func TestAeroInboundObservationRefreshesOnlyRotationAndForecast(t *testing.T) {
 	ctx := t.Context()
 	store, err := Open(filepath.Join(t.TempDir(), "inbound.db"))
 	if err != nil {
@@ -44,7 +44,7 @@ func TestAeroInboundCallbackRefreshesOnlyRotationAndForecast(t *testing.T) {
 	}
 	apply := func(f feeds.Flight) {
 		t.Helper()
-		if err := store.applyAeroInbound(ctx, inbound.ID, f, now); err != nil {
+		if err := store.IngestAeroObservation(ctx, f, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -71,6 +71,9 @@ WHERE o.flight_id=? AND o.done=0 AND json_extract(e.data,'$.kind')='delay_predic
 	apply(delayed)
 	apply(delayed) // Repeated callbacks for one observation are idempotent.
 	apply(inbound) // A later callback can still return older provider evidence.
+	if _, err := store.Flight(ctx, inbound.ID); err != ErrNotFound {
+		t.Fatalf("inbound-only observation entered the shared flight cache: %v", err)
+	}
 	got := details()
 	if !got.Flight.ObservedAt.Equal(onward.ObservedAt) || got.Flight.EstimatedDeparture != nil ||
 		got.Prediction == nil || got.Prediction.DelayMinutes != 60 || len(got.Inbound) != 1 || got.Inbound[0].Origin != "ORD" {

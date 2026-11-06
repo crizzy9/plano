@@ -1,6 +1,6 @@
 # Event-driven aviation updates
 
-Plano accepts two optional inbound callback types in live mode. Both use the same SQLite event and push pipeline as periodic ingestion. Use a reachable HTTPS origin and keep webhook paths separate from user enrollment. [Self-hosting](SELF_HOSTING.md)
+Plano accepts optional live flight and advisory callbacks. They use the same SQLite event and push pipeline as periodic ingestion. Use a reachable HTTPS origin and keep webhook paths separate from user enrollment. [Self-hosting](SELF_HOSTING.md)
 
 ## FlightAware AeroAPI
 
@@ -19,6 +19,47 @@ Plano creates a scope only while its departure-local day and its date at UTC mid
 Plano responds with HTTP `200` after durably accepting an eligible refresh hint. Unknown or provider-blocked flights also receive `200` without a refresh. The provider callback has no issue time or delivery ID, so Plano uses the instance ID to fetch the authoritative FlightAware record. A leased worker writes changes and push jobs transactionally. A callback arriving during the fetch schedules another refresh. Periodic polling remains enabled.
 
 A subscription can also deliver an update for a direct inbound flight that AeroAPI explicitly links to an active tracked departure. Plano uses the fetched inbound record to update the rotation and forecast with current cached airport advisories. It retains the onward flight's observation timestamp.
+
+## Signed flight snapshots
+
+If an authorized operator bridge already receives complete flight snapshots,
+send them directly to `POST /v1/webhooks/flight-observation`. This path applies
+each snapshot to matching tracked flights or their verified direct inbound
+legs without making another AeroAPI request. It uses the same provider flight
+ID, event transitions, and durable push outbox as the ordinary AeroAPI callback.
+AeroAPI supplies schedule search and periodic refresh supplies radar tracks.
+
+Mount a separate random signing key of at least 32 bytes and set
+`PLANO_FLIGHT_OBSERVATION_KEY_FILE` to its container path. `plano check-config`
+rejects a key shared with either AeroAPI callbacks or advisory ingress. The
+endpoint is available in live mode. The relay reads one `application/json`
+envelope of up to 64 KiB from standard input.
+
+```sh
+export PLANO_FLIGHT_OBSERVATION_RELAY_URL=https://plano.example.net/v1/webhooks/flight-observation
+export PLANO_FLIGHT_OBSERVATION_KEY_FILE=/run/secrets/plano-flight-observation-key
+plano forward-flight-observation < snapshot.json
+```
+
+The envelope has `version: 1`, `observedAt` set to the original snapshot
+capture time in RFC 3339, and `flight` set to a full AeroAPI `BaseFlight`
+object for a commercial flight with an exact `fa_flight_id`. Include nullable
+gate, terminal, baggage, assignment, and timing fields explicitly. An explicit
+null can withdraw an earlier value. For a diversion that shares its ID with a continuation leg,
+send the original flight record. Plano checks the origin for directly tracked
+departures. The normal AeroAPI alert's partial `flight` object and raw
+Firehose messages require a bridge to produce a complete snapshot before
+delivery. [AeroAPI flight object and callback schemas](https://www.flightaware.com/commercial/aeroapi/resources/aeroapi-openapi.yml)
+
+A bridge sending HTTP directly signs the decimal Unix seconds from
+`X-Plano-Timestamp`, one period, and the exact JSON bytes with HMAC-SHA256. Send
+the signature as hexadecimal in `X-Plano-Signature`. The request timestamp
+must be within five minutes of the server clock. The snapshot capture time
+must be within the preceding five minutes, and the scheduled departure must
+be between 36 hours ago and 48 hours ahead. Preserve the original capture time
+on retries. A `204` acknowledges receipt, including an older or duplicate
+snapshot or one with no eligible flight. Each accepted request returns the
+same empty response.
 
 ## FAA SWIM and EUROCONTROL bridges
 

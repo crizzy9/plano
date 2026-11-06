@@ -91,7 +91,7 @@ func forwardAdvisory(ctx context.Context, input io.Reader, endpoint string, key 
 	// A failed delivery leaves earlier accepted notices in place. Replaying the
 	// same provider bytes keeps their original observation and revision identity.
 	for _, body := range bodies {
-		if status, err := sendAdvisory(ctx, endpoint, key, body, transport); err != nil {
+		if status, err := sendSignedWebhook(ctx, endpoint, "advisory", key, body, transport); err != nil {
 			return status, err
 		}
 	}
@@ -101,7 +101,7 @@ func forwardAdvisory(ctx context.Context, input io.Reader, endpoint string, key 
 	return 0, nil
 }
 
-func sendAdvisory(ctx context.Context, endpoint string, key, raw []byte, transport http.RoundTripper) (int, error) {
+func sendSignedWebhook(ctx context.Context, endpoint, kind string, key, raw []byte, transport http.RoundTripper) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	stamp := strconv.FormatInt(time.Now().Unix(), 10)
@@ -110,18 +110,18 @@ func sendAdvisory(ctx context.Context, endpoint string, key, raw []byte, transpo
 	mac.Write(raw)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
-		return relayConfigError, errors.New("could not construct advisory relay request")
+		return relayConfigError, fmt.Errorf("could not construct %s relay request", kind)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Plano-Timestamp", stamp)
 	request.Header.Set("X-Plano-Signature", hex.EncodeToString(mac.Sum(nil)))
 	response, err := transport.RoundTrip(request)
 	if err != nil {
-		return relayTempFailure, errors.New("could not reach the advisory relay endpoint")
+		return relayTempFailure, fmt.Errorf("could not reach the %s relay endpoint", kind)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusBadRequest {
-		return relayDataError, fmt.Errorf("advisory relay returned HTTP %d", response.StatusCode)
+		return relayDataError, fmt.Errorf("%s relay returned HTTP %d", kind, response.StatusCode)
 	}
-	return webhookRelayStatus(response.StatusCode, "advisory")
+	return webhookRelayStatus(response.StatusCode, kind)
 }

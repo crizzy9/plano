@@ -148,12 +148,70 @@ func TestCheckConfigAcceptsFAARegistryArchiveAndLegacyMaster(t *testing.T) {
 	}
 }
 
+func TestCheckConfigFlightObservationKey(t *testing.T) {
+	key := strings.Repeat("fixture-key", 4)
+	for _, tc := range []struct {
+		name, demo, key, otherKeyEnv, wantError string
+		emptyFile                               bool
+	}{
+		{name: "no live key", demo: "false"},
+		{name: "valid live key", demo: "false", key: key + "\n"},
+		{name: "short live key", demo: "false", key: "short-fixture-key", wantError: "requires at least 32 bytes"},
+		{name: "empty live key", demo: "false", emptyFile: true, wantError: "empty secret file for " + flightObservationKeyFile},
+		{name: "whitespace live key", demo: "false", key: " \t\n", wantError: "empty secret file for " + flightObservationKeyFile},
+		{name: "live key directory", demo: "false", wantError: "must name a readable key file"},
+		{name: "shared AeroAPI callback key", demo: "false", key: key, otherKeyEnv: "PLANO_AEROALERTS_KEY_FILE", wantError: "must use a distinct key"},
+		{name: "shared advisory ingress key", demo: "false", key: key, otherKeyEnv: "PLANO_ADVISORY_INGRESS_KEY_FILE", wantError: "must use a distinct key"},
+		{name: "demo skips live key file", demo: "true", key: "short-fixture-key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateStartupEnvironment(t)
+			t.Setenv("PLANO_DEMO", tc.demo)
+			t.Setenv("PLANO_ALLOW_OPEN_ENROLLMENT", "false")
+			t.Setenv("PLANO_ENROLLMENT_CODE", "fixture-enrollment-code")
+			t.Setenv("PLANO_AEROAPI_KEY", "fixture-aeroapi-key")
+			t.Setenv("PLANO_ADDR", "127.0.0.1:0")
+			path := t.TempDir()
+			if tc.key != "" || tc.emptyFile {
+				path = filepath.Join(path, "flight-observation-key")
+				if err := os.WriteFile(path, []byte(tc.key), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.key != "" || tc.wantError != "" {
+				t.Setenv(flightObservationKeyFile, path)
+			}
+			var otherPath string
+			if tc.otherKeyEnv != "" {
+				otherPath = filepath.Join(t.TempDir(), "other-callback-key")
+				if err := os.WriteFile(otherPath, []byte(tc.key+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv(tc.otherKeyEnv, otherPath)
+			}
+			err := run(slog.New(slog.DiscardHandler), true)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("check-config failed: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), flightObservationKeyFile) || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("expected flight observation key configuration error, got %v", err)
+			}
+			if strings.Contains(err.Error(), path) || otherPath != "" && strings.Contains(err.Error(), otherPath) || tc.key != "" && strings.Contains(err.Error(), tc.key) {
+				t.Fatal("configuration diagnostic exposed the key or its path")
+			}
+		})
+	}
+}
+
 func isolateStartupEnvironment(t *testing.T) {
 	t.Helper()
 	// Preflight must only see fixture settings, including on an operator host.
 	for _, name := range []string{
 		"PLANO_PUBLIC_URL", "PLANO_REQUIRE_ENROLLMENT", "PLANO_ENROLLMENT_CODE_FILE", "PLANO_BOOKING_KEY_FILE", "PLANO_AIRPORT_TRANSFERS_FILE",
-		"PLANO_AEROALERTS_KEY_FILE", "PLANO_ADVISORY_INGRESS_KEY_FILE", "PLANO_AEROAPI_KEY_FILE",
+		"PLANO_AEROALERTS_KEY_FILE", "PLANO_ADVISORY_INGRESS_KEY_FILE", flightObservationKeyFile, "PLANO_AEROAPI_KEY_FILE",
 		"PLANO_METAR", "PLANO_AERO_SUBSCRIPTIONS", "PLANO_AERO_SUBSCRIPTIONS_INBOUND", "PLANO_AERO_SUBSCRIPTIONS_MAX", "PLANO_AERO_SUBSCRIPTIONS_INTERVAL",
 		"PLANO_TRIPIT_SYNC_KEY_FILE", "PLANO_RESERVATION_GATEWAY_URL",
 		"PLANO_FAA_NAS", "PLANO_SWIM_URL", "PLANO_EUROCONTROL_URL", "PLANO_ADSB_URL", "PLANO_FAA_REGISTRY_FILE",

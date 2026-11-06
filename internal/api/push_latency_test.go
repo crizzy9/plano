@@ -128,6 +128,99 @@ func BenchmarkSignedAdvisoryDispatch(b *testing.B) {
 	for b.Loop() {
 		samples = append(samples, measure(len(samples)+1))
 	}
+	reportDispatchLatency(b, samples)
+}
+
+// BenchmarkSignedFlightObservationDispatch includes the SQLite write and
+// dispatch claim. Its sender is a fixture and makes no provider requests.
+func BenchmarkSignedFlightObservationDispatch(b *testing.B) {
+	store, err := core.Open(filepath.Join(b.TempDir(), "flight-latency.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer store.Close()
+	ctx, cancel := context.WithCancel(b.Context())
+	defer cancel()
+	now := time.Now().UTC()
+	departure, arrival := now.Add(30*time.Hour), now.Add(36*time.Hour)
+	flight := feeds.Flight{ID: "UAL88-latency", Number: "UA88", Origin: "SFO", Destination: "EWR",
+		OriginICAO: "KSFO", DestinationICAO: "KEWR", Status: "scheduled", Source: "flightaware_aeroapi",
+		ObservedAt: now, ScheduledDeparture: &departure, ScheduledArrival: &arrival, DepartureGate: "B0"}
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		b.Fatal(err)
+	}
+	token, err := store.CreateInstallation(ctx)
+	if err != nil {
+		b.Fatal(err)
+	}
+	owner, err := store.Installation(ctx, token)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := store.Track(ctx, owner, flight.ID, ""); err != nil {
+		b.Fatal(err)
+	}
+	const deviceToken = "flight-latency-fixture"
+	if err := store.Register(ctx, owner, core.Device{Platform: "ios", Kind: "alert", Token: deviceToken}, now); err != nil {
+		b.Fatal(err)
+	}
+	key := []byte(strings.Repeat("f", 32))
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := api.Server{Store: store, FlightObservationKey: key, Logger: logger}.Handler()
+	type delivery struct {
+		at      time.Time
+		target  push.Target
+		message push.Message
+	}
+	pushed := make(chan delivery, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		store.RunDispatcher(ctx, recordPush(func(ctx context.Context, target push.Target, message push.Message) error {
+			select {
+			case pushed <- delivery{time.Now(), target, message}:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}), logger)
+	}()
+	defer func() { cancel(); <-done }()
+
+	measure := func(index int) time.Duration {
+		capture := time.Now().UTC()
+		gate := fmt.Sprintf("B%d", index+1)
+		body := flightObservationBody(flight.ID, gate, capture, departure, false)
+		stamp := strconv.FormatInt(capture.Unix(), 10)
+		request := flightObservationRequest(key, stamp, body, body).WithContext(ctx)
+		response := httptest.NewRecorder()
+		start := time.Now()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			b.Fatalf("flight observation returned %d: %s", response.Code, response.Body)
+		}
+		select {
+		case sent := <-pushed:
+			if sent.target.Platform != "ios" || sent.target.Token != deviceToken || sent.message.Kind != push.Alert ||
+				sent.message.FlightID != flight.ID || sent.message.Title != "Departure gate changed" || sent.message.Body != "UA88 · "+gate {
+				b.Fatalf("unexpected flight alert: %#v", sent)
+			}
+			return sent.at.Sub(start)
+		case <-time.After(3 * time.Second):
+			b.Fatal("flight alert did not reach the fake sender")
+			return 0
+		}
+	}
+	measure(0)
+	var samples []time.Duration
+	for b.Loop() {
+		samples = append(samples, measure(len(samples)+1))
+	}
+	reportDispatchLatency(b, samples)
+}
+
+func reportDispatchLatency(b *testing.B, samples []time.Duration) {
+	b.Helper()
 	slices.Sort(samples)
 	b.ReportMetric(float64(samples[(len(samples)-1)/2])/float64(time.Millisecond), "p50-dispatch-ms")
 	b.ReportMetric(float64(samples[(95*len(samples)-1)/100])/float64(time.Millisecond), "p95-dispatch-ms")

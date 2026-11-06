@@ -101,32 +101,43 @@ WHERE provider_id=? AND lease_ns=?`, job.generation, due.UnixNano(), now.UnixNan
 	return tx.Commit()
 }
 
-func (s *Store) refreshAeroFlight(ctx context.Context, source feeds.FlightSource, providerID string) error {
-	args := append([]any{providerID, providerID}, aeroInboundTargetArgs(providerID, time.Now())...)
+type aeroRefreshTargets struct {
+	trackedIDs []string
+	inbound    bool
+}
+
+type aeroObservationScope struct {
+	providerID string
+	sameOrigin bool
+}
+
+func (s *Store) findAeroRefreshTargets(ctx context.Context, providerID string, now time.Time) (aeroRefreshTargets, error) {
+	var targets aeroRefreshTargets
+	args := append([]any{providerID, providerID}, aeroInboundTargetArgs(providerID, now)...)
 	rows, err := s.db.QueryContext(ctx, `SELECT id,0 FROM (`+aeroTargetsSQL+`)
 UNION ALL SELECT '',1 WHERE EXISTS(`+aeroInboundTargetsSQL+`)`, args...)
 	if err != nil {
-		return err
+		return targets, err
 	}
 	defer rows.Close()
-	var ids []string
-	var hasInboundTargets bool
 	for rows.Next() {
 		var id string
 		var inbound bool
 		if err := rows.Scan(&id, &inbound); err != nil {
-			return err
+			return aeroRefreshTargets{}, err
 		}
 		if inbound {
-			hasInboundTargets = true
+			targets.inbound = true
 		} else {
-			ids = append(ids, id)
+			targets.trackedIDs = append(targets.trackedIDs, id)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if err := rows.Close(); err != nil || len(ids) == 0 && !hasInboundTargets {
+	return targets, rows.Err()
+}
+
+func (s *Store) refreshAeroFlight(ctx context.Context, source feeds.FlightSource, providerID string) error {
+	targets, err := s.findAeroRefreshTargets(ctx, providerID, time.Now())
+	if err != nil || len(targets.trackedIDs) == 0 && !targets.inbound {
 		return err
 	}
 	flight, err := source.Get(ctx, providerID)
@@ -136,15 +147,33 @@ UNION ALL SELECT '',1 WHERE EXISTS(`+aeroInboundTargetsSQL+`)`, args...)
 	if flight.AeroProviderID() != providerID {
 		return feeds.ErrUnavailable
 	}
-	for _, id := range ids {
+	return s.applyAeroObservation(ctx, flight, targets, aeroObservationScope{providerID: providerID}, time.Now())
+}
+
+// IngestAeroObservation applies a validated, full provider snapshot delivered
+// by a trusted bridge. Scope and observation order are checked again on write.
+func (s *Store) IngestAeroObservation(ctx context.Context, flight feeds.Flight, now time.Time) error {
+	providerID := flight.AeroProviderID()
+	if providerID == "" || providerID != flight.ID || flight.ObservedAt.IsZero() || flight.ObservedAt.After(now) {
+		return feeds.ErrInvalidQuery
+	}
+	targets, err := s.findAeroRefreshTargets(ctx, providerID, now)
+	if err != nil {
+		return err
+	}
+	return s.applyAeroObservation(ctx, flight, targets, aeroObservationScope{providerID: providerID, sameOrigin: true}, now)
+}
+
+func (s *Store) applyAeroObservation(ctx context.Context, flight feeds.Flight, targets aeroRefreshTargets, scope aeroObservationScope, now time.Time) error {
+	for _, id := range targets.trackedIDs {
 		direct := flight
 		direct.ID = id
-		if err := s.observe(ctx, direct, nil, nil, nil, false, providerID); err != nil {
+		if err := s.observe(ctx, direct, nil, nil, nil, false, scope); err != nil {
 			return err
 		}
 	}
-	if hasInboundTargets {
-		return s.applyAeroInbound(ctx, providerID, flight, time.Now())
+	if targets.inbound {
+		return s.applyAeroInbound(ctx, scope.providerID, flight, now)
 	}
 	return nil
 }

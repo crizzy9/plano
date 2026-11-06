@@ -56,6 +56,7 @@ AeroAPI search / polling / callbacks     FAA NAS / signed advisory bridges
 - The iOS app stores a random ownership binding with its native registration. Local and remote starts include that binding in immutable ActivityKit attributes. The coordinator dismisses activities from a retired registration before it can upload their update tokens. A delayed push can appear briefly before the app wakes to dismiss it. [ActivityKit attributes](https://developer.apple.com/documentation/activitykit/activityattributes)
 - iOS alert revocation persists an installation cutoff in SQLite. The app cancels token uploads before taking the cutoff and can retry a queued revocation against its original installation after a restart. Registration and cutoff checks share the device transaction.
 - The default active-flight polling interval is 60 seconds. FlightAware callbacks can wake a durable targeted refresh for tracked flights and their explicitly linked direct inbound legs. An inbound callback updates the onward rotation and forecast with eligible cached advisories and keeps the onward observation timestamp. Signed bridge advisories can enqueue airport alerts directly. Outbox commits wake the dispatcher immediately, while a 200 ms fallback recovers ready retries. Provider acceptance, device arrival, end-to-end alert latency and behavior on specific onboard networks require separate measurement.
+- A signed operator bridge can submit a complete, timestamped flight snapshot for the same verified AeroAPI flight identity. Plano applies it directly to the event and push transaction without waiting for a provider lookup. The original capture time orders it against poll and callback observations. [Signed flight snapshots](docs/AVIATION_CALLBACKS.md#signed-flight-snapshots)
 - Live Activity updates compare the current state with the last queued state for each device and flight. An unchanged observation renews the surface at most once a minute, even with faster polling. Reported flight progress keeps a long flight eligible when gate-out is unavailable.
 - The dispatcher reserves capacity for each configured push provider when both are enabled. It rechecks each lease just before transport and caps the request deadline at the earlier of lease or message expiry. An outbox index narrows the ordering lookup to the same device and flight.
 - An accepted flight observation retires queued state alerts when a gate or carousel changes, boarding ends, an estimate is withdrawn, or a departure prediction loses its evidence. The dispatcher checks the current flight phase again before submission, including for jobs created by older versions. Timeline entries and confirmed movement alerts stay available. Boarding pushes expire within 15 minutes of observation. Delivery of a push already accepted by APNs or FCM depends on the provider and device. [APNs delivery](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns) · [FCM delivery and collapse](https://firebase.google.com/docs/cloud-messaging/customize-messages/collapsible-message-types)
@@ -101,12 +102,18 @@ The HTTPS Compose overlay publishes only Caddy and requires enrollment in both d
 
 The online backup regression test restores an installation and its tracked flight from a snapshot taken with uncheckpointed data in the live WAL. In both standalone and rootless container restore drills, a separate demo instance served the tracked flight over HTTP using the original installation token. The container drill created the backup while running with a read-only root and restored it to a fresh volume. [SQLite VACUUM INTO](https://sqlite.org/lang_vacuum.html)
 
-The following benchmark times a signed aviation webhook from handler entry to
-the start of a fake push send. It uses one tracked flight and one registered
-device in a temporary SQLite database. Its percentiles describe local
-processing for this fixture. Live APNs, FCM, and device measurements are separate.
+A loopback live-mode smoke test used `plano forward-flight-observation` to
+update a tracked gate from a synthetic provider snapshot. Two submissions
+with the same capture time left one gate-change event in SQLite. [Signed flight snapshots](docs/AVIATION_CALLBACKS.md#signed-flight-snapshots)
+
+These benchmarks time a signed aviation webhook from handler entry to the
+start of a fake push send. Each uses one tracked flight and one registered
+device in a temporary SQLite database. In three serial runs of 100 updates on
+Linux amd64, the signed flight snapshot benchmark measured 1.67 to 1.73 ms at
+the 95th percentile. This measures local processing. Live APNs, FCM, and
+device measurements are separate.
 
 ```sh
 CGO_ENABLED=1 GOMAXPROCS=2 go test -p=1 ./internal/api -run '^$' \
-  -bench '^BenchmarkSignedAdvisoryDispatch$' -benchtime=100x -count=3
+  -bench '^BenchmarkSigned(FlightObservation|Advisory)Dispatch$' -benchtime=100x -count=3
 ```

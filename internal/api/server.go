@@ -20,20 +20,21 @@ import (
 )
 
 type Server struct {
-	Store              *core.Store
-	Source             feeds.FlightSource
-	PublicURL          string
-	EnrollmentCode     string
-	BookingKey         []byte
-	ReservationSource  feeds.ReservationSource
-	TripItSync         *TripItSync
-	Weather            *core.WeatherCache
-	ConnectionRules    *ConnectionRules
-	HistoricalRisk     *historicalrisk.Model
-	Demo               bool
-	Logger             *slog.Logger
-	AeroCallbackKey    []byte
-	AdvisoryIngressKey []byte
+	Store                *core.Store
+	Source               feeds.FlightSource
+	PublicURL            string
+	EnrollmentCode       string
+	BookingKey           []byte
+	ReservationSource    feeds.ReservationSource
+	TripItSync           *TripItSync
+	Weather              *core.WeatherCache
+	ConnectionRules      *ConnectionRules
+	HistoricalRisk       *historicalrisk.Model
+	Demo                 bool
+	Logger               *slog.Logger
+	AeroCallbackKey      []byte
+	AdvisoryIngressKey   []byte
+	FlightObservationKey []byte
 }
 
 type ownerHandler func(http.ResponseWriter, *http.Request, string) error
@@ -117,6 +118,9 @@ func (s Server) Handler() http.Handler {
 	}
 	if len(s.AdvisoryIngressKey) != 0 {
 		mux.HandleFunc("POST /v1/webhooks/advisory", s.advisoryCallback)
+	}
+	if !s.Demo && len(s.FlightObservationKey) != 0 {
+		mux.HandleFunc("POST /v1/webhooks/flight-observation", s.flightObservationCallback)
 	}
 	s.registerFriendRoutes(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

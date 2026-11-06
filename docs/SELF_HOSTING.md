@@ -149,6 +149,7 @@ published port if both projects run on the same host.
 | Provider | Configuration |
 | --- | --- |
 | FlightAware AeroAPI | Set `PLANO_AEROAPI_KEY_FILE` to a mounted key file, or supply `PLANO_AEROAPI_KEY` through the service environment. |
+| Signed flight snapshots | Set `PLANO_FLIGHT_OBSERVATION_KEY_FILE` to a mounted key file if your authorized bridge supplies complete flight snapshots. [Ingress and relay setup](AVIATION_CALLBACKS.md#signed-flight-snapshots) |
 | FAA NAS Status | Public aviation advisories are enabled in live mode by default. Set `PLANO_FAA_NAS=false` to disable this feed. |
 | NOAA Aviation Weather Center | Set `PLANO_METAR=true` in live mode to show recent adverse airport observations in the delay outlook. No account key is needed. |
 | FAA SWIM | Set `PLANO_SWIM_URL` to your advisory bridge. If it requires authentication, set either `PLANO_SWIM_TOKEN_FILE` or `PLANO_SWIM_TOKEN`. |
