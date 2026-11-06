@@ -583,7 +583,8 @@ WHERE flights.id=? AND (NOT ? OR EXISTS(SELECT 1 FROM tracked WHERE flight_id=fl
 			}
 			retainedDirect = trackedRefresh && len(inbound) != 0 && isExactAeroInbound(flight, inbound[0])
 		} else if trackedRefresh {
-			inbound, retainedDirect, err = keepNewerAeroInbound(flight, inbound, oldInbound)
+			recoverSuffix := scope.recoverRotationSuffix && samePolledRotationScope(prior, flight, previousProvider)
+			inbound, retainedDirect, err = keepNewerAeroInbound(flight, inbound, oldInbound, recoverSuffix)
 			if err != nil {
 				return err
 			}

@@ -12,6 +12,8 @@ import (
 	"github.com/crizzy9/plano/internal/feeds"
 )
 
+const pollRotationTimeout = 20 * time.Second
+
 // Refresher polls tracked flights in an active window with up to two concurrent
 // flight refreshes. A feed outage retains earlier observations.
 type Refresher struct {
@@ -134,14 +136,19 @@ func (r Refresher) refreshFlight(ctx context.Context, prior feeds.Flight, adviso
 		}
 	}
 	var inbound []feeds.Flight
+	var scope aeroObservationScope
 	if flightBeforeDeparture(flight) && (flight.InboundID != "" || flight.TailNumber != "") {
-		inbound, err = r.Flights.Rotation(ctx, flight)
+		rotationCtx, cancel := context.WithTimeout(ctx, pollRotationTimeout)
+		inbound, err = r.Flights.Rotation(rotationCtx, flight)
+		cancel()
 		if err != nil {
 			r.Logger.Warn("aircraft rotation refresh failed", "id", flight.ID, "error", err)
 			if len(inbound) == 0 {
 				inbound = nil
+			} else {
+				scope.recoverRotationSuffix = feeds.RotationSuffixRecoverable(err)
 			}
 		}
 	}
-	return r.Store.observe(ctx, flight, positions, inbound, advisories, observationPoll, aeroObservationScope{})
+	return r.Store.observe(ctx, flight, positions, inbound, advisories, observationPoll, scope)
 }

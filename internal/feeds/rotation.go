@@ -8,6 +8,19 @@ import (
 	"time"
 )
 
+const maxRotationLegs = 24
+
+type rotationLookupInterrupted struct{ error }
+
+func (e rotationLookupInterrupted) Unwrap() error { return e.error }
+
+// RotationSuffixRecoverable reports whether an explicit predecessor lookup
+// interrupted a verified prefix before other evidence could contradict it.
+func RotationSuffixRecoverable(err error) bool {
+	var interrupted rotationLookupInterrupted
+	return errors.As(err, &interrupted)
+}
+
 // Rotation returns previous legs nearest-first. Explicit inbound links take
 // precedence over a tail match, and every candidate must connect at the airport.
 func (a *AeroAPI) Rotation(ctx context.Context, flight Flight) ([]Flight, error) {
@@ -23,15 +36,19 @@ func (a *AeroAPI) Rotation(ctx context.Context, flight Flight) ([]Flight, error)
 	var tailRows []Flight
 	tailLoaded := false
 	var requestErr error
-	for len(result) < 24 {
+	for len(result) < maxRotationLegs {
+		explicitLookup := providerIdentifier.MatchString(leg.InboundID) && !seen[leg.InboundID]
 		if err := ctx.Err(); err != nil {
+			if requestErr == nil && len(result) != 0 && !tailLoaded && explicitLookup {
+				return result, rotationLookupInterrupted{err}
+			}
 			requestErr = err
 			break
 		}
 		var candidate Flight
 		var rejectedID string
 		var latestIntervening time.Time
-		if requestErr == nil && providerIdentifier.MatchString(leg.InboundID) && !seen[leg.InboundID] {
+		if requestErr == nil && explicitLookup {
 			inbound, err := a.getProviderFlight(ctx, leg.InboundID)
 			switch {
 			case err == nil && rotationTailMatches(inbound, tail) && rotationAirportMatches(inbound, leg) && rotationPrecedes(inbound, leg, cutoff, true):
@@ -45,8 +62,15 @@ func (a *AeroAPI) Rotation(ctx context.Context, flight Flight) ([]Flight, error)
 				}
 			case !errors.Is(err, ErrNotFound):
 				requestErr = err
+				// Registration rows can contain newer movements that would
+				// contradict a saved suffix. Let the normal scan decide when
+				// those rows are available.
+				if len(result) != 0 && !tailLoaded &&
+					(errors.Is(err, ErrUnavailable) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+					return result, rotationLookupInterrupted{err}
+				}
 			}
-			if err := ctx.Err(); err != nil {
+			if err := ctx.Err(); err != nil && candidate.ID == "" {
 				requestErr = err
 				break
 			}
@@ -74,6 +98,53 @@ func (a *AeroAPI) Rotation(ctx context.Context, flight Flight) ([]Flight, error)
 		return nil, requestErr
 	}
 	return result, requestErr
+}
+
+// RestoreRotationSuffix fills an interrupted explicit lookup from the saved
+// chain when the returned prefix still identifies the same movements. The
+// caller checks that the outbound scope and interruption allow recovery.
+func RestoreRotationSuffix(flight Flight, prefix, saved []Flight) []Flight {
+	departure := rotationDeparture(flight)
+	if departure == nil || len(prefix) == 0 || len(prefix) >= min(len(saved), maxRotationLegs) {
+		return prefix
+	}
+	cutoff := departure.Add(-rotationWindow)
+	seen := map[string]bool{flight.ID: true, flight.AeroProviderID(): true}
+	next, tail := flight, flight.TailNumber
+	for i, leg := range prefix {
+		cached := saved[i]
+		if leg.ID != cached.ID || !providerIdentifier.MatchString(leg.ID) || seen[leg.ID] ||
+			!rotationSameAirport(leg.Origin, leg.OriginICAO, cached.Origin, cached.OriginICAO) ||
+			!rotationSameAirport(leg.Destination, leg.DestinationICAO, cached.Destination, cached.DestinationICAO) ||
+			!rotationTailMatches(leg, tail) || !rotationTailMatches(cached, first(tail, leg.TailNumber)) ||
+			!rotationAirportMatches(leg, next) || !rotationPrecedes(leg, next, cutoff, leg.ID == next.InboundID) {
+			return prefix
+		}
+		seen[leg.ID] = true
+		next, tail = leg, first(tail, leg.TailNumber, cached.TailNumber)
+	}
+	if next.InboundID == "" || next.InboundID != saved[len(prefix)-1].InboundID {
+		return prefix
+	}
+	end := len(prefix)
+	for _, cached := range saved[len(prefix):min(len(saved), maxRotationLegs)] {
+		linked := cached.ID == next.InboundID
+		if !providerIdentifier.MatchString(cached.ID) || seen[cached.ID] || cached.ObservedAt.IsZero() ||
+			next.InboundID != "" && !linked || !linked && (tail == "" || cached.TailNumber == "") ||
+			!rotationTailMatches(cached, tail) || !rotationAirportMatches(cached, next) ||
+			!rotationPrecedes(cached, next, cutoff, linked) {
+			break
+		}
+		seen[cached.ID] = true
+		next, tail = cached, first(tail, cached.TailNumber)
+		end++
+	}
+	if end == len(prefix) {
+		return prefix
+	}
+	result := make([]Flight, 0, end)
+	result = append(result, prefix...)
+	return append(result, saved[len(prefix):end]...)
 }
 
 func (a *AeroAPI) rotationTailRows(ctx context.Context, tail string, departure, cutoff time.Time) ([]Flight, error) {
@@ -199,14 +270,18 @@ func rotationTailMatches(inbound Flight, tail string) bool {
 }
 
 func rotationAirportMatches(inbound, next Flight) bool {
-	destination := first(inbound.DestinationICAO, inbound.Destination)
-	if destination == "" {
+	return rotationSameAirport(inbound.Destination, inbound.DestinationICAO, next.Origin, next.OriginICAO)
+}
+
+func rotationSameAirport(a, aICAO, b, bICAO string) bool {
+	code := first(aICAO, a)
+	if code == "" {
 		return false
 	}
-	if destination == first(next.OriginICAO, next.Origin) {
+	if code == first(bICAO, b) {
 		return true
 	}
-	return (inbound.DestinationICAO == "" || next.OriginICAO == "") && inbound.Destination != "" && inbound.Destination == next.Origin
+	return (aICAO == "" || bICAO == "") && a != "" && a == b
 }
 
 func rotationPrecedes(inbound, next Flight, cutoff time.Time, linked bool) bool {

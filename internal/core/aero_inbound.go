@@ -142,18 +142,34 @@ func sameInboundHistory(before, after feeds.Flight) bool {
 		compatibleInboundTails(before.TailNumber, after.TailNumber)
 }
 
+func samePolledRotationScope(before, after feeds.Flight, previousProvider string) bool {
+	if previousProvider == "" {
+		previousProvider = before.AeroProviderID()
+	}
+	return previousProvider != "" && previousProvider == after.AeroProviderID() &&
+		before.InboundID == after.InboundID && strings.EqualFold(before.TailNumber, after.TailNumber) &&
+		!flightAlertAirportChanged(before.Origin, before.OriginICAO, after.Origin, after.OriginICAO) &&
+		!flightAlertAirportChanged(before.Destination, before.DestinationICAO, after.Destination, after.DestinationICAO)
+}
+
 // keepNewerAeroInbound protects a callback revision that committed while a poll
 // was fetching the rotation. Fresh evidence of a different leg still takes
 // effect through the ordinary poll path.
-func keepNewerAeroInbound(flight feeds.Flight, rotation []feeds.Flight, previousRaw []byte) ([]feeds.Flight, bool, error) {
-	if flight.InboundID == "" {
+func keepNewerAeroInbound(flight feeds.Flight, rotation []feeds.Flight, previousRaw []byte, recoverSuffix bool) ([]feeds.Flight, bool, error) {
+	if flight.InboundID == "" && !recoverSuffix {
 		return rotation, false, nil
 	}
 	var previous []feeds.Flight
 	if err := json.Unmarshal(previousRaw, &previous); err != nil {
 		return nil, false, err
 	}
-	if len(previous) == 0 || !isExactAeroInbound(flight, previous[0]) {
+	savedDirect := len(previous) != 0 && isExactAeroInbound(flight, previous[0])
+	// The interrupted lookup belongs to the poll's prefix. A newer direct
+	// callback can change the chronology after that lookup started.
+	if recoverSuffix && (!savedDirect || len(rotation) != 0 && rotation[0].ObservedAt.After(previous[0].ObservedAt)) {
+		rotation = feeds.RestoreRotationSuffix(flight, rotation, previous)
+	}
+	if !savedDirect {
 		return rotation, false, nil
 	}
 	if len(rotation) == 0 || !isExactAeroInbound(flight, rotation[0]) {
