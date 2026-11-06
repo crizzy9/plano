@@ -473,6 +473,13 @@ The departure window controls new remote live progress start requests. Existing
 surfaces keep receiving updates if a delay moves the flight outside that
 window or the departure time becomes unknown.
 
+Before submitting a queued start, Plano checks the latest tracked flight and
+drops ineligible requests. An eligible, unsent iOS start picks up the latest
+flight state and seat. Android keeps the original start observation so the
+device can reject it after a local stop. If the provider may already have
+received an earlier attempt, Plano keeps its start record to avoid creating
+a duplicate activity.
+
 iOS state alerts for the same installation, flight, and category share an APNs
 collapse ID. A newer gate or carousel revision waits for any in-flight request
 in that category. Other alerts can send independently. APNs controls offline

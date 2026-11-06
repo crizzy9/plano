@@ -411,14 +411,18 @@ func importantLiveChange(before, after *push.LiveState) bool {
 	return false
 }
 
+func inLiveStartWindow(flight feeds.Flight, now time.Time) bool {
+	if !flightBeforeDeparture(flight) {
+		return true
+	}
+	departure := effectiveDeparture(flight)
+	return departure != nil && !departure.After(now.Add(time.Hour)) && departure.After(now.Add(-2*time.Hour))
+}
+
 func enqueueLive(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight, remapped bool) error {
 	now := flight.ObservedAt
 	end := finished(flight)
-	canStart := true
-	if flightBeforeDeparture(flight) {
-		departure := effectiveDeparture(flight)
-		canStart = departure != nil && !departure.After(now.Add(time.Hour)) && departure.After(now.Add(-2*time.Hour))
-	}
+	canStart := inLiveStartWindow(flight, now)
 	if !canStart {
 		// Avoid scanning the device audience for untracked schedule results.
 		var tracked bool
@@ -1011,17 +1015,14 @@ CASE WHEN ? THEN (SELECT snapshot FROM flights WHERE id=o.flight_id) END`+leased
 	attempt, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	if job.message.Kind == push.LiveStart {
-		// Serialize authorization with retirement so a remap can replace a
-		// leased start if it never reached the transport boundary.
-		result, err := s.db.ExecContext(attempt, `INSERT INTO outbox_live_start_leases
-SELECT o.id,1`+leasedRow+` ON CONFLICT(outbox_id) DO UPDATE SET may_have_sent=1`, job.id, job.deviceID, job.lease)
+		authorized, err := s.authorizeLiveStart(attempt, &job, start)
 		if err != nil {
 			if attempt.Err() == nil {
 				logger.Error("could not authorize live start", "job", job.id, "error", err)
 			}
 			return
 		}
-		if authorized, err := result.RowsAffected(); err != nil || authorized != 1 {
+		if !authorized {
 			return
 		}
 	}
