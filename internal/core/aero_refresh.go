@@ -38,14 +38,18 @@ func aeroInboundTargetArgs(providerID string, now time.Time) []any {
 	return []any{providerID, now.Add(-6 * time.Hour).Format(time.RFC3339Nano), now.Add(25 * time.Hour).Format(time.RFC3339Nano)}
 }
 
+const aeroRefreshRetryLimit = 6
+
 // QueueAeroRefresh persists an authenticated hint for a tracked flight or its
-// direct inbound. A hint received while a fetch is leased advances its generation.
+// direct inbound. New hints advance the generation without shortening any
+// scheduled retry delay.
 func (s *Store) QueueAeroRefresh(ctx context.Context, providerID string, now time.Time) error {
 	args := append([]any{providerID, now.UnixNano(), providerID, providerID}, aeroInboundTargetArgs(providerID, now)...)
 	result, err := s.db.ExecContext(ctx, `INSERT INTO aero_refresh_jobs(provider_id,generation,due_ns)
 SELECT ?,1,? WHERE EXISTS(`+aeroTargetsSQL+`) OR EXISTS(`+aeroInboundTargetsSQL+`)
 ON CONFLICT(provider_id) DO UPDATE SET generation=aero_refresh_jobs.generation+1,
-due_ns=CASE WHEN aero_refresh_jobs.lease_ns=0 THEN MIN(aero_refresh_jobs.due_ns,excluded.due_ns) ELSE aero_refresh_jobs.due_ns END`, args...)
+due_ns=CASE WHEN aero_refresh_jobs.lease_ns=0 AND aero_refresh_jobs.failures=0
+THEN MIN(aero_refresh_jobs.due_ns,excluded.due_ns) ELSE aero_refresh_jobs.due_ns END`, args...)
 	if err != nil {
 		return err
 	}
@@ -86,19 +90,20 @@ func (s *Store) completeAeroRefresh(ctx context.Context, job *aeroRefreshJob, no
 		return err
 	}
 	defer tx.Rollback()
-	if !failed || job.failures >= 6 {
+	if !failed || job.failures >= aeroRefreshRetryLimit {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM aero_refresh_jobs WHERE provider_id=? AND lease_ns=? AND generation=?`, job.providerID, job.lease, job.generation); err != nil {
 			return err
 		}
 	}
 	due, failures := now, 0
 	if failed {
-		due, failures = now.Add(time.Second<<min(job.failures, 6)), job.failures+1
+		// At the limit, only a newer hint survives the deletion above. Give
+		// it an attempt at the capped delay without replenishing the retries.
+		due = now.Add(time.Second << min(job.failures, aeroRefreshRetryLimit))
+		failures = min(job.failures+1, aeroRefreshRetryLimit)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE aero_refresh_jobs SET lease_ns=0,
-  due_ns=CASE WHEN generation=? THEN ? ELSE ? END,
-  failures=CASE WHEN generation=? THEN ? ELSE 0 END
-WHERE provider_id=? AND lease_ns=?`, job.generation, due.UnixNano(), now.UnixNano(), job.generation, failures, job.providerID, job.lease); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE aero_refresh_jobs SET lease_ns=0,due_ns=?,failures=?
+WHERE provider_id=? AND lease_ns=?`, due.UnixNano(), failures, job.providerID, job.lease); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -9,6 +9,8 @@ Plano's adapters record provenance on flight snapshots, observed positions, and 
 Rotations return the immediate inbound first, then the earlier legs in the
 25-hour window. An explicit provider link takes precedence when aircraft,
 airport, and timing evidence agree. Tail-only matching uses movement order.
+A later observed diversion can rule out an older match even when the
+diversion record still names the planned destination.
 The refresh worker retains cached history on a failed lookup with no verified
 legs. A verified partial result replaces the older chain, and an aircraft
 assignment change clears any history that could belong to the previous plane.

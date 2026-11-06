@@ -39,6 +39,10 @@ func TestRotationTailFallbackUsesLatestMovement(t *testing.T) {
 	const nearer = `{"fa_flight_id":"NEARER","registration":"N1AA","origin":{"code_icao":"KDEN"},"destination":{"code_icao":"KSFO"},"scheduled_out":"2026-11-05T18:00:00Z","scheduled_in":"2026-11-05T21:00:00Z"}`
 	const intervening = `{"fa_flight_id":"INTERVENING","registration":"N1AA","destination":{"code_icao":"KOAK"},"scheduled_out":"2026-11-05T17:00:00Z","scheduled_in":"2026-11-05T21:30:00Z","actual_out":"2026-11-05T19:00:00Z","actual_in":"2026-11-05T21:30:00Z"}`
 	const lateIntervening = `{"fa_flight_id":"LATE","registration":"N1AA","destination":{"code_icao":"KOAK"},"scheduled_out":"2026-11-05T17:00:00Z","scheduled_in":"2026-11-05T23:30:00Z","actual_off":"2026-11-05T19:00:00Z"}`
+	const diversion = `{"fa_flight_id":"DIVERSION","registration":"N1AA","diverted":true,"destination":{"code_icao":"KSFO"},"actual_off":"2026-11-05T19:00:00Z"}`
+	const unknownDiversion = `{"fa_flight_id":"UNKNOWN-DIVERSION","registration":"N1AA","status":"Diverted","actual_out":"2026-11-05T19:00:00Z"}`
+	const unobservedDiversion = `{"fa_flight_id":"DIVERSION","diverted":true,"destination":{"code_icao":"KOAK"}}`
+	const sameIDDiversion = `{"fa_flight_id":"DIVERSION","registration":"N1AA","destination":{"code_icao":"KSFO"},"scheduled_out":"2026-11-05T19:00:00Z","scheduled_in":"2026-11-05T21:30:00Z","actual_out":"2026-11-05T19:00:00Z"}`
 	for _, test := range []struct {
 		name string
 		rows []string
@@ -47,6 +51,10 @@ func TestRotationTailFallbackUsesLatestMovement(t *testing.T) {
 		{"older late ETA", []string{nearer, older}, []string{"NEARER"}},
 		{"intervening move to a different airport", []string{older, intervening, nearer}, nil},
 		{"intervening move arriving after the outbound schedule", []string{nearer, older, lateIntervening}, nil},
+		{"diverted movement still names the original airport", []string{nearer, diversion}, nil},
+		{"diverted movement with unknown destination", []string{nearer, unknownDiversion}, nil},
+		{"duplicate diversion row provides movement but cannot be an inbound", []string{nearer, sameIDDiversion, unobservedDiversion}, nil},
+		{"diversion without observed movement", []string{nearer, unobservedDiversion}, []string{"NEARER"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			api, requests := rotationFixture(t, map[string]rotationReply{
@@ -76,6 +84,7 @@ func TestRotationRejectsInboundLandingAfterActualOutbound(t *testing.T) {
 func TestRotationRejectedExplicitMoveStillBlocksOlderTailMatch(t *testing.T) {
 	const explicit = `{"fa_flight_id":"OTHER","registration":"N1AA","destination":{"code_icao":"KOAK"},"scheduled_out":"2026-11-05T17:00:00Z","scheduled_in":"2026-11-05T23:30:00Z"}`
 	observed := strings.TrimSuffix(explicit, "}") + `,"actual_off":"2026-11-05T19:00:00Z"}`
+	const diverted = `{"fa_flight_id":"OTHER","registration":"N1AA","diverted":true,"destination":{"code_icao":"KSFO"},"actual_off":"2026-11-05T19:00:00Z"}`
 	const older = `{"fa_flight_id":"OLDER","registration":"N1AA","destination":{"code_icao":"KSFO"},"scheduled_out":"2026-11-05T18:00:00Z","scheduled_in":"2026-11-05T21:00:00Z"}`
 	for _, test := range []struct {
 		name string
@@ -84,6 +93,7 @@ func TestRotationRejectedExplicitMoveStillBlocksOlderTailMatch(t *testing.T) {
 	}{
 		{"movement found in explicit lookup", observed, older},
 		{"movement found in registration history", explicit, older + "," + observed},
+		{"explicit diversion still names the original airport", diverted, older},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			api, requests := rotationFixture(t, map[string]rotationReply{

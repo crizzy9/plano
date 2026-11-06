@@ -97,29 +97,40 @@ func (a *AeroAPI) rotationTailRows(ctx context.Context, tail string, departure, 
 	if err != nil {
 		return nil, err
 	}
-	// A registration lookup can include several rows for one provider ID.
-	// A blocked or disrupted row disqualifies that ID across the response.
-	disqualified := make(map[string]bool)
+	// A diversion can share its provider ID with an alternate-destination
+	// row. Keep both as movement evidence, but exclude either from the chain.
+	excluded := make(map[string]bool)
+	diverted := make(map[string]bool)
 	flights := make([]Flight, 0, len(rows))
 	for _, row := range rows {
-		if row.Blocked || row.Cancelled || row.Diverted {
-			disqualified[row.ID] = true
+		if row.Blocked || row.Cancelled {
+			excluded[row.ID] = true
 			continue
+		}
+		if row.Diverted {
+			diverted[row.ID] = true
 		}
 		if providerIdentifier.MatchString(row.ID) && strings.EqualFold(row.Registration, tail) {
 			flight := a.normalizeFlight(row, now)
-			if flight.Status == "cancelled" || flight.Status == "diverted" {
-				disqualified[row.ID] = true
+			switch flight.Status {
+			case "cancelled":
+				excluded[row.ID] = true
 				continue
+			case "diverted":
+				diverted[row.ID] = true
 			}
 			flights = append(flights, flight)
 		}
 	}
 	kept := flights[:0]
 	for _, flight := range flights {
-		if !disqualified[flight.ID] {
-			kept = append(kept, flight)
+		if excluded[flight.ID] {
+			continue
 		}
+		if diverted[flight.ID] {
+			flight.Status = "diverted"
+		}
+		kept = append(kept, flight)
 	}
 	return kept, nil
 }
@@ -156,8 +167,12 @@ func rotationTailCandidate(rows []Flight, next Flight, cutoff time.Time, seen ma
 
 func rotationInterveningDeparture(inbound, next Flight, cutoff time.Time) *time.Time {
 	departed := firstTime(inbound.ActualDeparture, inbound.ActualTakeoff)
-	if departed == nil || departed.Before(cutoff) || departed.After(inbound.ObservedAt) ||
-		first(inbound.DestinationICAO, inbound.Destination) == "" || rotationAirportMatches(inbound, next) {
+	if departed == nil || departed.Before(cutoff) || departed.After(inbound.ObservedAt) {
+		return nil
+	}
+	// A diversion record may still name its originally planned destination.
+	if inbound.Status != "diverted" &&
+		(first(inbound.DestinationICAO, inbound.Destination) == "" || rotationAirportMatches(inbound, next)) {
 		return nil
 	}
 	if nextDeparture := firstTime(next.ActualDeparture, next.ActualTakeoff); nextDeparture != nil && !departed.Before(*nextDeparture) {

@@ -76,6 +76,114 @@ func TestAeroHintPersistsAndRequeuesNewGeneration(t *testing.T) {
 	}
 }
 
+func TestAeroHintsPreserveRefreshRetryBackoff(t *testing.T) {
+	ctx := t.Context()
+	s, id, now := queuedAeroRefreshFixture(t)
+	first, err := s.claimAeroRefresh(ctx, now)
+	if err != nil || first == nil {
+		t.Fatalf("initial claim = %+v, %v", first, err)
+	}
+	failedAt := now.Add(time.Second)
+	if err := s.QueueAeroRefresh(ctx, id, failedAt.Add(-time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.completeAeroRefresh(ctx, first, failedAt, true); err != nil {
+		t.Fatal(err)
+	}
+	firstRetry := failedAt.Add(time.Second)
+	if early, err := s.claimAeroRefresh(ctx, firstRetry.Add(-time.Nanosecond)); err != nil || early != nil {
+		t.Fatalf("hint during failed lease shortened backoff: %+v, %v", early, err)
+	}
+	retry, err := s.claimAeroRefresh(ctx, firstRetry)
+	if err != nil || retry == nil || retry.generation != first.generation+1 || retry.failures != 1 {
+		t.Fatalf("first retry = %+v, %v", retry, err)
+	}
+	if err := s.completeAeroRefresh(ctx, retry, firstRetry, true); err != nil {
+		t.Fatal(err)
+	}
+	secondRetry := firstRetry.Add(2 * time.Second)
+	if err := s.QueueAeroRefresh(ctx, id, secondRetry.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if early, err := s.claimAeroRefresh(ctx, secondRetry.Add(-time.Nanosecond)); err != nil || early != nil {
+		t.Fatalf("hint during retry wait shortened backoff: %+v, %v", early, err)
+	}
+	success, err := s.claimAeroRefresh(ctx, secondRetry)
+	if err != nil || success == nil || success.generation != first.generation+2 || success.failures != 2 {
+		t.Fatalf("second retry = %+v, %v", success, err)
+	}
+	finished := secondRetry.Add(time.Second)
+	if err := s.QueueAeroRefresh(ctx, id, finished.Add(-time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.completeAeroRefresh(ctx, success, finished, false); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := s.claimAeroRefresh(ctx, finished)
+	if err != nil || latest == nil || latest.generation != first.generation+3 || latest.failures != 0 {
+		t.Fatalf("immediate refresh after success = %+v, %v", latest, err)
+	}
+}
+
+func TestAeroRefreshRetryLimitKeepsOnlyNewerHints(t *testing.T) {
+	ctx := t.Context()
+	s, id, due := queuedAeroRefreshFixture(t)
+	for failures := range 7 {
+		job, err := s.claimAeroRefresh(ctx, due)
+		if err != nil || job == nil || job.failures != failures || job.generation != 1 {
+			t.Fatalf("claim after %d failures = %+v, %v", failures, job, err)
+		}
+		if failures == 6 {
+			if err := s.QueueAeroRefresh(ctx, id, due); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.completeAeroRefresh(ctx, job, due, true); err != nil {
+			t.Fatal(err)
+		}
+		due = due.Add(time.Second << failures)
+		if early, err := s.claimAeroRefresh(ctx, due.Add(-time.Nanosecond)); err != nil || early != nil {
+			t.Fatalf("early claim after %d failures = %+v, %v", failures+1, early, err)
+		}
+	}
+	if err := s.QueueAeroRefresh(ctx, id, due.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if early, err := s.claimAeroRefresh(ctx, due.Add(-time.Nanosecond)); err != nil || early != nil {
+		t.Fatalf("hint shortened capped delay: %+v, %v", early, err)
+	}
+	latest, err := s.claimAeroRefresh(ctx, due)
+	if err != nil || latest == nil || latest.failures != 6 || latest.generation != 3 {
+		t.Fatalf("claim for newer hints after retry limit = %+v, %v", latest, err)
+	}
+	if err := s.completeAeroRefresh(ctx, latest, due, true); err != nil {
+		t.Fatal(err)
+	}
+	if job, err := s.claimAeroRefresh(ctx, due.Add(time.Hour)); err != nil || job != nil {
+		t.Fatalf("exhausted hint was retried without a new hint: %+v, %v", job, err)
+	}
+}
+
+func queuedAeroRefreshFixture(t *testing.T) (*Store, string, time.Time) {
+	t.Helper()
+	ctx := t.Context()
+	s, err := Open(filepath.Join(t.TempDir(), "aero-retry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	now := time.Now().UTC()
+	flight := feeds.Flight{ID: "AAL33-retry", Source: "flightaware_aeroapi", ObservedAt: now, Status: "scheduled"}
+	if err := s.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	trackAeroCallbackFixture(t, s, flight.ID)
+	if err := s.QueueAeroRefresh(ctx, flight.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	return s, flight.ID, now
+}
+
 func TestAeroInboundHintRequiresEligibleDirectLink(t *testing.T) {
 	const providerID = "AAL32-1"
 	now := time.Now().UTC()
