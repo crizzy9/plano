@@ -69,6 +69,10 @@ func (f Features) operationalBaseline() float64 {
 	return max(f.physicalFloor(), f.AirlineDelayMinutes, f.AirportDelayMinutes)
 }
 
+func (f Features) hasSignal() bool {
+	return f.operationalBaseline() > 0 || f.Weather || f.AirTrafficControl
+}
+
 // ElapsedDepartureDelay is the delay already observed on a flight awaiting
 // gate-out at statusAt. An absent predeparture observation supplies no floor.
 func ElapsedDepartureDelay(scheduledDeparture, statusAt time.Time) float64 {
@@ -178,8 +182,7 @@ type Estimate struct {
 // Estimate declines extrapolation beyond the feature ranges seen at training.
 // It also declines flights with no positive observed operational signal.
 func (m *Model) Estimate(features Features, observedAt, scheduledDeparture time.Time) (Estimate, bool) {
-	if m == nil || m.id == "" || !observedAt.After(m.artifact.TrainingUntil) || scheduledDeparture.IsZero() ||
-		(features.operationalBaseline() == 0 && !features.Weather && !features.AirTrafficControl) {
+	if m == nil || m.id == "" || !observedAt.After(m.artifact.TrainingUntil) || scheduledDeparture.IsZero() || !features.hasSignal() {
 		return Estimate{}, false
 	}
 	values, valid := features.values(scheduledDeparture.Sub(observedAt).Minutes())

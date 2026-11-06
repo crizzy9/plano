@@ -67,6 +67,8 @@ type Backtest struct {
 	PurgedRows        int          `json:"purgedRows"`
 	LearnedRows       int          `json:"learnedRows"`
 	LearnedCoverage   float64      `json:"learnedCoverage"`
+	EligibleRows      int          `json:"eligibleRows"`
+	EligibleCoverage  float64      `json:"eligibleCoverage"`
 	Operational       ErrorMetrics `json:"operationalBaseline"`
 	Published         ErrorMetrics `json:"publishedEstimateBaseline"`
 	LearnedOrFallback ErrorMetrics `json:"learnedOrFallback"`
@@ -289,6 +291,9 @@ func backtest(model *Model, holdout []Example, boundary time.Time, purged int) B
 		elapsed := ElapsedDepartureDelay(row.ScheduledDeparture, row.ObservedAt)
 		operational := max(row.Features.operationalBaseline(), elapsed)
 		prediction := operational
+		if row.Features.hasSignal() {
+			result.EligibleRows++
+		}
 		if estimate, ok := model.Estimate(row.Features, row.ObservedAt, row.ScheduledDeparture); ok {
 			prediction = max(estimate.DelayMinutes, elapsed)
 			result.LearnedRows++
@@ -298,6 +303,9 @@ func backtest(model *Model, holdout []Example, boundary time.Time, purged int) B
 		result.LearnedOrFallback.record(prediction - point.label)
 	}
 	result.LearnedCoverage = float64(result.LearnedRows) / float64(result.HoldoutRows)
+	if result.EligibleRows > 0 {
+		result.EligibleCoverage = float64(result.LearnedRows) / float64(result.EligibleRows)
+	}
 	result.Operational.average(result.HoldoutRows)
 	result.Published.average(result.HoldoutRows)
 	result.LearnedOrFallback.average(result.HoldoutRows)

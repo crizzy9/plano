@@ -32,7 +32,9 @@ send them directly to `POST /v1/webhooks/flight-observation`. This path applies
 each snapshot to matching tracked flights or their verified direct inbound
 legs without making another AeroAPI request. It uses the same provider flight
 ID, event transitions, and durable push outbox as the ordinary AeroAPI callback.
-AeroAPI supplies schedule search and periodic refresh supplies radar tracks.
+An accepted outbound snapshot recalculates the departure forecast using the
+current linked rotation and applicable cached advisories. AeroAPI supplies
+schedule search and periodic refresh supplies radar tracks.
 
 Mount a separate random signing key of at least 32 bytes and set
 `PLANO_FLIGHT_OBSERVATION_KEY_FILE` to its container path. `plano check-config`

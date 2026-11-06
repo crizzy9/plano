@@ -94,9 +94,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := writeMetrics(stderr, report); err != nil {
 		return err
 	}
-	if !*allowRegression && (report.LearnedCoverage < 0.5 || report.LearnedOrFallback.MeanAbsoluteMinutes >= report.Operational.MeanAbsoluteMinutes ||
+	if !*allowRegression && (report.EligibleRows < 8 || report.EligibleCoverage < 0.5 || report.LearnedOrFallback.MeanAbsoluteMinutes >= report.Operational.MeanAbsoluteMinutes ||
 		report.LearnedOrFallback.MeanAbsoluteMinutes >= report.Published.MeanAbsoluteMinutes) {
-		return errors.New("backtest failed the deployment gate: need at least 50% learned coverage and lower holdout MAE than both baselines")
+		return errors.New("backtest failed the deployment gate. Need at least eight signal-bearing holdout rows, 50% learned coverage among them, and lower all-flight holdout MAE than both baselines")
 	}
 	return writeArtifact(*outputPath, stdout, model.Save)
 }

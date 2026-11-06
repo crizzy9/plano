@@ -15,16 +15,24 @@ import (
 
 func exampleJSONL(t *testing.T, improves bool) []byte {
 	t.Helper()
+	return exampleCohortJSONL(t, improves, 40, 40)
+}
+
+func exampleCohortJSONL(t *testing.T, improves bool, totalRows, signalRows int) []byte {
+	t.Helper()
 	var input bytes.Buffer
 	encoder := json.NewEncoder(&input)
 	start := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	for i := range 40 {
+	for i := range totalRows {
 		observed := start.Add(time.Duration(i) * 3 * time.Hour)
 		departure := observed.Add(time.Hour)
 		published := 10 + (i%7)*5
 		delay := published
 		if improves {
 			delay = 12 + 2*published
+		}
+		if i >= signalRows {
+			published, delay = 0, 0
 		}
 		row := predict.Example{
 			FlightID: fmt.Sprintf("synthetic-%d", i), ObservedAt: observed, ScheduledDeparture: departure,
@@ -79,6 +87,35 @@ func TestTrainCLIFailsQualityGateWithoutWritingAnArtifact(t *testing.T) {
 	}
 	if _, err := predict.Load(&stdout); err != nil {
 		t.Fatalf("experimental artifact: %v", err)
+	}
+}
+
+func TestTrainCLIGatesCoverageOnSignalBearingHoldoutRows(t *testing.T) {
+	const trainingRows, holdoutRows = 80, 20
+	for _, eligibleRows := range []int{8, 7} {
+		t.Run(fmt.Sprintf("%d eligible", eligibleRows), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			input := exampleCohortJSONL(t, true, trainingRows+holdoutRows, trainingRows+eligibleRows)
+			err := run([]string{"-output", "-"}, bytes.NewReader(input), &stdout, &stderr)
+			if eligibleRows == 8 {
+				if err != nil {
+					t.Fatalf("eligible cohort failed to deploy: %v\n%s", err, &stderr)
+				}
+				if _, err := predict.Load(&stdout); err != nil {
+					t.Fatalf("deployment artifact: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "deployment gate") || stdout.Len() != 0 {
+				t.Fatalf("low-support gate returned stdout %q and error %v", &stdout, err)
+			}
+			var report predict.Backtest
+			if err := json.Unmarshal(stderr.Bytes(), &report); err != nil || report.HoldoutRows != holdoutRows ||
+				report.EligibleRows != eligibleRows || report.EligibleCoverage != 1 ||
+				report.LearnedCoverage != float64(eligibleRows)/holdoutRows ||
+				report.LearnedOrFallback.MeanAbsoluteMinutes >= report.Operational.MeanAbsoluteMinutes ||
+				report.LearnedOrFallback.MeanAbsoluteMinutes >= report.Published.MeanAbsoluteMinutes {
+				t.Fatalf("metrics = %+v, %v", report, err)
+			}
+		})
 	}
 }
 

@@ -24,7 +24,10 @@ func TestDelaySampleHorizonsKeepIndependentForecastsAndCorrectBothLabels(t *test
 			}
 			defer store.Close()
 			scheduled := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Minute)
-			flight := feeds.Flight{ID: "UAL123-early-test", Number: "UA123", Source: source,
+			const id = "UAL123-early-test"
+			earlyLead := delaySampleTarget(id, earlyDelaySampleTables)
+			standardLead := delaySampleTarget(id, standardDelaySampleTables)
+			flight := feeds.Flight{ID: id, Number: "UA123", Source: source,
 				Status: "scheduled", ScheduledDeparture: &scheduled, Origin: "EWR", Destination: "SFO"}
 			observe := func(lead, estimate time.Duration) {
 				t.Helper()
@@ -35,10 +38,10 @@ func TestDelaySampleHorizonsKeepIndependentForecastsAndCorrectBothLabels(t *test
 				}
 			}
 			observe(25*time.Hour+time.Second, 5*time.Minute)
-			observe(25*time.Hour, 10*time.Minute)
-			observe(6*time.Hour, 15*time.Minute)
-			observe(2*time.Hour, 25*time.Minute)
-			observe(time.Hour, 30*time.Minute)
+			observe(earlyLead, 10*time.Minute)
+			observe(earlyLead-time.Second, 15*time.Minute)
+			observe(standardLead, 25*time.Minute)
+			observe(standardLead-time.Second, 30*time.Minute)
 
 			label := func(at time.Time, outcome *time.Time, status string) {
 				t.Helper()
@@ -66,7 +69,7 @@ func TestDelaySampleHorizonsKeepIndependentForecastsAndCorrectBothLabels(t *test
 					t.Fatalf("exports returned %d early and %d standard samples", len(early), len(standard))
 				}
 				if early[0].FlightID != standard[0].FlightID || early[0].FlightID == flight.ID ||
-					!early[0].ObservedAt.Equal(scheduled.Add(-25*time.Hour)) || !standard[0].ObservedAt.Equal(scheduled.Add(-2*time.Hour)) ||
+					!early[0].ObservedAt.Equal(scheduled.Add(-earlyLead)) || !standard[0].ObservedAt.Equal(scheduled.Add(-standardLead)) ||
 					early[0].Features.AirlineDelayMinutes != 10 || standard[0].Features.AirlineDelayMinutes != 25 {
 					t.Fatalf("captured wrong forecast or identity: early=%+v standard=%+v", early, standard)
 				}

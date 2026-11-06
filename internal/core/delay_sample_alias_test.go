@@ -26,10 +26,12 @@ func TestResolvedScheduleAliasTracksIndependentDelaySamplesAfterRemap(t *testing
 	}
 	defer store.Close()
 	now := time.Now().UTC().Truncate(time.Second)
-	scheduled := now.Add(time.Hour)
+	provider := "UAL123-fixture-a"
+	firstAt := now.Add(-30 * time.Second)
+	scheduled := firstAt.Add(delaySampleTarget(provider, standardDelaySampleTables))
 	alias := "scheduled_" + base64.RawURLEncoding.EncodeToString([]byte("UA123|UAL123|KSFO|KEWR|"+scheduled.Format(time.RFC3339)))
 	placeholder := feeds.Flight{ID: alias, Number: "UA123", Source: "flightaware_schedule", Status: "scheduled",
-		Origin: "SFO", Destination: "EWR", ScheduledDeparture: &scheduled, ObservedAt: now.Add(-time.Minute)}
+		Origin: "SFO", Destination: "EWR", ScheduledDeparture: &scheduled, ObservedAt: firstAt.Add(-time.Minute)}
 	if err := store.observeTracked(ctx, placeholder, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +39,6 @@ func TestResolvedScheduleAliasTracksIndependentDelaySamplesAfterRemap(t *testing
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM delay_samples`).Scan(&unverified); err != nil || unverified != 0 {
 		t.Fatalf("unverified timetable captured %d examples, error %v", unverified, err)
 	}
-	provider := "UAL123-fixture-a"
 	estimate := scheduled.Add(10 * time.Minute)
 	const inboundID = "UAL456-fixture"
 	source := feeds.NewAeroAPI("fixture-only", &http.Client{Transport: aeroCallbackTransport(func(*http.Request) (*http.Response, error) {
@@ -54,10 +55,10 @@ func TestResolvedScheduleAliasTracksIndependentDelaySamplesAfterRemap(t *testing
 		flight.ObservedAt = at
 		return flight
 	}
-	first := get(now)
+	first := get(firstAt)
 	priorInbound := feeds.Flight{ID: inboundID, Number: "UA456", Status: "airborne", Destination: "SFO",
-		TailNumber: "N123AA", ObservedAt: now, ScheduledArrival: new(scheduled.Add(-20 * time.Minute)),
-		EstimatedArrival: new(scheduled.Add(-10 * time.Minute))}
+		TailNumber: "N123AA", ObservedAt: firstAt, ScheduledArrival: new(scheduled.Add(-2 * time.Minute)),
+		EstimatedArrival: new(scheduled.Add(-time.Minute))}
 	if err := store.observeTracked(ctx, first, nil, []feeds.Flight{priorInbound}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,7 @@ func TestResolvedScheduleAliasTracksIndependentDelaySamplesAfterRemap(t *testing
 		t.Fatalf("missing initial forecast and rotation: %+v, %v", before, err)
 	}
 	direct := first
-	direct.ID, direct.ObservedAt = first.AeroProviderID(), now.Add(5*time.Minute)
+	direct.ID, direct.ObservedAt = first.AeroProviderID(), firstAt.Add(5*time.Second)
 	direct.EstimatedDeparture = new(scheduled.Add(35 * time.Minute))
 	if err := store.observeTracked(ctx, direct, nil, nil, nil); err != nil {
 		t.Fatal(err)
@@ -73,14 +74,17 @@ func TestResolvedScheduleAliasTracksIndependentDelaySamplesAfterRemap(t *testing
 
 	provider = "UAL123-fixture-b"
 	estimate = scheduled.Add(25 * time.Minute)
-	second := get(now.Add(10 * time.Minute))
+	second := get(firstAt.Add(10 * time.Second))
 	if err := store.Observe(ctx, second, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if after, err := store.Details(ctx, alias); err != nil || after.Prediction != nil || len(after.Inbound) != 0 {
 		t.Fatalf("remapped flight inherited forecast or rotation: %+v, %v", after, err)
 	}
-	second.ObservedAt = now.Add(15 * time.Minute)
+	second.ObservedAt = second.ObservedAt.Add(time.Second)
+	if captureAt := scheduled.Add(-delaySampleTarget(provider, standardDelaySampleTables)); captureAt.After(second.ObservedAt) {
+		second.ObservedAt = captureAt
+	}
 	if err := store.observeTracked(ctx, second, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}

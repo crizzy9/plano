@@ -203,6 +203,7 @@ func TestEvaluateKeepsOperationalFallbackAndRejectsInvalidRows(t *testing.T) {
 	}
 	got, err := Evaluate(model, later)
 	if err != nil || got.ExcludedThroughTraining != 0 || got.HoldoutRows != 8 || got.LearnedCoverage != 0 ||
+		got.EligibleRows != 8 || got.EligibleCoverage != 0 ||
 		got.LearnedOrFallback != (ErrorMetrics{30, 30, 30}) || got.Operational != got.LearnedOrFallback ||
 		got.Published != (ErrorMetrics{75, 75, -75}) {
 		t.Fatalf("fallback evaluation = %+v, %v", got, err)

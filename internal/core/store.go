@@ -481,7 +481,8 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 		return err
 	}
 	defer tx.Rollback()
-	if scope.providerID != "" {
+	callbackRefresh := scope.providerID != ""
+	if callbackRefresh {
 		var tracked bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT id FROM (`+aeroTargetsSQL+`) WHERE id=?)`, scope.providerID, scope.providerID, flight.ID).Scan(&tracked); err != nil {
 			return err
@@ -574,24 +575,28 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 		}
 	}
 	var predictionValue *Prediction
-	if trackedRefresh || prior.ID == "" {
+	if trackedRefresh || prior.ID == "" || callbackRefresh && flightAlertRelevant("delay_prediction", flight) {
+		forecastAdvisories := advisories
 		var advisoryDeadlines map[forecastAdvisory]time.Time
-		if retainedDirect {
-			// A saved direct leg may have been refreshed during the network
-			// requests. Use advisory revisions current at the decision time.
+		if retainedDirect || callbackRefresh {
+			// Callbacks supply flight data only. A retained direct leg may also
+			// be newer than the poll's advisory snapshot.
 			if now := time.Now(); now.After(decisionAt) {
 				decisionAt = now
 			}
-			advisories, advisoryDeadlines, err = readCurrentFlightAdvisories(ctx, tx, flight, decisionAt)
+			forecastAdvisories, advisoryDeadlines, err = readCurrentFlightAdvisories(ctx, tx, flight, decisionAt)
 			if err != nil {
 				return err
 			}
+			if retainedDirect {
+				advisories = forecastAdvisories
+			}
 		}
-		predictionValue = PredictWithModel(s.delayModelFor(flight, decisionAt), flight, inbound, advisories, decisionAt)
+		predictionValue = PredictWithModel(s.delayModelFor(flight, decisionAt), flight, inbound, forecastAdvisories, decisionAt)
 		capCachedAdvisoryValidity(predictionValue, advisoryDeadlines)
 	}
 	sameSchedule := !providerChanged && prior.ScheduledDeparture != nil && flight.ScheduledDeparture != nil && prior.ScheduledDeparture.Equal(*flight.ScheduledDeparture)
-	if sameSchedule && (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flightBeforeDeparture(flight) {
+	if !callbackRefresh && sameSchedule && (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flightBeforeDeparture(flight) {
 		if err := json.Unmarshal(oldPrediction, &predictionValue); err != nil {
 			return err
 		}

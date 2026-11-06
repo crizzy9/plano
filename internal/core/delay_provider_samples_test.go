@@ -15,11 +15,11 @@ func TestProviderDelaySampleKeepsFirstForecastAndFencesOutcomes(t *testing.T) {
 	store := openProviderDelayFixture(t)
 	schedule := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
 	first := feeds.Flight{ID: "alias-one", Source: "flightaware_aeroapi", Status: "scheduled",
-		ObservedAt: schedule.Add(-time.Hour), ScheduledDeparture: &schedule,
+		ObservedAt: schedule.Add(-delaySampleTarget("provider-one", standardDelaySampleTables)), ScheduledDeparture: &schedule,
 		EstimatedDeparture: new(schedule.Add(15 * time.Minute))}
 	recordProviderDelayFixture(t, store, "provider-one", first, true)
 	second := first
-	second.ID, second.ObservedAt = "alias-two", first.ObservedAt.Add(10*time.Minute)
+	second.ID, second.ObservedAt = "alias-two", first.ObservedAt.Add(time.Minute)
 	second.EstimatedDeparture = new(schedule.Add(45 * time.Minute))
 	recordProviderDelayFixture(t, store, "provider-one", second, true)
 	forecast := readProviderDelayFixture(t, store, "provider-one")
@@ -50,7 +50,8 @@ func TestProviderDelaySampleKeepsFirstForecastAndFencesOutcomes(t *testing.T) {
 	// A remap creates an independent forecast and outcome even with the same
 	// local alias. It cannot change the original provider sample.
 	replacementSchedule := schedule.Add(2 * time.Hour)
-	first.Status, first.ScheduledDeparture, first.ObservedAt = "scheduled", &replacementSchedule, replacementSchedule.Add(-time.Hour)
+	first.Status, first.ScheduledDeparture = "scheduled", &replacementSchedule
+	first.ObservedAt = replacementSchedule.Add(-delaySampleTarget("provider-two", standardDelaySampleTables))
 	recordProviderDelayFixture(t, store, "provider-two", first, true)
 	first.ActualDeparture, first.ObservedAt = new(replacementSchedule.Add(time.Minute)), replacementSchedule.Add(2*time.Minute)
 	recordProviderDelayFixture(t, store, "provider-two", first, false)
@@ -101,9 +102,10 @@ VALUES(?,?,?,'{"airlineDelayMinutes":20}',?,?)`, flight.ID, firstObserved.UnixNa
 		t.Fatalf("legacy schedule alias was adopted: %d, %v", count, err)
 	}
 
-	newer.ID, newer.ObservedAt = "newer-boarding-peer", firstObserved
+	candidateObserved := schedule.Add(-delaySampleTarget("other", standardDelaySampleTables))
+	newer.ID, newer.ObservedAt = "newer-boarding-peer", candidateObserved
 	putProviderAliasFixture(t, store, "other", newer)
-	older.Status, older.ActualDeparture, older.ObservedAt, older.ScheduledDeparture = "scheduled", nil, firstObserved, &schedule
+	older.Status, older.ActualDeparture, older.ObservedAt, older.ScheduledDeparture = "scheduled", nil, candidateObserved, &schedule
 	recordProviderDelayFixture(t, store, "other", older, true)
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM delay_provider_samples WHERE provider_id='other'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("equal-time cancellation did not block a stale forecast capture: %d, %v", count, err)

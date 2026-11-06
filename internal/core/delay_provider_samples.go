@@ -68,7 +68,7 @@ WHERE s.flight_id=? AND substr(f.id,1,10)<>'scheduled_' AND (
 	if !capture || !outcome.observedAt.IsZero() {
 		return nil
 	}
-	tables, raw, err := delaySampleFeatures(flight, rotation, advisories, decision)
+	tables, raw, err := delaySampleFeatures(provider, flight, rotation, advisories, decision)
 	if err != nil || raw == nil {
 		return err
 	}

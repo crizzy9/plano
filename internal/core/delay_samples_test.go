@@ -22,7 +22,9 @@ func TestCaptureDelaySamplesWithObservedLabel(t *testing.T) {
 	defer store.Close()
 	depart := time.Date(2026, 11, 12, 19, 30, 0, 0, time.UTC)
 	eta := depart.Add(10 * time.Minute)
-	flight := feeds.Flight{ID: "test-provider-instance", Number: "XY123", Origin: "JFK", Destination: "LHR", Status: "scheduled", ObservedAt: depart.Add(-time.Hour), ScheduledDeparture: &depart, EstimatedDeparture: &eta}
+	const id = "test-provider-instance"
+	forecastAt := depart.Add(-delaySampleTarget(id, standardDelaySampleTables))
+	flight := feeds.Flight{ID: id, Number: "XY123", Origin: "JFK", Destination: "LHR", Status: "scheduled", ObservedAt: forecastAt, ScheduledDeparture: &depart, EstimatedDeparture: &eta}
 	ordinary := flight
 	ordinary.ObservedAt = ordinary.ObservedAt.Add(-time.Minute)
 	ordinary.EstimatedDeparture = nil
@@ -83,7 +85,7 @@ func TestCaptureDelaySamplesWithObservedLabel(t *testing.T) {
 	}
 	got := read()
 	if !got.DepartedAt.Equal(corrected) || got.LabelObservedAt == nil || !got.LabelObservedAt.Equal(flight.ObservedAt) ||
-		!got.ScheduledDeparture.Equal(depart) || !got.ObservedAt.Equal(depart.Add(-time.Hour)) || got.Features.AirlineDelayMinutes != 10 {
+		!got.ScheduledDeparture.Equal(depart) || !got.ObservedAt.Equal(forecastAt) || got.Features.AirlineDelayMinutes != 10 {
 		t.Fatalf("correction changed the original forecast or lost its revised outcome: %+v", got)
 	}
 }
@@ -97,8 +99,9 @@ func TestAeroCallbackCompletesAnExistingDelaySample(t *testing.T) {
 	}
 	defer store.Close()
 	departure := time.Date(2026, 11, 12, 19, 30, 0, 0, time.UTC)
-	flight := feeds.Flight{ID: "XY123-abc", Number: "XY123", Source: "flightaware_aeroapi", Status: "scheduled",
-		ObservedAt: departure.Add(-time.Hour), ScheduledDeparture: &departure}
+	const id = "XY123-abc"
+	flight := feeds.Flight{ID: id, Number: "XY123", Source: "flightaware_aeroapi", Status: "scheduled",
+		ObservedAt: departure.Add(-delaySampleTarget(id, standardDelaySampleTables)), ScheduledDeparture: &departure}
 	if err := store.observeTracked(ctx, flight, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +151,8 @@ FROM delay_provider_samples WHERE provider_id=?`, flight.ObservedAt.UnixNano(), 
 
 func TestDelaySampleClearsInvalidGateOutCorrections(t *testing.T) {
 	schedule := time.Date(2026, 11, 12, 19, 30, 0, 0, time.UTC)
-	forecastAt := schedule.Add(-time.Hour)
+	const id = "XY123-correction"
+	forecastAt := schedule.Add(-delaySampleTarget(id, standardDelaySampleTables))
 	for _, tc := range []struct {
 		name     string
 		actual   time.Time
@@ -166,7 +170,7 @@ func TestDelaySampleClearsInvalidGateOutCorrections(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer store.Close()
-			flight := feeds.Flight{ID: "XY123-correction", Number: "XY123", Status: "scheduled", ObservedAt: forecastAt, ScheduledDeparture: &schedule}
+			flight := feeds.Flight{ID: id, Number: "XY123", Status: "scheduled", ObservedAt: forecastAt, ScheduledDeparture: &schedule}
 			if err := store.observeTracked(ctx, flight, nil, nil, nil); err != nil {
 				t.Fatal(err)
 			}
@@ -214,7 +218,7 @@ func TestExportDelaySamplesSkipsLegacyContradictedLabels(t *testing.T) {
 	schedule := time.Date(2026, 11, 12, 19, 30, 0, 0, time.UTC)
 	actual := schedule.Add(10 * time.Minute)
 	for _, id := range []string{"cancelled-fixture", "corrected-fixture", "missing-fixture"} {
-		flight := feeds.Flight{ID: id, Status: "scheduled", ObservedAt: schedule.Add(-time.Hour), ScheduledDeparture: &schedule}
+		flight := feeds.Flight{ID: id, Status: "scheduled", ObservedAt: schedule.Add(-delaySampleTarget(id, standardDelaySampleTables)), ScheduledDeparture: &schedule}
 		if err := store.observeTracked(ctx, flight, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}

@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"time"
@@ -59,7 +61,7 @@ func recordDelaySample(ctx context.Context, tx *sql.Tx, flight feeds.Flight, rot
 	if !capture {
 		return nil
 	}
-	tables, raw, err := delaySampleFeatures(flight, rotation, advisories, decision)
+	tables, raw, err := delaySampleFeatures(flight.ID, flight, rotation, advisories, decision)
 	if err != nil || raw == nil {
 		return err
 	}
@@ -88,17 +90,34 @@ WHERE flight_id=@id AND (departed_ns IS NOT @departed OR label_observed_ns IS NU
 	return err
 }
 
-func delaySampleFeatures(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, decision time.Time) (delaySampleTables, []byte, error) {
+// Spread captures across the lead window without picking a forecast based on
+// its inputs or outcome. A resolved timetable alias shares its provider key.
+func delaySampleTarget(identity string, tables delaySampleTables) time.Duration {
+	digest := sha256.Sum256([]byte("delay-sample-lead\x00" + identity))
+	minimum, maximum := 5*time.Minute, earlyDelayBoundary
+	seed := binary.BigEndian.Uint64(digest[:8])
+	if tables == earlyDelaySampleTables {
+		minimum, maximum = earlyDelayBoundary+5*time.Minute, earlyDelayMaxLead
+		seed = binary.BigEndian.Uint64(digest[8:16])
+	}
+	minutes := uint64((maximum-minimum)/time.Minute) + 1
+	return minimum + time.Duration(seed%minutes)*time.Minute
+}
+
+func delaySampleFeatures(identity string, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, decision time.Time) (delaySampleTables, []byte, error) {
 	if flight.ScheduledDeparture == nil {
 		return delaySampleTables{}, nil, nil
 	}
 	lead := flight.ScheduledDeparture.Sub(decision)
-	if lead < 30*time.Minute || lead > earlyDelayMaxLead {
+	if lead < 0 || lead > earlyDelayMaxLead {
 		return delaySampleTables{}, nil, nil
 	}
 	tables := standardDelaySampleTables
 	if lead > earlyDelayBoundary {
 		tables = earlyDelaySampleTables
+	}
+	if lead > delaySampleTarget(identity, tables) {
+		return delaySampleTables{}, nil, nil
 	}
 	features, ok := ExtractDelayFeatures(flight, rotation, advisories, decision)
 	if !ok || max(features.AirlineDelayMinutes, features.InboundDelayMinutes, features.AirportDelayMinutes, features.GroundStopMinutes) > 1440 {

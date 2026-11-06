@@ -46,6 +46,7 @@ AeroAPI search / polling / callbacks     FAA NAS / signed advisory bridges
 - SQLite stores authenticated installations, tracked flights, share capabilities, device registrations and the push outbox. Device fanout and event writes share a transaction. A leased push job can be retried after a worker restart. Delivery is at least once, subject to expiry, provider policy and retry limits.
 - User-visible changes include tail assignment, departure and arrival gate, baggage, significant ETD/ETA shifts, OOOI and matching advisories. Small ETA and ETD revisions accumulate against separate saved references so a series of minor updates can trigger an alert. Check-in is a 24-hour reminder with airline availability unverified. The operational departure estimate uses aircraft turnaround and applicable advisory constraints. Operators can train and deploy a local ridge-regression model from time-stamped observations. Its inputs, contributions and official flight times stay separate.
 - Advisory-based forecasts expire at the earliest deadline of their evidence. An open-ended advisory can support a forecast for 30 minutes after observation. A dated advisory also honors its published end and a six-hour observation limit, with each forecast valid for up to 30 minutes. A material change in the current source revision retires a saved forecast until it can be recomputed. Learned explanations name current signals separately from the model's signed feature contributions.
+- Training capture assigns each flight instance a stable target within the early and standard lead windows. A verified alias shares its target with the provider instance. Deployment checks count coverage among holdout forecasts with a live input signal and compare errors across all holdout flights. [Delay model training](docs/SELF_HOSTING.md#airport-routing-imports-and-delay-models)
 - The outbox checks advisory and delay forecast evidence again before provider transport, including for older queued alerts. A published departure schedule change retires forecasts and alerts based on the previous schedule. Advisory program revisions share a provider collapse identity. [Aviation callbacks](docs/AVIATION_CALLBACKS.md)
 - The optional METAR worker fetches small batches of public station observations for imminent tracked operations. The flight API returns recent adverse conditions separately from delay reasons, model inputs, and official airport advisories. [Aviation Weather Center data API](https://aviationweather.gov/data/api/)
 - The signed advisory relay accepts documented FAA TFMData Flow Information airport ground stops and ground delay programs as XML. It preserves their source revision and operational window and routes relevant airport alerts through the outbox. Airport program definitions without flight membership stay out of delay estimates and training. [Aviation callbacks](docs/AVIATION_CALLBACKS.md#faa-tfmdata-airport-programs)
@@ -115,8 +116,9 @@ with the same capture time left one gate-change event in SQLite. [Signed flight 
 These benchmarks time a signed aviation webhook from handler entry to the
 start of a fake push send. Each uses one tracked flight and one registered
 device in a temporary SQLite database. In three serial runs of 100 updates on
-Linux amd64, the 95th percentile was 1.97 to 2.19 ms for signed flight snapshots
-and 2.34 to 2.61 ms for signed advisories. A separate regression test delivers
+Linux amd64 with forecast recomputation enabled, the signed flight snapshot
+benchmark measured 2.79 to 2.91 ms at the 95th percentile. An earlier set of
+signed advisory runs measured 2.34 to 2.61 ms at p95. A separate regression test delivers
 a gate alert while six Live Activity sends occupy the same provider's general
 slots. Live APNs, FCM, and device measurements are separate.
 
