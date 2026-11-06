@@ -332,6 +332,14 @@ pending push from the backup. Use demo mode and a separate port for a restore
 drill, then check health and open a tracked flight using an existing
 installation before putting the restored instance into service.
 
+An installation created after the backup may need to reconnect. Open Plano
+Settings, enter the same server address and its current enrollment code if
+required, then tap **Connect to server**. If the restored server rejects the
+old credential, Plano enrolls a new installation. Flights and sharing state
+from the old installation are only available if the restored database has that
+installation. Enable flight alerts and background calendar sync again if you
+use them.
+
 ## Run without containers
 
 Use Go 1.26 and a C compiler for the SQLite driver.

@@ -4,7 +4,8 @@ import * as SecureStore from 'expo-secure-store';
 import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 import {
-  clearCalendarBackground, createAPI, loadServer, prepareCalendarBackground, serverStorageKey, type CalendarFlight, type PlanoAPI,
+  calendarSyncScopes, clearCalendarBackground, createAPI, loadServer, prepareCalendarBackground, serverStorageKey,
+  type CalendarFlight, type PlanoAPI,
 } from './api';
 import { dateKey } from './flight';
 
@@ -179,9 +180,9 @@ export function calendarFlights() {
   return readCalendarFlights(true);
 }
 
-const optInKey = (server: string) => serverStorageKey('calendar-sync', server);
-const legacyLogKey = (server: string) => serverStorageKey('calendar-imports', server);
-const syncLogKey = (server: string) => serverStorageKey('calendar-sync-imports', server);
+const optInKey = (server: string) => serverStorageKey(calendarSyncScopes.consent, server);
+const legacyLogKey = (server: string) => serverStorageKey(calendarSyncScopes.legacyLog, server);
+const syncLogKey = (server: string) => serverStorageKey(calendarSyncScopes.log, server);
 
 async function calendarSyncConsent(server: string) {
   if (!native || !server) return undefined;
@@ -221,6 +222,7 @@ export async function setCalendarSyncEnabled(server: string, enabled: boolean) {
   const generation = { pending: true };
   consentGenerations.set(server, generation);
   try {
+    const installation = enabled && await createAPI(server, { access: 'existing-installation' }).installationToken();
     if (enabled) {
       const calendar = await import('expo-calendar');
       const permission = await calendar.requestCalendarPermissions();
@@ -233,8 +235,8 @@ export async function setCalendarSyncEnabled(server: string, enabled: boolean) {
         await SecureStore.deleteItemAsync(legacyLogKey(server));
         await clearCalendarBackground(server);
         await reconcileSchedule();
-      } else if (consentGenerations.get(server) === generation) {
-        await prepareCalendarBackground(server);
+      } else if (installation && consentGenerations.get(server) === generation) {
+        await prepareCalendarBackground(server, installation);
         try {
           await SecureStore.setItemAsync(optInKey(server), `timed:${randomUUID()}`, secureOptions);
           await reconcileSchedule();

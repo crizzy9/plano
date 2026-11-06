@@ -84,9 +84,9 @@ for (const [path, send] of [
     activeConsent = 'second';
     fixture.allowToken();
     await retired;
-    assert.deepEqual(fixture.calls, ['token', 'host', 'consent']);
+    assert.deepEqual(fixture.calls, ['token', 'host', 'token', 'consent']);
     await send(makeClient(activeConsent));
-    assert.deepEqual(fixture.calls.slice(3), ['token', 'host', 'consent', path]);
+    assert.deepEqual(fixture.calls.slice(4), ['token', 'host', 'token', 'consent', path]);
   });
 }
 

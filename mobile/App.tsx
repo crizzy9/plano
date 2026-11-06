@@ -21,7 +21,8 @@ const Stack = createNativeStackNavigator<Routes>();
 export default function App() {
   const { colors, isDark } = usePalette();
   const [server, setServer] = useState<string>();
-  const [readyServer, setReadyServer] = useState<string>();
+  const [installationRevision, setInstallationRevision] = useState(0);
+  const [readySession, setReadySession] = useState<string>();
   const navigation = useNavigationContainerRef<Routes>();
   const [loadError, setLoadError] = useState<string>();
   useEffect(() => {
@@ -30,9 +31,10 @@ export default function App() {
       setServer('');
     });
   }, []);
-  const api = useMemo(() => createAPI(server ?? ''), [server]);
+  const api = useMemo(() => createAPI(server ?? ''), [server, installationRevision]);
+  const session = `${installationRevision}:${server ?? ''}`;
   useFlightAlerts(api);
-  useNotificationRouting(server, server !== undefined && readyServer === server, navigation);
+  useNotificationRouting(server, server !== undefined && readySession === session, navigation);
   useEffect(() => {
     if (!server) return;
     let calendarTimer: ReturnType<typeof setInterval> | undefined;
@@ -55,7 +57,7 @@ export default function App() {
       pauseCalendar();
       subscription.remove();
     };
-  }, [server]);
+  }, [server, installationRevision]);
   const baseTheme = isDark ? DarkTheme : DefaultTheme;
   const theme = {
     ...baseTheme,
@@ -71,7 +73,7 @@ export default function App() {
       {server === undefined ? (
         <View style={[styles.wait, { backgroundColor: colors.ground }]}><Loading /></View>
       ) : (
-        <NavigationContainer key={server} theme={theme} ref={navigation} onReady={() => setReadyServer(server)}>
+        <NavigationContainer key={session} theme={theme} ref={navigation} onReady={() => setReadySession(session)}>
           <Stack.Navigator screenOptions={{
             headerShadowVisible: false, headerBackButtonDisplayMode: 'minimal',
             contentStyle: { backgroundColor: colors.ground },
@@ -110,9 +112,10 @@ export default function App() {
               {({ route }) => <ConnectionScreen api={api} initialPair={route.params} />}
             </Stack.Screen>
             <Stack.Screen name="Settings" options={{ title: 'Settings' }}>
-              {() => <ServerSettings api={api} error={loadError} onChange={(next) => {
+              {() => <ServerSettings api={api} error={loadError} onChange={({ url, replacedInstallation }) => {
                 setLoadError(undefined);
-                setServer(next);
+                setServer(url);
+                if (replacedInstallation) setInstallationRevision((current) => current + 1);
               }} />}
             </Stack.Screen>
           </Stack.Navigator>

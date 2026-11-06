@@ -66,11 +66,13 @@ function client(events, send, consent = 'timed', importLegacy, { beforeAuth, bef
       },
     },
     './api': {
+      calendarSyncScopes: { consent: 'calendar-sync', log: 'calendar-sync-imports', legacyLog: 'calendar-imports' },
       loadServer: async () => server,
       prepareCalendarBackground: async () => {},
       clearCalendarBackground: async () => {},
       serverStorageKey: (scope, host) => `${scope}:${host}`,
       createAPI: (_, options) => {
+        if (options.access === 'existing-installation') return { installationToken: async () => 'fixture-installation' };
         assert.equal(options.access, 'background');
         async function authenticated(kind, request) {
           await beforeAuth?.(kind);

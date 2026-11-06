@@ -354,6 +354,10 @@ const calendarBackgroundStore = {
   keychainService: 'plano.background.v1',
   keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
 };
+export const calendarSyncScopes = { consent: 'calendar-sync', log: 'calendar-sync-imports', legacyLog: 'calendar-imports' };
+const installationEnrollments = new Map<string, Promise<string>>();
+const installationRevisions = new Map<string, number>();
+let serverSaveQueue = Promise.resolve();
 let retirementQueue = Promise.resolve();
 // Only the most recent flight read may update the saved view. This also
 // fences requests from a retired API instance after a server switch.
@@ -615,14 +619,14 @@ export async function loadServer({ savedOnly = false } = {}): Promise<string> {
   return normalizeServer(saved || defaultURL);
 }
 
-export async function prepareCalendarBackground(server: string) {
+export async function prepareCalendarBackground(server: string, expectedToken: string) {
   await serializeRetirement(async () => {
     if (Platform.OS === 'web' || await loadServer() !== server) {
       throw new Error('Choose a Plano server before enabling background calendar sync.');
     }
     const key = serverStorageKey('installation', server);
     const token = await SecureStore.getItemAsync(key);
-    if (!token) throw new Error('Connect to your Plano server before enabling background calendar sync.');
+    if (token !== expectedToken) throw new Error('The Plano installation changed. Try enabling calendar sync again.');
     await SecureStore.setItemAsync(key, token, calendarBackgroundStore);
     try {
       await SecureStore.setItemAsync(hostKey, server, calendarBackgroundStore);
@@ -643,20 +647,46 @@ export async function clearCalendarBackground(server: string) {
   if (Platform.OS !== 'web') await serializeRetirement(() => removeCalendarBackground(server));
 }
 
-export async function saveServer(value: string, enrollmentCode?: string, previous?: string): Promise<string> {
+export type ServerConnection = { url: string; replacedInstallation: boolean };
+
+export async function saveServer(value: string, enrollmentCode?: string, previous?: string): Promise<ServerConnection> {
   const url = normalizeServer(value);
   const health = await request<{ status?: string; mode?: string }>(url, '/healthz');
   if (health?.status !== 'ok' || !['demo', 'live'].includes(health.mode ?? '')) {
     throw new Error('This address did not return a Plano health response.');
   }
-  await createAPI(url).installationToken(enrollmentCode);
-  if (Platform.OS === 'web') {
-    globalThis.localStorage?.setItem(hostKey, url);
-  } else {
+  // Serialize explicit selections while keeping network probes outside the
+  // native retirement queue. Existing-credential reads never wait for this queue.
+  const selection = serverSaveQueue.then(async () => {
+    const current = await loadServer();
+    if (previous !== undefined && current !== previous && current !== url) {
+      throw new Error('The active Plano server changed. Try connecting again.');
+    }
+    const existing = await savedInstallationToken(url);
+    let replacement: string | undefined;
+    if (existing) {
+      try {
+        const probe = await request<{ flights: Flight[] }>(url, '/v1/tracked?flightId=plano-installation-check', {
+          headers: { Authorization: `Bearer ${existing}` },
+        });
+        if (!Array.isArray(probe?.flights)) throw new Error('Plano returned an invalid installation check.');
+      } catch (cause) {
+        if (!(cause instanceof APIError) || cause.status !== 401) throw cause;
+        replacement = await enrollInstallation(url, enrollmentCode);
+      }
+    } else {
+      await foregroundInstallationToken(url, enrollmentCode);
+    }
+
+    const result = { url, replacedInstallation: replacement !== undefined };
+    if (Platform.OS === 'web') {
+      if (replacement) await replaceInstallationToken(url, replacement);
+      globalThis.localStorage?.setItem(hostKey, url);
+      return result;
+    }
     await serializeRetirement(async () => {
-      const current = await loadServer();
-      if (previous !== undefined && current !== previous && current !== url) {
-        throw new Error('The active Plano server changed. Try connecting again.');
+      if (replacement && await savedInstallationToken(url) !== existing) {
+        throw new Error('The Plano installation changed. Try connecting again.');
       }
       if (Platform.OS === 'android') await recordAndroidRetirement(await selectAndroidPushOrigin(url));
       if (Platform.OS === 'ios' && current && current !== url) {
@@ -672,20 +702,34 @@ export async function saveServer(value: string, enrollmentCode?: string, previou
         if (previous && previous !== url && !pending.includes(previous)) pending.push(previous);
         await SecureStore.setItemAsync(cleanupKey, JSON.stringify(pending.filter((item) => item !== url)));
       }
-      await SecureStore.setItemAsync(hostKey, url);
-      if (current && current !== url) {
-        offlineRevision += 1;
-        try {
-          const token = await SecureStore.getItemAsync(serverStorageKey('installation', current));
-          const scope = token && await offlineFlightScope(current, token);
-          if (scope) clearSavedFlights(scope);
-        } catch {
-          // Server selection works even when the device cache is unavailable.
+      if (current === url) await SecureStore.setItemAsync(hostKey, url);
+      if (existing && replacement) {
+        const preference = serverStorageKey('flight-alerts', url);
+        if (Platform.OS === 'android') {
+          await recordAndroidRetirement(await disableAndroidPush(url, null, true));
+          await SecureStore.deleteItemAsync(preference);
+        } else if (Platform.OS === 'ios') {
+          beginIOSPushIntent();
+          if (canFenceIOSPush) await finishIOSDisable(url);
+          else {
+            if (current === url) await clearLiveActivities();
+            await SecureStore.deleteItemAsync(preference);
+          }
         }
+        await removeCalendarBackground(url);
+        for (const scope of Object.values(calendarSyncScopes)) {
+          await SecureStore.deleteItemAsync(serverStorageKey(scope, url));
+        }
+        await replaceInstallationToken(url, replacement);
+        await clearInstallationCache(url, existing);
       }
+      if (current !== url) await SecureStore.setItemAsync(hostKey, url);
+      if (current && current !== url) await clearInstallationCache(current);
     });
-  }
-  return url;
+    return result;
+  });
+  serverSaveQueue = selection.then(() => {}, () => {});
+  return selection;
 }
 
 class APIError extends Error {
@@ -779,6 +823,71 @@ export function serverStorageKey(scope: string, server: string) {
     .map((character) => character.codePointAt(0)?.toString(16).padStart(2, '0')).join('');
 }
 
+async function savedInstallationToken(server: string, background = false) {
+  const key = serverStorageKey('installation', server);
+  return Platform.OS === 'web'
+    ? globalThis.sessionStorage?.getItem(key)
+    : SecureStore.getItemAsync(key, background ? calendarBackgroundStore : undefined);
+}
+
+async function storeInstallationToken(server: string, token: string) {
+  const key = serverStorageKey('installation', server);
+  if (Platform.OS === 'web') globalThis.sessionStorage?.setItem(key, token);
+  else await SecureStore.setItemAsync(key, token);
+}
+
+async function replaceInstallationToken(server: string, token: string) {
+  await storeInstallationToken(server, token);
+  installationEnrollments.delete(server);
+  installationRevisions.set(server, (installationRevisions.get(server) ?? 0) + 1);
+}
+
+async function enrollInstallation(server: string, enrollmentCode?: string) {
+  const enrollment = await request<{ token?: string }>(server, '/v1/installations', {
+    method: 'POST', body: JSON.stringify({ enrollmentCode: enrollmentCode || undefined }),
+  });
+  if (typeof enrollment?.token !== 'string' || !enrollment.token) {
+    throw new Error('Plano couldn’t register this installation.');
+  }
+  return enrollment.token;
+}
+
+async function foregroundInstallationToken(server: string, enrollmentCode?: string) {
+  const pending = installationEnrollments.get(server);
+  if (pending) {
+    try {
+      return await pending;
+    } catch (cause) {
+      // A foreground read may have started an enrollment without the code
+      // that the user has since supplied in Settings.
+      if (!enrollmentCode || !(cause instanceof APIError) || cause.status !== 403) throw cause;
+      return foregroundInstallationToken(server, enrollmentCode);
+    }
+  }
+  const enrollment = (async () => {
+    const saved = await savedInstallationToken(server);
+    if (saved) return saved;
+    const token = await enrollInstallation(server, enrollmentCode);
+    await storeInstallationToken(server, token);
+    return token;
+  })().finally(() => {
+    if (installationEnrollments.get(server) === enrollment) installationEnrollments.delete(server);
+  });
+  installationEnrollments.set(server, enrollment);
+  return enrollment;
+}
+
+async function clearInstallationCache(server: string, oldToken?: string) {
+  offlineRevision += 1;
+  try {
+    const token = oldToken ?? await savedInstallationToken(server);
+    const scope = token && await offlineFlightScope(server, token);
+    if (scope) clearSavedFlights(scope);
+  } catch {
+    // Server selection works even when the device cache is unavailable.
+  }
+}
+
 const flightPath = (id: string) => `/v1/flights/${encodeURIComponent(id)}`;
 const friendPath = (id: string) => `/v1/friends/${encodeURIComponent(id)}`;
 const passportPath = '/v1/passport?limit=50';
@@ -791,33 +900,25 @@ type APIAccessOptions =
 export function createAPI(server: string, options: APIAccessOptions = {}) {
   // The canonical origin is part of the key, so two installations on different
   // hosts can never use each other's bearer token.
-  const tokenKey = serverStorageKey('installation', server);
   const background = options.access === 'background';
+  const savedToken = () => savedInstallationToken(server, background);
+  let tokenRevision: number | undefined;
   let tokenPromise: Promise<string> | undefined;
 
-  async function savedToken() {
-    return Platform.OS === 'web'
-      ? globalThis.sessionStorage?.getItem(tokenKey)
-      : SecureStore.getItemAsync(tokenKey, background ? calendarBackgroundStore : undefined);
-  }
-
-  function installationToken(enrollmentCode?: string): Promise<string> {
-    tokenPromise ??= (async () => {
-      const existing = await savedToken();
-      if (existing) return existing;
-      if (options.access) throw new Error('This server has no saved Plano installation.');
-      const { token } = await request<{ token: string }>(server, '/v1/installations', {
-        method: 'POST', body: JSON.stringify({ enrollmentCode: enrollmentCode || undefined }),
-      });
-      if (!token) throw new Error('Plano couldn’t register this installation.');
-      if (Platform.OS === 'web') globalThis.sessionStorage?.setItem(tokenKey, token);
-      else await SecureStore.setItemAsync(tokenKey, token);
-      return token;
-    })().catch((error: unknown) => {
-      tokenPromise = undefined;
-      throw error;
-    });
-    return tokenPromise;
+  async function installationToken(enrollmentCode?: string): Promise<string> {
+    if (!options.access) {
+      const revision = installationRevisions.get(server) ?? 0;
+      if (!tokenPromise || tokenRevision !== revision) {
+        const pending = foregroundInstallationToken(server, enrollmentCode);
+        tokenPromise = pending;
+        tokenRevision = revision;
+        void pending.catch(() => { if (tokenPromise === pending) tokenPromise = undefined; });
+      }
+      return tokenPromise;
+    }
+    const existing = await savedToken();
+    if (!existing) throw new Error('This server has no saved Plano installation.');
+    return existing;
   }
 
   function readInstallationToken(signal?: AbortSignal | null) {
@@ -827,18 +928,24 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
 
   async function authenticated<T>(path: string, init: RequestInit = {}, timeoutMs?: number) {
     const token = await readInstallationToken(init.signal);
+    return requestAs<T>(token, path, init, timeoutMs);
+  }
+
+  async function requestAs<T>(token: string, path: string, init: RequestInit = {}, timeoutMs?: number) {
     const send = () => request<T>(server, path, { ...init, headers: { ...init.headers, Authorization: `Bearer ${token}` } }, timeoutMs);
     const authorize = options.withRequestAuthorization;
     if (authorize) {
       const { response } = await serializeRetirement(async () => {
-        if (await loadServer({ savedOnly: true }) !== server) throw new Error('Access for this server ended.');
+        if (await loadServer({ savedOnly: true }) !== server || await savedToken() !== token) {
+          throw new Error('Access for this server ended.');
+        }
         // Keep the saved host stable through the final consent check and
         // fetch invocation. The response settles outside the queue.
         return authorize(async () => ({ response: send() }));
       });
       return response;
     }
-    if (options.access && await loadServer({ savedOnly: background }) !== server) {
+    if (options.access && (await loadServer({ savedOnly: background }) !== server || await savedToken() !== token)) {
       throw new Error('Access for this server ended.');
     }
     return send();
@@ -879,16 +986,16 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
     }
   }
 
-  async function tracked(flightIds: readonly string[] = [], signal?: AbortSignal): Promise<Flight[]> {
+  async function trackedAs(token: string, flightIds: readonly string[], signal?: AbortSignal): Promise<Flight[]> {
     const query = new URLSearchParams();
     for (const id of flightIds) query.append('flightId', id);
     const path = flightIds.length ? `/v1/tracked?${query}` : '/v1/tracked';
-    return (await authenticated<{ flights: Flight[] }>(path, { signal })).flights;
+    return (await requestAs<{ flights: Flight[] }>(token, path, { signal })).flights;
   }
 
-  function detail(id: string, rotationOf?: string, signal?: AbortSignal) {
+  function detailAs(token: string, id: string, rotationOf?: string, signal?: AbortSignal) {
     const query = rotationOf ? `?${new URLSearchParams({ rotationOf })}` : '';
-    return authenticated<FlightDetail>(`${flightPath(id)}${query}`, { signal });
+    return requestAs<FlightDetail>(token, `${flightPath(id)}${query}`, { signal });
   }
 
   return {
@@ -899,14 +1006,18 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
       const query = new URLSearchParams({ number, date });
       return (await authenticated<{ flights: Flight[] }>(`/v1/flights?${query}`)).flights;
     },
-    tracked,
-    detail,
+    async tracked(flightIds: readonly string[] = [], signal?: AbortSignal) {
+      return trackedAs(await readInstallationToken(signal), flightIds, signal);
+    },
+    async detail(id: string, rotationOf?: string, signal?: AbortSignal) {
+      return detailAs(await readInstallationToken(signal), id, rotationOf, signal);
+    },
     async flightOverview(signal?: AbortSignal): Promise<FlightOverview> {
       const token = await readInstallationToken(signal);
       checkRequestSignal(signal);
       const revision = ++offlineRevision;
       try {
-        const flights = await tracked([], signal);
+        const flights = await trackedAs(token, [], signal);
         await withFlightCache(token, revision, (scope) => saveOverview(scope, flights), signal);
         return { flights };
       } catch (error) {
@@ -923,7 +1034,7 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
       const token = await readInstallationToken(signal);
       checkRequestSignal(signal);
       const revision = ++offlineRevision;
-      const [snapshot, selection] = await Promise.allSettled([detail(id, rotationOf, signal), tracked([id], signal)]);
+      const [snapshot, selection] = await Promise.allSettled([detailAs(token, id, rotationOf, signal), trackedAs(token, [id], signal)]);
       checkRequestSignal(signal);
       if (snapshot.status === 'fulfilled' && selection.status === 'fulfilled') {
         const flight = snapshot.value;
@@ -981,9 +1092,12 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
       const withActivePushOrigin = Platform.OS === 'android' ? withActiveAndroidPushOrigin : withActiveIOSPushOrigin;
       // The DELETE can outlive a server switch or an alert session. Capture
       // the old identity without holding the retirement lock during the request.
-      const binding = await withActivePushOrigin(server, () => captureLiveProgressSession(server)).catch(() => null);
       const token = await installationToken();
-      await authenticated<void>(`/v1/tracked/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const binding = await withActivePushOrigin(server, async () => {
+        if (await savedToken() !== token) return null;
+        return captureLiveProgressSession(server);
+      }).catch(() => null);
+      await requestAs<void>(token, `/v1/tracked/${encodeURIComponent(id)}`, { method: 'DELETE' });
       offlineRevision += 1;
       await withFlightCache(token, undefined, (scope) => forgetSavedFlight(scope, id));
       if (binding) await withActivePushOrigin(server, () => stopLiveActivityInSession(server, binding, id)).catch(() => {});
@@ -1171,9 +1285,11 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
         if (!(cause instanceof APIError) || cause.status !== 401) throw cause;
       }
     },
-    registerDevice: (device: Device) => authenticated<void>('/v1/devices', {
-      method: 'POST', body: JSON.stringify(device),
-    }),
+    async registerDevice(device: Device, token?: string) {
+      return requestAs<void>(token ?? await installationToken(), '/v1/devices', {
+        method: 'POST', body: JSON.stringify(device),
+      });
+    },
   };
 }
 

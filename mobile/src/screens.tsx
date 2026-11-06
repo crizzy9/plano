@@ -5,7 +5,7 @@ import { AccessibilityInfo, AppState, Linking, Platform, RefreshControl, ScrollV
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   saveServer, withActiveAndroidPushOrigin, type AirportWeatherForecast, type ATFMSlot, type Flight, type FlightNotice, type HistoricalDepartureRisk,
-  type PassportFlight, type PlanoAPI, type Position, type RadarCursor,
+  type PassportFlight, type PlanoAPI, type Position, type RadarCursor, type ServerConnection,
 } from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
 import { subscribeFlightRefresh, type FlightRefreshScope } from './flight-refresh';
@@ -1021,7 +1021,7 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
 export function ServerSettings({ api, error, onChange }: {
   api: PlanoAPI;
   error?: string;
-  onChange: (url: string) => void;
+  onChange: (connection: ServerConnection) => void;
 }) {
   const [server, setServer] = useState(api.server);
   const [issue, setIssue] = useState(error);
@@ -1036,10 +1036,10 @@ export function ServerSettings({ api, error, onChange }: {
     setConnected(false);
     setPending(true);
     try {
-      const url = await saveServer(server, enrollmentCode.trim(), api.server);
+      const connection = await saveServer(server, enrollmentCode.trim(), api.server);
       setEnrollmentCode('');
       setConnected(true);
-      onChange(url);
+      onChange(connection);
     } catch (cause) {
       setIssue(errorText(cause));
     } finally {

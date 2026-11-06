@@ -12,14 +12,29 @@ const A = 'https://a.plano.test';
 const B = 'https://b.plano.test';
 const flightId = 'UA123.2027-05-18';
 const trackedPath = `/v1/tracked/${flightId}`;
+const probePath = '/v1/tracked?flightId=plano-installation-check';
 const token = (origin) => origin === A ? 'fixture-installation-a' : 'fixture-installation-b';
+const replacementToken = 'fixture-replacement-installation';
+const enrollmentCode = 'fixture-enrollment-code';
+const backgroundStore = { keychainService: 'plano.background.v1' };
 
 function fixture(platform) {
   let revision = 0;
   let session;
+  let probeStatus;
+  let enrollmentGate;
+  let retirementGate;
+  const retirementStarted = Promise.withResolvers();
   const storage = new Map();
+  const accepted = new Map();
+  const replacements = new Set();
   const events = [];
   const stopped = [];
+  const enrollment = [];
+  const probes = [];
+  const retirements = [];
+  const deletes = [];
+  const calendarScopes = ['calendar-sync', 'calendar-sync-imports', 'calendar-imports'];
   const storageKey = (name, options) => options?.keychainService ? `${options.keychainService}:${name}` : name;
   const modules = {
     'react-native': { Platform: { OS: platform } },
@@ -36,14 +51,20 @@ function fixture(platform) {
         session = undefined;
         return old;
       },
-      disableAndroidPush: async (origin) => {
-        if (session?.origin !== origin) return null;
+      disableAndroidPush: async (origin, expected) => {
+        if (session?.origin !== origin || expected && session.binding !== expected) return null;
+        retirementStarted.resolve();
+        if (retirementGate) await retirementGate;
         const old = session;
         session = undefined;
+        retirements.push([origin, old.binding]);
         return old;
       },
       retireIOSPush: async (origin, installationToken) => {
-        assert.equal(installationToken, token(origin));
+        assert.equal(installationToken, storage.get(exports.serverStorageKey('installation', origin)));
+        retirementStarted.resolve();
+        if (retirementGate) await retirementGate;
+        retirements.push([origin, installationToken]);
         if (session?.origin === origin) session = undefined;
         return ++revision;
       },
@@ -75,14 +96,38 @@ function fixture(platform) {
       return modules[name];
     },
     fetch: async (target, init) => {
-      const { origin, pathname } = new URL(target);
+      const { origin, pathname, search } = new URL(target);
       assert.ok([A, B].includes(origin));
       if (pathname === '/healthz') return Response.json({ status: 'ok', mode: 'demo' });
-      if (pathname === '/v1/installations') return Response.json({ token: token(origin) });
+      if (pathname === '/v1/installations') {
+        assert.equal(init.method, 'POST');
+        const code = JSON.parse(init.body).enrollmentCode;
+        enrollment.push([origin, code]);
+        if (replacements.has(origin) && code !== enrollmentCode) {
+          return Response.json({ error: 'Fixture enrollment rejected' }, { status: 403 });
+        }
+        if (enrollmentGate) await enrollmentGate;
+        const bearer = replacements.has(origin) ? replacementToken : token(origin);
+        accepted.set(origin, `Bearer ${bearer}`);
+        return Response.json({ token: bearer });
+      }
+      const bearer = init.headers.Authorization;
+      const authorized = accepted.has(origin) && bearer === accepted.get(origin);
+      if (pathname + search === probePath) {
+        assert.equal(init.method ?? 'GET', 'GET');
+        probes.push([origin, bearer]);
+        if (probeStatus) return Response.json({ error: 'Fixture probe failed' }, { status: probeStatus });
+        return authorized ? Response.json({ flights: [] }) : new Response(null, { status: 401 });
+      }
+      if (pathname === '/v1/friends') {
+        assert.equal(init.method ?? 'GET', 'GET');
+        return authorized ? Response.json({ friends: [] }) : new Response(null, { status: 401 });
+      }
       assert.equal(init.method, 'DELETE');
-      assert.equal(init.headers.Authorization, `Bearer ${token(origin)}`);
-      if (pathname === '/v1/devices') return new Response(null, { status: 204 });
+      if (pathname === '/v1/devices') return new Response(null, { status: authorized ? 204 : 401 });
       assert.equal(pathname, trackedPath);
+      deletes.push(bearer);
+      if (!authorized) return new Response(null, { status: 401 });
       events.push(['delete', origin]);
       requestEntered(origin);
       const status = await response;
@@ -90,7 +135,32 @@ function fixture(platform) {
     },
   });
   return {
-    api: exports, events, stopped, requested, respond,
+    api: exports, events, stopped, requested, respond, enrollment, probes, retirements, deletes,
+    storedInstallation: (origin) => storage.get(exports.serverStorageKey('installation', origin)),
+    async allowBackgroundAndAlerts(origin) {
+      await exports.prepareCalendarBackground(origin, token(origin));
+      storage.set(exports.serverStorageKey('flight-alerts', origin), 'on');
+      for (const scope of calendarScopes) storage.set(exports.serverStorageKey(scope, origin), 'fixture');
+    },
+    localConsent(origin) {
+      return {
+        alertPreference: storage.get(exports.serverStorageKey('flight-alerts', origin)),
+        backgroundServer: storage.get(storageKey('plano.server.v1', backgroundStore)),
+        backgroundToken: storage.get(storageKey(exports.serverStorageKey('installation', origin), backgroundStore)),
+        binding: session?.origin === origin ? session.binding : undefined,
+        calendarState: calendarScopes.filter((scope) => storage.has(exports.serverStorageKey(scope, origin))),
+      };
+    },
+    replaceDatabase(origin, pendingEnrollment) {
+      replacements.add(origin);
+      accepted.delete(origin);
+      enrollmentGate = pendingEnrollment;
+    },
+    failProbe(status) { probeStatus = status; },
+    holdRetirement(gate) {
+      retirementGate = gate;
+      return retirementStarted.promise;
+    },
     enable(origin) {
       const binding = `00000000-0000-4000-8000-${String(++revision).padStart(12, '0')}`;
       session = { origin, binding };
@@ -98,6 +168,116 @@ function fixture(platform) {
     },
   };
 }
+
+for (const platform of ['android', 'ios']) {
+  test(`${platform} same-origin reconnect replaces a revoked installation and refreshes an open client`, async () => {
+    const { api, enrollment, probes, retirements, replaceDatabase, storedInstallation, allowBackgroundAndAlerts,
+      localConsent, enable } = fixture(platform);
+    await api.saveServer(A, '', '');
+    const binding = enable(A);
+    await allowBackgroundAndAlerts(A);
+    const originalConsent = { alertPreference: 'on', backgroundServer: A, backgroundToken: token(A), binding,
+      calendarState: ['calendar-sync', 'calendar-sync-imports', 'calendar-imports'] };
+    assert.deepEqual(localConsent(A), originalConsent);
+    const existingClient = api.createAPI(A);
+    await existingClient.friends();
+
+    const reused = await api.saveServer(A, enrollmentCode, A);
+    assert.equal(reused.url, A);
+    assert.equal(reused.replacedInstallation, false);
+    assert.deepEqual(probes, [[A, `Bearer ${token(A)}`]]);
+    assert.deepEqual(enrollment, [[A, undefined]]);
+    assert.equal(storedInstallation(A), token(A));
+    assert.deepEqual(localConsent(A), originalConsent);
+    assert.deepEqual(retirements, []);
+
+    replaceDatabase(A);
+    await assert.rejects(existingClient.friends(), { status: 401 });
+    const replaced = await api.saveServer(A, enrollmentCode, A);
+    assert.equal(replaced.url, A);
+    assert.equal(replaced.replacedInstallation, true);
+    assert.deepEqual(probes, [[A, `Bearer ${token(A)}`], [A, `Bearer ${token(A)}`]]);
+    assert.deepEqual(enrollment, [[A, undefined], [A, enrollmentCode]]);
+    assert.equal(storedInstallation(A), replacementToken);
+    assert.deepEqual(localConsent(A), {
+      alertPreference: undefined, backgroundServer: undefined, backgroundToken: undefined, binding: undefined,
+      calendarState: [],
+    });
+    assert.deepEqual(retirements, [[A, platform === 'ios' ? token(A) : binding]]);
+    await existingClient.friends();
+  });
+
+  test(`${platform} an unavailable probe or rejected enrollment preserves the saved installation and consent`, async () => {
+    const { api, enrollment, probes, retirements, failProbe, replaceDatabase, storedInstallation, allowBackgroundAndAlerts,
+      localConsent, enable } = fixture(platform);
+    await api.saveServer(A, '', '');
+    enable(A);
+    await allowBackgroundAndAlerts(A);
+    const originalConsent = localConsent(A);
+    const existingClient = api.createAPI(A);
+    await existingClient.friends();
+
+    failProbe(503);
+    await assert.rejects(api.saveServer(A, enrollmentCode, A), { status: 503 });
+    assert.deepEqual(probes, [[A, `Bearer ${token(A)}`]]);
+    assert.deepEqual(enrollment, [[A, undefined]]);
+    assert.equal(storedInstallation(A), token(A));
+    assert.deepEqual(localConsent(A), originalConsent);
+    await existingClient.friends();
+
+    failProbe(undefined);
+    replaceDatabase(A);
+    await assert.rejects(api.saveServer(A, 'invalid fixture code', A), { status: 403 });
+    assert.deepEqual(enrollment, [[A, undefined], [A, 'invalid fixture code']]);
+    assert.equal(storedInstallation(A), token(A));
+    assert.deepEqual(localConsent(A), originalConsent);
+    assert.deepEqual(retirements, []);
+    assert.equal(await api.loadServer(), A);
+    await assert.rejects(existingClient.friends(), { status: 401 });
+  });
+
+  test(`${platform} an old untrack intent cannot delete from the replacement installation`, { timeout: 2000 }, async (t) => {
+    const scenario = fixture(platform);
+    await scenario.api.saveServer(A, '', '');
+    scenario.enable(A);
+    const client = scenario.api.createAPI(A);
+    await client.friends();
+    scenario.replaceDatabase(A);
+    const { promise, resolve } = Promise.withResolvers();
+    t.after(() => { resolve(); scenario.respond(204); });
+    const retirement = scenario.holdRetirement(promise);
+    const reconnect = scenario.api.saveServer(A, enrollmentCode, A);
+    void reconnect.catch(() => {});
+    await retirement;
+    const untrack = client.untrack(flightId);
+    const rejected = assert.rejects(untrack, { status: 401 });
+    resolve();
+    await reconnect;
+    scenario.respond(204);
+    await rejected;
+    assert.deepEqual(scenario.deletes, [`Bearer ${token(A)}`]);
+    assert.deepEqual(scenario.stopped, []);
+  });
+}
+
+test('concurrent reconnects converge on one installation', { timeout: 2000 }, async (t) => {
+  const { api, enrollment, replaceDatabase, storedInstallation } = fixture('android');
+  await api.saveServer(A, '', '');
+  const { promise, resolve } = Promise.withResolvers();
+  t.after(() => resolve());
+  replaceDatabase(A, promise);
+
+  const reconnects = Promise.all([api.saveServer(A, enrollmentCode, A), api.saveServer(A, enrollmentCode, A)]);
+  void reconnects.catch(() => {});
+  await new Promise(setImmediate);
+  assert.equal(storedInstallation(A), token(A));
+  resolve();
+  const results = await reconnects;
+  assert.deepEqual(results.map(({ url }) => url), [A, A]);
+  assert.deepEqual(results.map(({ replacedInstallation }) => replacedInstallation).sort(), [false, true]);
+  assert.deepEqual(enrollment, [[A, undefined], [A, enrollmentCode]]);
+  assert.equal(storedInstallation(A), replacementToken);
+});
 
 async function begin(t, platform) {
   const scenario = fixture(platform);

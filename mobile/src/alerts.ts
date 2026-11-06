@@ -66,16 +66,19 @@ async function registerAndroidDevice(
   expected: string,
   explicit: boolean,
   active: () => boolean,
+  expectedInstallation?: string,
 ) {
   return runAndroidDeviceRequest(api.server, async () => {
     const before = await withActiveAndroidPushOrigin(api.server, async () => {
       const status = await androidPushStatus(api.server);
       if (!active() || status?.generation !== expected || !explicit && !await wantsFlightAlerts(api)) return null;
-      return await enableAndroidPush(api.server, expected, explicit) ? status : null;
+      const installation = await api.installationToken();
+      if (expectedInstallation && installation !== expectedInstallation) return null;
+      return await enableAndroidPush(api.server, expected, explicit) ? { status, installation } : null;
     });
     if (!before) return false;
     try {
-      await api.registerDevice({ platform: 'android', token, kind: 'alert', binding: expected });
+      await api.registerDevice({ platform: 'android', token, kind: 'alert', binding: expected }, before.installation);
       const confirmed = await withActiveAndroidPushOrigin(api.server, async () => {
         const status = await androidPushStatus(api.server);
         if (!status?.enabled || status.generation !== expected) return false;
@@ -85,9 +88,9 @@ async function registerAndroidDevice(
       if (!confirmed) await retireAndroidPush(api, { origin: api.server, binding: expected });
       return confirmed === true;
     } catch (cause) {
-      if (!before.enabled) {
+      if (!before.status.enabled) {
         const retired = await withActiveAndroidPushOrigin(api.server,
-          () => disableAndroidPush(api.server, expected, before.suppressed));
+          () => disableAndroidPush(api.server, expected, before.status.suppressed));
         await retireAndroidPush(api, retired);
       }
       throw cause;
@@ -114,6 +117,7 @@ export async function changeFlightAlerts(api: PlanoAPI, enable: boolean) {
     return;
   }
 
+  const expectedInstallation = platform === 'android' ? await api.installationToken() : undefined;
   if (platform === 'android') await initializeAndroidPushOrigin(api.server);
   const expected = platform === 'android' ? (await androidPushStatus(api.server))?.generation : undefined;
   if (platform === 'android' && !expected) throw new Error('Protected flight alerts require a current Android build of Plano.');
@@ -128,7 +132,7 @@ export async function changeFlightAlerts(api: PlanoAPI, enable: boolean) {
   const device = await notifications.getDevicePushTokenAsync();
   if (typeof device.data !== 'string' || !device.data) throw new Error('The device didn’t return a push token.');
   if (platform === 'android' && expected) {
-    if (!await registerAndroidDevice(api, device.data, expected, true, () => true)) {
+    if (!await registerAndroidDevice(api, device.data, expected, true, () => true, expectedInstallation)) {
       throw new Error('The active server or alert settings changed. Try enabling alerts again.');
     }
     return;
