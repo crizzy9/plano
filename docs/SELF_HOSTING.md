@@ -322,27 +322,41 @@ configuration and mounted files separately, including the TripIt encryption
 key if configured. For a standalone server, run
 `PLANO_DB=./data/plano.db ./plano backup /private/backup/plano.db`.
 
-To restore, copy `plano.db` into a fresh data directory with no prior SQLite
-sidecar files. Give the container's UID and GID `10001:10001` access to write
-the directory and the database, using your runtime's host UID mapping. Mount
-that directory at `/data` in a Compose override and retain the original
-configuration and mounted keys. Stop the previous instance before starting
-the restored one with the same live configuration. A restore can retry a
-pending push from the backup. Use demo mode and a separate port for a restore
-drill, then check health and open a tracked flight using an existing
-installation before putting the restored instance into service.
+Use `plano restore` to prepare a new database from the backup. It retains
+installations and their tracked flights and clears pickup links, Friends
+invitations, relationships, and pending alerts that depended on those grants.
+Share a new pickup link or send a new invitation when you want to share again.
+A raw file copy can revive a link or Friends grant revoked after the backup.
+Email relay credentials and TripIt subscriptions retain their backup state.
 
-The restored database contains pickup links and Friends grants as of the
-backup. An unexpired pickup link or a Friends grant revoked after the backup
-can become valid again when the restored database serves the original origin.
+Create a fresh output directory with no SQLite sidecars. The restore command
+reads the source snapshot and publishes a private `0600` database at a new
+path on a filesystem that supports hard links. For Compose, give the runtime's
+mapped UID and GID `10001:10001` read access to the snapshot and write access
+to the output directory. Use absolute host paths for both mounts. [Compose run](https://docs.docker.com/reference/cli/docker/compose/run/)
+
+```sh
+docker compose run --build --rm --no-deps \
+  --volume /private/backup:/restore-source:ro \
+  --volume /private/plano-restored:/restore-output \
+  plano restore /restore-source/plano.db /restore-output/plano.db
+
+# Standalone server
+./plano restore /private/backup/plano.db /private/plano-restored/plano.db
+```
+
+Mount the restored directory at `/data` in a Compose override and retain the
+original configuration and mounted keys. Stop the previous instance before
+starting the restored one with the same live configuration. A personally
+authorized pending push from the backup can retry. Use demo mode and a separate
+port for a restore drill, then check health and open a tracked flight using an
+existing installation before putting the restored instance into service.
 
 An installation created after the backup may need to reconnect. Open Plano
 Settings, enter the same server address and its current enrollment code if
 required, then tap **Connect to server**. If the restored server rejects the
-old credential, Plano enrolls a new installation. Flights and sharing state
-from the old installation are only available if the restored database has that
-installation. Enable flight alerts and background calendar sync again if you
-use them.
+old credential, Plano enrolls a new installation with its own flight list.
+Enable flight alerts and background calendar sync again if you use them.
 
 ## Run without containers
 

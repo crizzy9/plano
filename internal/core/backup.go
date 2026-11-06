@@ -22,6 +22,17 @@ func openReadOnly(path string) (*sql.DB, error) {
 // Backup creates a private, standalone SQLite snapshot while Plano is running.
 // It publishes the checked snapshot only if the destination does not exist.
 func Backup(ctx context.Context, source, destination string) error {
+	return writeSnapshot(ctx, source, destination, false)
+}
+
+func writeSnapshot(ctx context.Context, source, destination string, restoring bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	operation := "backup"
+	if restoring {
+		operation = "restore"
+	}
 	source, err := filepath.Abs(source)
 	if err != nil {
 		return err
@@ -41,7 +52,7 @@ func Backup(ctx context.Context, source, destination string) error {
 	destination = filepath.Join(parent, filepath.Base(destination))
 	switch destination {
 	case source + "-wal", source + "-shm", source + "-journal":
-		return errors.New("backup destination is reserved for a SQLite sidecar")
+		return fmt.Errorf("%s destination is reserved for a SQLite sidecar", operation)
 	}
 	dir, err := os.Open(parent)
 	if err != nil {
@@ -49,9 +60,14 @@ func Backup(ctx context.Context, source, destination string) error {
 	}
 	defer dir.Close()
 	if _, err := os.Lstat(destination); err == nil {
-		return fmt.Errorf("backup destination: %w", os.ErrExist)
+		return fmt.Errorf("%s destination: %w", operation, os.ErrExist)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if restoring {
+		if err := checkRestoreSidecars(destination); err != nil {
+			return err
+		}
 	}
 
 	db, err := openReadOnly(source)
@@ -59,7 +75,7 @@ func Backup(ctx context.Context, source, destination string) error {
 		return err
 	}
 	defer db.Close()
-	staging, err := os.MkdirTemp(parent, ".plano-backup-*")
+	staging, err := os.MkdirTemp(parent, ".plano-"+operation+"-*")
 	if err != nil {
 		return err
 	}
@@ -73,20 +89,30 @@ func Backup(ctx context.Context, source, destination string) error {
 	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, path); err != nil {
 		return fmt.Errorf("copy SQLite database: %w", err)
 	}
+	if restoring {
+		if err := scrubRestoredSharing(ctx, path); err != nil {
+			return fmt.Errorf("remove sharing access from restored database: %w", err)
+		}
+	}
 	if err := checkBackup(ctx, path); err != nil {
 		return err
 	}
 	if err := file.Sync(); err != nil {
 		return err
 	}
+	if restoring {
+		if err := checkRestoreSidecars(destination); err != nil {
+			return err
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := os.Link(path, destination); err != nil {
-		return fmt.Errorf("publish backup: %w", err)
+		return fmt.Errorf("publish %s: %w", operation, err)
 	}
 	if err := dir.Sync(); err != nil {
-		return fmt.Errorf("backup was published but directory sync failed: %w", err)
+		return fmt.Errorf("%s was published but directory sync failed: %w", operation, err)
 	}
 	return nil
 }

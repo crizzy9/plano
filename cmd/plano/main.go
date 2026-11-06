@@ -116,9 +116,22 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "restore" {
+		if len(os.Args) != 4 || os.Args[2] == "" || os.Args[3] == "" {
+			fmt.Fprintln(os.Stderr, "usage: plano restore <snapshot.db> <destination.db>")
+			os.Exit(2)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := core.Restore(ctx, os.Args[2], os.Args[3]); err != nil {
+			logger.Error("restore failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	checkOnly := len(os.Args) == 2 && os.Args[1] == "check-config"
 	if len(os.Args) > 1 && !checkOnly {
-		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples [--early]|forward-email|forward-advisory|forward-atfm-slot|forward-flight-observation|forward-swim-position|forward-eurocontrol-position]")
+		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|restore <snapshot.db> <destination.db>|export-delay-samples [--early]|forward-email|forward-advisory|forward-atfm-slot|forward-flight-observation|forward-swim-position|forward-eurocontrol-position]")
 		os.Exit(2)
 	}
 	if err := run(logger, checkOnly); err != nil {
