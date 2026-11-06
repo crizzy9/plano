@@ -58,6 +58,10 @@ func TestBuiltInConnectionDirectionsRetainGeneralTiming(t *testing.T) {
 		{airport: "ATL", arrivalGate: "T4", departureGate: "F3", instruction: "Plane Train", transfer: 50},
 		{airport: "SFO", arrivalGate: "A5", departureGate: "G9", arrivalTerminal: "I", departureTerminal: "I",
 			instruction: "via gate areas B, C, D, E, F", transfer: 35},
+		{airport: "EWR", arrivalGate: "A16", departureGate: "A25", arrivalTerminal: "A", departureTerminal: "Terminal A",
+			instruction: "within Terminal A", transfer: 35},
+		{airport: "JFK", arrivalGate: "A9", departureGate: "B28", arrivalTerminal: "T4", departureTerminal: "Terminal 4",
+			instruction: "main concourse junction", transfer: 35},
 		{airport: "LAX", arrivalGate: "42", departureGate: "64A", arrivalTerminal: "4", departureTerminal: "6",
 			instruction: "bus", transfer: 65},
 	} {
@@ -111,6 +115,33 @@ func TestBuiltInConnectionDirectionsFallBackWithoutUsableEndpoints(t *testing.T)
 	}
 }
 
+func TestBuiltInPublicConnectionRoutesUseGenericRescreeningEstimate(t *testing.T) {
+	now := time.Now()
+	arrival := now.Add(time.Hour)
+	departure := arrival.Add(64 * time.Minute)
+	for _, tc := range []struct {
+		airport, fromTerminal, toTerminal, fromGate, toGate, transport string
+	}{
+		{"EWR", "", "", "A16", "C71", "AirTrain"},
+		{"EWR", "B", "B", "B42", "B55", "checkpoint"},
+		{"JFK", "T4", "5", "A9", "508", "AirTrain"},
+	} {
+		t.Run(tc.airport+"/"+tc.fromGate, func(t *testing.T) {
+			in := feeds.Flight{Destination: tc.airport, ArrivalTerminal: tc.fromTerminal, ArrivalGate: tc.fromGate, ScheduledArrival: &arrival}
+			out := feeds.Flight{Origin: tc.airport, DepartureTerminal: tc.toTerminal, DepartureGate: tc.toGate, ScheduledDeparture: &departure}
+			got, _, err := (Server{}).assessConnection(t.Context(), in, out, now, func(context.Context, feeds.Flight, bool, time.Time) (*core.GatePrediction, error) {
+				return nil, nil
+			})
+			instructions := strings.Join(got.Instructions, " ")
+			if err != nil || got.Precision != "generic" || got.TransferMinutes != defaultConnectionTerminalTransferMinutes ||
+				got.BoardingReserveMinutes != defaultConnectionBoardingReserveMinutes || got.Risk != "Risky" || got.GuideURL == "" ||
+				!strings.Contains(instructions, tc.transport) || strings.Contains(instructions, "stay in the secure area from your arrival gate") {
+				t.Fatalf("unexpected public route %+v, error %v", got, err)
+			}
+		})
+	}
+}
+
 func TestBuiltInConnectionGuidesRespectOperatorGraphs(t *testing.T) {
 	const operatorMap = "https://airport.example/terminal-maps"
 	const officialMap = "https://www.dfwairport.com/map/"
@@ -152,50 +183,60 @@ func TestBuiltInConnectionGuidesRespectOperatorGraphs(t *testing.T) {
 }
 
 func TestBuiltInConnectionGuideFromTrackedFlights(t *testing.T) {
-	ctx := t.Context()
-	store, err := core.Open(filepath.Join(t.TempDir(), "plano.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	token, err := store.CreateInstallation(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	owner, err := store.Installation(ctx, token)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	arrive := now.Add(time.Hour)
-	depart := arrive.Add(64 * time.Minute)
-	for _, flight := range []feeds.Flight{
-		{ID: "inbound", Number: "PL101", Origin: "SFO", Destination: "SEA", DestinationICAO: "KSEA", ArrivalGate: "N12", ScheduledArrival: &arrive, ObservedAt: now, Status: "scheduled"},
-		{ID: "outbound", Number: "PL202", Origin: "SEA", OriginICAO: "KSEA", Destination: "JFK", DepartureGate: "S4", ScheduledDeparture: &depart, ObservedAt: now, Status: "scheduled"},
+	for _, tc := range []struct {
+		airport, fromGate, toGate, mapURL, guideURL, instruction string
+		transfer                                                 int
+	}{
+		{"SEA", "N12", "S4", "https://www.portseattle.org/sea/maps", "https://www.portseattle.org/blog/all-aboard-sea-underground", "Yellow Line", 50},
+		{"EWR", "A16", "C71", "https://www.newarkairport.com/explore-ewr/airport-map", "https://www.newarkairport.com/flights/connections-guide", "covered walk", 65},
+		{"JFK", "A9", "508", "https://www.jfkairport.com/explore-jfk/airport-map", "https://www.jfkairport.com/flights/connections-guide", "free AirTrain", 65},
 	} {
-		if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.Track(ctx, owner, flight.ID, ""); err != nil {
-			t.Fatal(err)
-		}
-	}
-	handler := (Server{Store: store, Logger: slog.New(slog.DiscardHandler)}).Handler()
-	request := httptest.NewRequest(http.MethodGet, "/v1/connections?inbound=inbound&outbound=outbound", nil)
-	request.Header.Set("Authorization", "Bearer "+token)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("connection response %d: %s", response.Code, response.Body)
-	}
-	var got connectionResult
-	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.Risk != "Risky" || got.AvailableMinutes != 64 || got.TransferMinutes != 50 ||
-		got.BoardingReserveMinutes != 15 || got.Precision != "generic" ||
-		got.MapURL != "https://www.portseattle.org/sea/maps" || got.GuideURL != "https://www.portseattle.org/blog/all-aboard-sea-underground" ||
-		!strings.Contains(strings.Join(got.Instructions, " "), "Yellow Line") {
-		t.Fatalf("unexpected tracked connection response: %+v", got)
+		t.Run(tc.airport, func(t *testing.T) {
+			ctx := t.Context()
+			store, err := core.Open(filepath.Join(t.TempDir(), "plano.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			token, err := store.CreateInstallation(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner, err := store.Installation(ctx, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			arrive := now.Add(time.Hour)
+			depart := arrive.Add(64 * time.Minute)
+			for _, flight := range []feeds.Flight{
+				{ID: "inbound", Number: "PL101", Origin: "SFO", Destination: tc.airport, DestinationICAO: "K" + tc.airport, ArrivalGate: tc.fromGate, ScheduledArrival: &arrive, ObservedAt: now, Status: "scheduled"},
+				{ID: "outbound", Number: "PL202", Origin: tc.airport, OriginICAO: "K" + tc.airport, Destination: "BOS", DepartureGate: tc.toGate, ScheduledDeparture: &depart, ObservedAt: now, Status: "scheduled"},
+			} {
+				if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Track(ctx, owner, flight.ID, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			handler := (Server{Store: store, Logger: slog.New(slog.DiscardHandler)}).Handler()
+			request := httptest.NewRequest(http.MethodGet, "/v1/connections?inbound=inbound&outbound=outbound", nil)
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("connection response %d: %s", response.Code, response.Body)
+			}
+			var got connectionResult
+			if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Risk != "Risky" || got.AvailableMinutes != 64 || got.TransferMinutes != tc.transfer ||
+				got.BoardingReserveMinutes != 15 || got.Precision != "generic" || got.MapURL != tc.mapURL || got.GuideURL != tc.guideURL ||
+				!strings.Contains(strings.Join(got.Instructions, " "), tc.instruction) {
+				t.Fatalf("unexpected tracked connection response: %+v", got)
+			}
+		})
 	}
 }

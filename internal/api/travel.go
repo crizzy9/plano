@@ -14,9 +14,11 @@ import (
 )
 
 const (
-	defaultConnectionBoardingReserveMinutes = 15
-	connectionMonitorGrace                  = 2 * time.Hour
-	connectionAlertLifetime                 = 15 * time.Minute
+	defaultConnectionBoardingReserveMinutes  = 15
+	defaultConnectionSameTerminalMinutes     = 35
+	defaultConnectionTerminalTransferMinutes = 65
+	connectionMonitorGrace                   = 2 * time.Hour
+	connectionAlertLifetime                  = 15 * time.Minute
 )
 
 func first(values ...*time.Time) *time.Time {
@@ -207,13 +209,18 @@ func estimateConnectionRoute(in, out feeds.Flight, route ConnectionRoute, config
 	}
 	instructions = append(instructions, "Check the gate and boarding deadline with the airline.")
 	if in.ArrivalTerminal != "" && out.DepartureTerminal != "" {
-		transfer = 35
+		transfer = defaultConnectionSameTerminalMinutes
 		if in.ArrivalTerminal != out.DepartureTerminal {
-			transfer = 65
+			transfer = defaultConnectionTerminalTransferMinutes
 			if len(route.Instructions) == 0 {
 				instructions = append(instructions, fmt.Sprintf("Transfer from terminal %s to terminal %s.", in.ArrivalTerminal, out.DepartureTerminal))
 			}
 		}
+	}
+	// Verified built-in routes distinguish terminal aliases from changes
+	// that require another security checkpoint.
+	if !configured && route.TransferMinutes > 0 {
+		transfer = route.TransferMinutes
 	}
 	instructions = append(instructions, "Allow extra time if your itinerary requires security, passport control or baggage recheck.")
 	if out.DepartureGate != "" {

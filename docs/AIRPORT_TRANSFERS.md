@@ -10,8 +10,9 @@ the connection risk score.
 
 Plano links to official terminal maps by default at SEA, DFW, ATL, SFO, EWR,
 JFK, LAX, and ORD. The map opens on the airport's website. When reported gates
-or terminals identify a supported path, Plano also shows directions for
-travelers who can stay past security.
+or terminals identify a supported path, Plano also shows directions. Secure
+routes apply when the traveler can stay past security. Public routes include
+screening at the onward terminal or gate area.
 
 - SEA directions use walkways and the Blue, Green, and Yellow train lines.
   Follow airport staff and signs for shuttle buses during train interruptions.
@@ -26,6 +27,16 @@ travelers who can stay past security.
   International Terminal. Follow posted detours near Terminal 3. Travelers
   who need U.S. entry processing should complete customs, any bag recheck,
   and screening before following onward gate signs. [SFO connections](https://www.flysfo.com/connecting-flights-faq) · [Official maps](https://www.flysfo.com/maps/static-maps) · [Terminal 3 construction](https://www.flysfo.com/about/construction/terminal-3-construction)
+- EWR public transfers use free AirTrain or a posted replacement service.
+  Terminal A has a separate covered walk or public shuttle to its AirTrain
+  station. Terminal B has separate checkpoints for gates B40–B49, B51–B57,
+  and B60–B68. United can confirm eligibility for its secure shuttle between
+  A28 and C71. [EWR connections](https://www.newarkairport.com/flights/connections-guide) · [AirTrain Newark](https://www.newarkairport.com/transportation/airtrain) · [Terminal B](https://www.newarkairport.com/explore-ewr/terminals/terminal-b)
+- JFK public transfers between Terminals 1, 4, 5, 7, and 8 use free AirTrain
+  and screening at the departure terminal. The secure directions include the
+  Terminal 4 concourse junction and the Terminal 8 underground connector when
+  the reported gates identify those paths. Follow the current signs during
+  construction. [JFK connections](https://www.jfkairport.com/flights/connections-guide) · [AirTrain JFK](https://www.jfkairport.com/transportation/airtrain) · [JFK service advisories](https://www.jfkairport.com/alerts-advisories)
 - LAX directions use the secure terminal connectors and the passenger tunnel
   between Terminal B and its West Gates. Terminal 5 construction closes the
   through tunnel. For transfers between Terminals 4 and 6, confirm the secure
@@ -33,10 +44,12 @@ travelers who can stay past security.
   gates or remote gates in the 50s use the official map and general guidance.
   [LAX connector map](https://www.flylax.com/sites/lax/files/2025-12/Terminal%20Connections%20Pedestrian%20Path%2025-1222.pdf) · [LAWA construction notice](https://www.lawa.org/sites/lawa/files/2025-10/Construction%20Hot%20Topics_10.27.25.pdf) · [Terminal 5 status](https://www.flylax.com/terminals/terminal5)
 
-These directions use the general transfer estimate and boarding reserve for
-risk scoring. The official map remains available when gate information is
-missing or a connection is disrupted. Airport signs and staff can account for
-current closures, screening requirements, and changes to gate assignments.
+These directions use general estimates for risk scoring. Verified public
+routes with another checkpoint use at least the 65-minute terminal-transfer
+estimate, plus the usual boarding reserve. The official map remains available
+when location information is incomplete or a connection is disrupted. Follow
+airport staff for passport control, baggage recheck, and current screening
+requirements.
 
 Operator maps take precedence over the default map. An operator graph with
 checkpoints also takes precedence over built-in directions, including when

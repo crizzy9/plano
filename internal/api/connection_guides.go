@@ -10,18 +10,30 @@ import (
 
 type airportConnectionGuide struct {
 	iata, icao, mapURL, guideURL string
-	directions                   func(in, out feeds.Flight) []string
+	directions                   func(in, out feeds.Flight) connectionGuideDirections
+}
+
+type connectionGuideDirections struct {
+	steps              []string
+	landside           bool
+	secureSameTerminal bool
+}
+
+func secureConnectionDirections(directions func(in, out feeds.Flight) []string) func(feeds.Flight, feeds.Flight) connectionGuideDirections {
+	return func(in, out feeds.Flight) connectionGuideDirections {
+		return connectionGuideDirections{steps: directions(in, out)}
+	}
 }
 
 var airportConnectionGuides = []airportConnectionGuide{
 	{"SEA", "KSEA", "https://www.portseattle.org/sea/maps", "https://www.portseattle.org/blog/all-aboard-sea-underground",
-		func(in, out feeds.Flight) []string { return seaConnectionDirections(in.ArrivalGate, out.DepartureGate) }},
-	{"DFW", "KDFW", "https://www.dfwairport.com/map/", "https://www.dfwairport.com/explore/plan/connect/", dfwConnectionDirections},
-	{"ATL", "KATL", "https://www.atl.com/maps/", "https://www.atl.com/maps-3/", atlConnectionDirections},
-	{"SFO", "KSFO", "https://www.flysfo.com/maps", "https://www.flysfo.com/connecting-flights-faq", sfoConnectionDirections},
-	{iata: "EWR", icao: "KEWR", mapURL: "https://www.newarkairport.com/explore-ewr/airport-map"},
-	{iata: "JFK", icao: "KJFK", mapURL: "https://www.jfkairport.com/explore-jfk/airport-map"},
-	{"LAX", "KLAX", "https://www.flylax.com/lax-terminal-maps", "https://www.flylax.com/sites/lax/files/2025-12/Terminal%20Connections%20Pedestrian%20Path%2025-1222.pdf", laxConnectionDirections},
+		secureConnectionDirections(func(in, out feeds.Flight) []string { return seaConnectionDirections(in.ArrivalGate, out.DepartureGate) })},
+	{"DFW", "KDFW", "https://www.dfwairport.com/map/", "https://www.dfwairport.com/explore/plan/connect/", secureConnectionDirections(dfwConnectionDirections)},
+	{"ATL", "KATL", "https://www.atl.com/maps/", "https://www.atl.com/maps-3/", secureConnectionDirections(atlConnectionDirections)},
+	{"SFO", "KSFO", "https://www.flysfo.com/maps", "https://www.flysfo.com/connecting-flights-faq", secureConnectionDirections(sfoConnectionDirections)},
+	{"EWR", "KEWR", "https://www.newarkairport.com/explore-ewr/airport-map", "https://www.newarkairport.com/flights/connections-guide", ewrConnectionDirections},
+	{"JFK", "KJFK", "https://www.jfkairport.com/explore-jfk/airport-map", "https://www.jfkairport.com/flights/connections-guide", jfkConnectionDirections},
+	{"LAX", "KLAX", "https://www.flylax.com/lax-terminal-maps", "https://www.flylax.com/sites/lax/files/2025-12/Terminal%20Connections%20Pedestrian%20Path%2025-1222.pdf", secureConnectionDirections(laxConnectionDirections)},
 	{iata: "ORD", icao: "KORD", mapURL: "https://maps.ord.flychicago.com/"},
 }
 
@@ -45,8 +57,16 @@ func (r *ConnectionRules) routeForConnection(in, out feeds.Flight) (ConnectionRo
 		// graph has no applicable path, keep the general directions.
 		if !configured && (graph == nil || len(graph.nodes) == 0) && guide.directions != nil &&
 			!connectionDisrupted(in, out) && !connectionDeparted(out) {
-			if steps := guide.directions(in, out); len(steps) != 0 {
-				route.Instructions = append([]string{"Use these directions if you can stay in the secure area from your arrival gate."}, steps...)
+			if directions := guide.directions(in, out); len(directions.steps) != 0 {
+				if directions.landside {
+					route.TransferMinutes = defaultConnectionTerminalTransferMinutes
+					route.Instructions = append([]string{"Complete any required passport control and collect checked bags as directed. Check where to recheck them before going through security."}, directions.steps...)
+				} else {
+					if directions.secureSameTerminal && connectionCode(in.ArrivalTerminal) != "" && connectionCode(out.DepartureTerminal) != "" {
+						route.TransferMinutes = defaultConnectionSameTerminalMinutes
+					}
+					route.Instructions = append([]string{"Use these directions if you can stay in the secure area from your arrival gate."}, directions.steps...)
+				}
 				route.GuideURL = guide.guideURL
 			}
 		}
