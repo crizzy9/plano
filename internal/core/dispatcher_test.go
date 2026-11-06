@@ -74,7 +74,7 @@ func TestDispatcherContinuesWhileAProviderSendIsSlow(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("first job did not start")
 	}
-	f.DepartureGate, f.ObservedAt = "C3", now
+	f.ArrivalGate, f.ObservedAt = "C3", now
 	if err := store.Observe(ctx, f, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +82,114 @@ func TestDispatcherContinuesWhileAProviderSendIsSlow(t *testing.T) {
 	case <-second:
 	case <-ctx.Done():
 		t.Fatal("second job blocked by slow first send")
+	}
+}
+
+func TestDispatcherDefersSameAPNsAlertFamilyWhileSending(t *testing.T) {
+	store, owner, id := dispatcherFixture(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	flight, err := store.Flight(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Track(ctx, owner, id, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Register(ctx, owner, Device{Platform: "ios", Kind: "alert", Token: "ios-family-fixture"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	flight.DepartureGate = "B2"
+	observeFlightAlertFixture(t, store, &flight)
+	jobs, err := store.claimForPlatform(ctx, time.Now().Add(time.Second), 1, "ios")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("claimed %d original jobs, error = %v", len(jobs), err)
+	}
+	original := jobs[0]
+	logger := slog.New(slog.DiscardHandler)
+	started := make(chan push.Message, 1)
+	release, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		store.deliver(ctx, pushFunc(func(ctx context.Context, _ push.Target, message push.Message) error {
+			started <- message
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}), logger, original)
+	}()
+	defer func() { cancel(); <-finished }()
+	var sentOriginal push.Message
+	select {
+	case sentOriginal = <-started:
+	case <-ctx.Done():
+		t.Fatal("original alert did not reach transport")
+	}
+	if sentOriginal.APNsCollapseID == "" || sentOriginal.APNsCollapseID == original.message.CollapseID ||
+		sentOriginal.CollapseID != original.message.CollapseID {
+		t.Fatalf("APNs family %q, sent event ID %q, want original event ID %q", sentOriginal.APNsCollapseID, sentOriginal.CollapseID, original.message.CollapseID)
+	}
+
+	flight.DepartureGate, flight.ArrivalGate = "C3", "D4"
+	observeFlightAlertFixture(t, store, &flight)
+	jobs, err = store.claimForPlatform(ctx, time.Now().Add(time.Second), 2, "ios")
+	if err != nil || len(jobs) != 2 {
+		t.Fatalf("claimed %d replacement and independent jobs, error = %v", len(jobs), err)
+	}
+	var replacement, independent deliveryJob
+	for _, job := range jobs {
+		switch job.message.Body {
+		case "AA2 · C3":
+			replacement = job
+		case "AA2 · D4":
+			independent = job
+		}
+	}
+	if replacement.id == 0 || independent.id == 0 {
+		t.Fatal("missing departure or arrival gate change")
+	}
+	var sent []push.Message
+	sender := pushFunc(func(_ context.Context, _ push.Target, message push.Message) error {
+		sent = append(sent, message)
+		return nil
+	})
+	store.deliver(ctx, sender, logger, replacement)
+	store.deliver(ctx, sender, logger, independent)
+	if len(sent) != 1 || sent[0].Body != independent.message.Body || sent[0].APNsCollapseID == "" ||
+		sent[0].APNsCollapseID == sentOriginal.APNsCollapseID {
+		t.Fatalf("APNs sent while original alert was in flight = %+v, want independent arrival gate alert", sent)
+	}
+	var due, lease int64
+	var attempts, done int
+	var eventID string
+	if err := store.db.QueryRowContext(ctx, `SELECT due,lease_until,attempts,done,json_extract(message,'$.CollapseID') FROM outbox WHERE id=?`, replacement.id).
+		Scan(&due, &lease, &attempts, &done, &eventID); err != nil {
+		t.Fatal(err)
+	}
+	if due <= replacement.message.Timestamp.UnixNano() || lease != 0 || attempts != 0 || done != 0 {
+		t.Fatalf("replacement due=%d lease=%d attempts=%d done=%d, want deferred and unleased", due, lease, attempts, done)
+	}
+	if eventID != replacement.message.CollapseID || eventID == original.message.CollapseID || eventID == sentOriginal.APNsCollapseID {
+		t.Fatalf("replacement persisted event ID %q, want its own event identity", eventID)
+	}
+
+	close(release)
+	select {
+	case <-finished:
+	case <-ctx.Done():
+		t.Fatal("original alert did not finish")
+	}
+	jobs, err = store.claimForPlatform(ctx, time.Unix(0, due), 1, "ios")
+	if err != nil || len(jobs) != 1 || jobs[0].id != replacement.id {
+		t.Fatalf("claimed replacement jobs = %+v, error = %v", jobs, err)
+	}
+	store.deliver(ctx, sender, logger, jobs[0])
+	if len(sent) != 2 || sent[1].Body != replacement.message.Body || sent[1].APNsCollapseID != sentOriginal.APNsCollapseID ||
+		sent[1].CollapseID != eventID {
+		t.Fatalf("APNs sends = %+v, want deferred departure gate alert under the original family ID", sent)
 	}
 }
 

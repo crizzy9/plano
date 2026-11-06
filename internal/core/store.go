@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
@@ -30,6 +31,7 @@ type Store struct {
 	collectDelaySamples bool
 	outboxWake          chan struct{}
 	refreshWake         chan struct{}
+	apnsFlightAlerts    sync.Map
 }
 
 type Details struct {

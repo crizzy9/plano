@@ -334,6 +334,11 @@ foreground. Once the server receives it, earlier iOS registrations are retired
 and late requests at or below the cutoff are ignored. Registrations made after
 re-enabling alerts use newer revisions.
 
+iOS state alerts for the same installation, flight, and category share an APNs
+collapse ID. A newer gate or carousel revision waits for any in-flight request
+in that category. Other alerts can send independently. APNs controls offline
+storage and device delivery. [APNs delivery](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns)
+
 ## Android delivery binding
 
 Use the current backend and Android build together for flight alerts and the

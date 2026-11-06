@@ -13,8 +13,8 @@ const (
 	flightDelayAlertMinutes = 10
 )
 
-// Flight alerts use their timeline event ID as the collapse ID. The join also
-// covers pending alerts created before flight-state reconciliation existed.
+// Flight alerts keep their timeline event ID in the stored collapse field.
+// Provider-specific coalescing is applied only after this join.
 const outboxFlightEvent = `
 LEFT JOIN events e ON e.id=json_extract(o.message,'$.CollapseID') AND e.flight_id=o.flight_id
   AND json_extract(o.message,'$.Kind')='alert'`

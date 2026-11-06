@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -452,6 +453,7 @@ func enqueueWithAdvisories(ctx context.Context, tx *sql.Tx, flightID string, msg
 type deliveryJob struct {
 	id, deviceID, registered, lease int64
 	attempts                        int
+	owner                           string
 	target                          push.Target
 	message                         push.Message
 }
@@ -474,7 +476,7 @@ func (s *Store) claimForPlatform(ctx context.Context, now time.Time, limit int, 
 		args = append(args, platform)
 	}
 	args = append(args, t, limit)
-	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.device_id,d.registered,o.attempts,d.platform,d.token,COALESCE(b.binding,''),o.message
+	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.device_id,d.registered,o.attempts,d.owner,d.platform,d.token,COALESCE(b.binding,''),o.message
 FROM outbox o JOIN devices d ON d.id=o.device_id LEFT JOIN device_bindings b ON b.device_id=d.id
 WHERE o.done=0 AND o.due<=? AND o.expires>? AND o.lease_until<=?`+platformFilter+` AND NOT `+dirtyConnectionAlert+`
 AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
@@ -489,7 +491,8 @@ AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
 	for rows.Next() {
 		var job deliveryJob
 		var raw []byte
-		if err := rows.Scan(&job.id, &job.deviceID, &job.registered, &job.attempts, &job.target.Platform, &job.target.Token, &job.target.Binding, &raw); err != nil {
+		if err := rows.Scan(&job.id, &job.deviceID, &job.registered, &job.attempts, &job.owner,
+			&job.target.Platform, &job.target.Token, &job.target.Binding, &raw); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(raw, &job.message); err != nil {
@@ -596,6 +599,8 @@ func dispatcherPlatforms(sender PushSender) []string {
 	return []string{"ios", "android"}
 }
 
+const dispatchPollInterval = 200 * time.Millisecond
+
 // RunDispatcher reserves send capacity for each provider. The tick recovers
 // persisted jobs and retries if a process-local wake was lost.
 func (s *Store) RunDispatcher(ctx context.Context, sender PushSender, logger *slog.Logger) {
@@ -605,7 +610,7 @@ func (s *Store) RunDispatcher(ctx context.Context, sender PushSender, logger *sl
 		return
 	}
 	perPlatform := slots / len(platforms)
-	tick := time.NewTicker(200 * time.Millisecond)
+	tick := time.NewTicker(dispatchPollInterval)
 	defer tick.Stop()
 	completed := make(chan int, slots)
 	var workers sync.WaitGroup
@@ -677,7 +682,8 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 		}
 		return
 	}
-	if flightAlertSupersedable(flightEventKind) {
+	stateAlert := flightAlertSupersedable(flightEventKind)
+	if stateAlert {
 		var current feeds.Flight
 		if err := json.Unmarshal(latestFlight, &current); err != nil {
 			logger.Error("could not validate flight push state", "job", job.id, "error", err)
@@ -701,6 +707,18 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 			return
 		}
 	}
+	apnsFamily := stateAlert && job.target.Platform == "ios"
+	if apnsFamily {
+		// Keep related APNs requests in submission order. A previous send can
+		// still be in flight after its superseded SQLite row was removed.
+		job.message.APNsCollapseID = hash("apns-flight-alert\x00" + job.owner + "\x00" + job.message.FlightID + "\x00" + flightEventKind)
+		key := hash(strings.ToLower(job.target.Token) + "\x00" + job.message.APNsCollapseID)
+		if _, sending := s.apnsFlightAlerts.LoadOrStore(key, struct{}{}); sending {
+			s.deferAPNsFlightAlert(ctx, logger, job)
+			return
+		}
+		defer s.apnsFlightAlerts.Delete(key)
+	}
 	if hasAdvisoryEvidence {
 		revised, err := outboxAdvisoryRevised(ctx, s.db, job.id, time.Now())
 		if err != nil {
@@ -713,15 +731,19 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 			s.removeObsoletePush(ctx, logger, job)
 			return
 		}
-		// Revocation can cascade the evidence rows while they are being checked.
-		// A missing reference is not enough to establish the lease still exists.
+	}
+	if hasAdvisoryEvidence || apnsFamily {
+		// A revision or revocation can retire the job while evidence is read
+		// or while a previous same-family send releases its gate.
+		var leaseExpiry int64
 		if err := s.db.QueryRowContext(ctx, `SELECT o.expires`+leasedRow,
-			job.id, job.deviceID, job.lease).Scan(&expires); err != nil {
+			job.id, job.deviceID, job.lease).Scan(&leaseExpiry); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
-				logger.Error("could not revalidate advisory push lease", "job", job.id, "error", err)
+				logger.Error("could not revalidate push lease", "job", job.id, "error", err)
 			}
 			return
 		}
+		expires = min(expires, leaseExpiry)
 	}
 	start := time.Now()
 	deadline := time.Unix(0, min(job.lease, expires, start.Add(10*time.Second).UnixNano()))
@@ -747,6 +769,14 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 	}
 	if err := s.resolve(ctx, job, err, time.Now()); err != nil && ctx.Err() == nil {
 		logger.Error("could not resolve push job", "job", job.id, "error", err)
+	}
+}
+
+func (s *Store) deferAPNsFlightAlert(ctx context.Context, logger *slog.Logger, job deliveryJob) {
+	due := time.Now().Add(dispatchPollInterval).UnixNano()
+	if _, err := s.db.ExecContext(ctx, `UPDATE outbox SET lease_until=0,due=MAX(due,?)
+WHERE id=? AND device_id=? AND lease_until=? AND done=0`, due, job.id, job.deviceID, job.lease); err != nil && ctx.Err() == nil {
+		logger.Error("could not defer APNs flight alert", "job", job.id, "error", err)
 	}
 }
 

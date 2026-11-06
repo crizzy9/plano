@@ -63,6 +63,7 @@ type Message struct {
 	Title               string
 	Body                string
 	CollapseID          string
+	APNsCollapseID      string `json:",omitempty"`
 	State               *LiveState
 	Timestamp           time.Time
 	ExpiresAt           time.Time
@@ -149,8 +150,11 @@ func (m Message) prepare(now time.Time) (Message, error) {
 	if m.AlertPhase != "" && (m.AlertKind == "" || !alertLabelPattern.MatchString(m.AlertPhase)) {
 		return m, errors.New("invalid push alert phase")
 	}
-	if len(m.CollapseID) > 64 || strings.IndexFunc(m.CollapseID, unicode.IsControl) >= 0 {
+	if !validCollapseID(m.CollapseID) {
 		return m, errors.New("invalid push collapse ID")
+	}
+	if m.APNsCollapseID != "" && (m.Kind != Alert || m.CollapseID == "" || !validCollapseID(m.APNsCollapseID)) {
+		return m, errors.New("invalid APNs alert collapse ID")
 	}
 	if m.Timestamp.IsZero() {
 		m.Timestamp = now
@@ -178,6 +182,10 @@ func (m Message) prepare(now time.Time) (Message, error) {
 
 var connectionFlightIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 var alertLabelPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+func validCollapseID(id string) bool {
+	return len(id) <= 64 && strings.IndexFunc(id, unicode.IsControl) < 0
+}
 
 func validConnectionFlightID(id string) bool {
 	return id != "." && id != ".." && connectionFlightIDPattern.MatchString(id)

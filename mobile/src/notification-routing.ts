@@ -46,6 +46,13 @@ export function notificationRouteFromResponse(response: NotificationResponse, de
   if (validID(connectionInboundId) && connectionInboundId !== flightId) return { flightId, connectionInboundId };
 }
 
+export function notificationResponseIdentity({ notification }: NotificationResponse): string {
+  const trigger = notification.request.trigger;
+  const eventId = trigger && 'type' in trigger && trigger.type === 'push' ? trigger.payload?.eventId : undefined;
+  if (typeof eventId === 'string' && /^[a-f0-9]{64}$/.test(eventId)) return eventId;
+  return `${notification.request.identifier}\u0000${notification.date}`;
+}
+
 export function notificationDestination(route: AlertRoute, tracked: Flight[]) {
   const flight = tracked.find((candidate) => candidate.id === route.flightId);
   if (!flight) return;
@@ -100,13 +107,12 @@ export function useNotificationRouting(
       void import('expo-notifications').then((notifications) => {
         if (!active) return;
         let handled: string | undefined;
-        const identity = ({ notification }: NotificationResponse) => `${notification.request.identifier}\u0000${notification.date}`;
         function onResponse(response: NotificationResponse, initial = false) {
           const route = notificationRouteFromResponse(response, notifications.DEFAULT_ACTION_IDENTIFIER);
           if (!route) return;
-          const id = identity(response);
+          const id = notificationResponseIdentity(response);
           const last = notifications.getLastNotificationResponse();
-          if (last && identity(last) === id && last.actionIdentifier === response.actionIdentifier) {
+          if (last && notificationResponseIdentity(last) === id && last.actionIdentifier === response.actionIdentifier) {
             notifications.clearLastNotificationResponse();
           }
           if (id === handled) return;

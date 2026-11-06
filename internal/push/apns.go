@@ -146,13 +146,18 @@ func (a *APNs) request(m Message) ([]byte, http.Header, error) {
 	headers.Set("Content-Type", "application/json")
 	headers.Set("apns-expiration", strconv.FormatInt(m.ExpiresAt.Unix(), 10))
 	headers.Set("apns-priority", "10")
-	if m.CollapseID != "" && (m.Kind == Alert || m.Kind == LiveUpdate) {
-		headers.Set("apns-collapse-id", m.CollapseID)
+	collapseID := m.CollapseID
+	if m.Kind == Alert && m.APNsCollapseID != "" {
+		collapseID = m.APNsCollapseID
+	}
+	if collapseID != "" && (m.Kind == Alert || m.Kind == LiveUpdate) {
+		headers.Set("apns-collapse-id", collapseID)
 	}
 	payload := struct {
 		APS                 *apnsAPS `json:"aps"`
 		FlightID            string   `json:"flightId,omitempty"`
 		ConnectionInboundID string   `json:"connectionInboundId,omitempty"`
+		EventID             string   `json:"eventId,omitempty"`
 	}{APS: &aps}
 
 	if m.Kind == Alert {
@@ -162,6 +167,9 @@ func (a *APNs) request(m Message) ([]byte, http.Header, error) {
 		aps.Sound = "default"
 		payload.FlightID = m.FlightID
 		payload.ConnectionInboundID = m.ConnectionInboundID
+		if m.APNsCollapseID != "" {
+			payload.EventID = m.CollapseID
+		}
 	} else {
 		headers.Set("apns-push-type", "liveactivity")
 		headers.Set("apns-topic", a.bundleID+".push-type.liveactivity")

@@ -109,12 +109,15 @@ func TestAPNsWireRequests(t *testing.T) {
 	}
 	const token = "aabbccddeeff00112233445566778899"
 	now := time.Now().Truncate(time.Second)
+	collapsed := fixtureAlert(now)
+	collapsed.APNsCollapseID = strings.Repeat("a", 64)
 	for _, test := range []struct {
 		name, topic, pushType, priority, collapse string
 		message                                   Message
 		inputToken                                int
 	}{
 		{"alert", "com.example.plano", "alert", "10", "event-fixture", fixtureOrderedAlert(now), 0},
+		{"collapsed alert", "com.example.plano", "alert", "10", collapsed.APNsCollapseID, collapsed, 0},
 		{"connection alert", "com.example.plano", "alert", "10", "event-fixture", fixtureConnectionAlert(now), 0},
 		{"start", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 0},
 		{"start requests update token", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 1},
@@ -172,6 +175,7 @@ func TestAPNsWireRequests(t *testing.T) {
 					} `json:"aps"`
 					FlightID            string  `json:"flightId"`
 					ConnectionInboundID *string `json:"connectionInboundId"`
+					EventID             *string `json:"eventId"`
 				}
 				if err := json.Unmarshal(body, &wire); err != nil {
 					t.Fatal(err)
@@ -180,6 +184,10 @@ func TestAPNsWireRequests(t *testing.T) {
 				if want := test.message.ConnectionInboundID; want == "" && wire.ConnectionInboundID != nil ||
 					want != "" && (wire.ConnectionInboundID == nil || *wire.ConnectionInboundID != want) {
 					t.Errorf("invalid APNs connection route: %s", body)
+				}
+				if override := test.message.APNsCollapseID; override == "" && wire.EventID != nil ||
+					override != "" && (wire.EventID == nil || *wire.EventID != test.message.CollapseID) {
+					t.Errorf("invalid APNs event identity: %s", body)
 				}
 				if test.message.Kind == Alert {
 					if wire.FlightID != test.message.FlightID || aps.Alert["title"] != test.message.Title || aps.Alert["body"] != test.message.Body || aps.Event != "" {
@@ -269,8 +277,11 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 	}
 	const device = "fixture:android-registration"
 	const binding = "ffffffff-ffff-4fff-bfff-ffffffffffff"
+	const apnsFamily = "apns-only-alert-family"
 	now := time.Now()
-	messages := []Message{fixtureOrderedAlert(now), fixtureActivity(LiveStart, now), fixtureActivity(LiveUpdate, now), fixtureActivity(LiveEnd, now), fixtureConnectionAlert(now)}
+	ordered := fixtureOrderedAlert(now)
+	ordered.APNsCollapseID = apnsFamily
+	messages := []Message{ordered, fixtureActivity(LiveStart, now), fixtureActivity(LiveUpdate, now), fixtureActivity(LiveEnd, now), fixtureConnectionAlert(now)}
 	var exchanges, sends int
 	client.client = &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		body, err := io.ReadAll(r.Body)
@@ -362,6 +373,9 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 			if got.Android.Collapse != wantCollapse {
 				t.Errorf("FCM collapse key = %q, want %q", got.Android.Collapse, wantCollapse)
 			}
+			if strings.Contains(string(body), apnsFamily) {
+				t.Errorf("FCM request contained the APNs collapse override: %s", body)
+			}
 			if sends == 2 {
 				return fixtureResponse(401, `{"error":{"status":"UNAUTHENTICATED"}}`, nil)
 			}
@@ -444,6 +458,32 @@ func TestAlertOrderingValidatesKindAndTimes(t *testing.T) {
 	prepared, err := message.prepare(now)
 	if err != nil || !prepared.Timestamp.Equal(now) || !prepared.ExpiresAt.Equal(now.Add(15*time.Minute)) {
 		t.Errorf("invalid alert window defaults: %+v, %v", prepared, err)
+	}
+}
+
+func TestAPNsAlertCollapseOverrideValidation(t *testing.T) {
+	now := time.Unix(1800000000, 0)
+	for _, test := range []struct {
+		name, eventID, override string
+	}{
+		{"missing event identity", "", "alert-family"},
+		{"invalid event identity", "event\nidentity", "alert-family"},
+		{"oversized override", "event-id", strings.Repeat("é", 33)},
+		{"override with control", "event-id", "alert\nfamily"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			message := fixtureAlert(now)
+			message.CollapseID = test.eventID
+			message.APNsCollapseID = test.override
+			if _, err := message.prepare(now); err == nil {
+				t.Error("accepted invalid APNs alert collapse override")
+			}
+		})
+	}
+	live := fixtureActivity(LiveUpdate, now)
+	live.APNsCollapseID = "alert-family"
+	if _, err := live.prepare(now); err == nil {
+		t.Error("accepted APNs alert collapse override on live update")
 	}
 }
 
