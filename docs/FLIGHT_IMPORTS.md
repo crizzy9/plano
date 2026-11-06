@@ -27,13 +27,20 @@ or future departures, cancellations, diversions, and unrecognized rows. Imported
 flights appear only in your installation's Passport. Remove an imported record
 from its history row. The import creates no tracked flight or notification.
 
-Flighty exports may contain local times without a UTC offset. Plano uses those
-records for route and aircraft statistics. Elapsed flight hours and arrival
-delay require usable timestamps with offsets. When a completed tracked flight
-matches the route, flight number, and scheduled-departure instant, Passport
-shows the tracked record. The imported copy becomes visible and removable if
-you untrack that flight. If the export supplies only a date or local clock,
-both entries can appear and you can remove the imported copy in Passport.
+Plano uses the departure and arrival airports' time zones to resolve local
+gate times in Flighty exports. When the times can be resolved, Passport counts
+gate-to-gate hours and arrival delays. Missing times, clocks that repeat or
+are skipped during an offset change, and offset-free scheduled midnight
+placeholders are omitted from the time calculations. If you imported a file
+before Plano could resolve local times, import it again to fill in times for
+the matching records with no saved timestamps. Those flights still count as
+already in Passport. [Flighty CSV example](https://github.com/SSARCandy/flighty-web-viewer) · [Observed midnight placeholder](https://github.com/vlvovch/flight-ledger/blob/main/docs/importers.md#flighty)
+
+When a completed tracked flight matches the route, flight number, and
+scheduled-departure instant, Passport shows the tracked record. The imported
+copy becomes visible and removable if you untrack that flight. If a scheduled
+departure instant cannot be resolved, both entries can appear and you can
+remove the imported copy in Passport.
 
 Plano maps imported routes using cached or bundled airport coordinates. The
 bundled catalog includes 8,154 unambiguous IATA and ICAO codes for airports
@@ -42,6 +49,13 @@ coverage. The catalog was derived from the public-domain OurAirports CSV
 downloaded on November 6, 2026, with SHA-256
 `e2e65a3ddaf76170c0e2c373cb8b68597bdf3b59d243c4d6db454d48498ba6d7`.
 [OurAirports data](https://ourairports.com/data/)
+
+The offline time-zone table matches 7,667 of those codes to `airportsdata`
+entries with the same code, coordinates within 8 km, and one unambiguous IANA
+zone. The source CSV at revision `dcc46ce603ca445c0d9d9e074932452ab7d8c2d8`
+has SHA-256 `b218baf3b864af711bfc5c2d6de38f4cdfde873e0c60289fd9c5cc22afe57876`.
+The table uses current airport assignments with historical offset rules for
+the chosen zones. [Source catalog](https://github.com/mborsetti/airportsdata/tree/dcc46ce603ca445c0d9d9e074932452ab7d8c2d8) · [Attribution](../internal/itinerary/passport_airport_zones.LICENSE)
 
 ## Forward confirmation emails
 

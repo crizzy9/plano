@@ -3,12 +3,74 @@ package core
 import (
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
 )
+
+func TestPassportArchiveReimportFillsMissingTimes(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(filepath.Join(t.TempDir(), "archive-reimport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	owner, other := friendInstallation(t, s), friendInstallation(t, s)
+	legacy := feeds.Flight{
+		ID: "archive-" + strings.Repeat("a", 64), Source: "flighty_csv", Number: "UAL14", Status: "arrived",
+		Origin: "EWR", Destination: "LHR", HistoryDate: "2026-01-02", AircraftModel: "Boeing 787-9",
+		ObservedAt: time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC),
+	}
+	for _, installation := range []string{owner, other} {
+		if added, duplicates, err := s.ImportPassportArchive(ctx, installation, []feeds.Flight{legacy}); err != nil || added != 1 || duplicates != 0 {
+			t.Fatalf("seed added %d, duplicates %d, error %v", added, duplicates, err)
+		}
+	}
+	assertHistory := func(installation string, want feeds.Flight) {
+		t.Helper()
+		history, err := s.CompletedFlights(ctx, installation)
+		if err != nil || len(history) != 1 || !reflect.DeepEqual(history[0], want) {
+			t.Fatalf("history = %+v, want %+v, error %v", history, want, err)
+		}
+	}
+	reimport := func(flight feeds.Flight) {
+		t.Helper()
+		if added, duplicates, err := s.ImportPassportArchive(ctx, owner, []feeds.Flight{flight}); err != nil || added != 0 || duplicates != 1 {
+			t.Fatalf("reimport added %d, duplicates %d, error %v", added, duplicates, err)
+		}
+	}
+	departure := time.Date(2026, 1, 2, 13, 50, 0, 0, time.UTC)
+	arrival := time.Date(2026, 1, 2, 21, 5, 0, 0, time.UTC)
+	want := legacy
+	want.ScheduledDeparture = &departure
+	want.ScheduledArrival = &arrival
+	want.ActualDeparture = new(departure.Add(5 * time.Minute))
+	want.ActualArrival = new(arrival.Add(5 * time.Minute))
+	updated := want
+	updated.ObservedAt = legacy.ObservedAt.Add(time.Hour)
+	updated.AircraftModel = "Boeing 777-200"
+	for _, conflict := range []func(*feeds.Flight){
+		func(f *feeds.Flight) { f.HistoryDate = "2026-01-03" },
+		func(f *feeds.Flight) { f.Number = "UAL15" },
+		func(f *feeds.Flight) { f.Origin = "JFK" },
+		func(f *feeds.Flight) { f.Destination = "LGW" },
+	} {
+		copy := updated
+		conflict(&copy)
+		reimport(copy)
+		assertHistory(owner, legacy)
+	}
+	reimport(updated)
+	assertHistory(owner, want)
+	assertHistory(other, legacy)
+
+	updated.ActualArrival = new(arrival.Add(15 * time.Minute))
+	reimport(updated)
+	assertHistory(owner, want)
+}
 
 func TestPassportArchiveIsolationPagingAndTrackedOverlap(t *testing.T) {
 	ctx := t.Context()
@@ -22,7 +84,7 @@ func TestPassportArchiveIsolationPagingAndTrackedOverlap(t *testing.T) {
 	arrival := departure.Add(3 * time.Hour)
 	observed := arrival.Add(time.Hour)
 	tracked := feeds.Flight{
-		ID: "UAL123-completed", Source: "flightaware_aeroapi", Number: "UA123", Status: "arrived",
+		ID: "UAL123-completed", Source: "flightaware_aeroapi", Number: "UA123", ICAONumber: "UAL123", Status: "arrived",
 		Origin: "JFK", OriginICAO: "KJFK", Destination: "ORD", DestinationICAO: "KORD",
 		ObservedAt: observed, ScheduledDeparture: &departure, ActualArrival: &arrival,
 	}
@@ -35,7 +97,7 @@ func TestPassportArchiveIsolationPagingAndTrackedOverlap(t *testing.T) {
 
 	local := departure.In(time.FixedZone("-0400", -4*60*60))
 	overlap := feeds.Flight{
-		ID: "archive-" + strings.Repeat("a", 64), Source: "flighty_csv", Number: tracked.Number, Status: "arrived",
+		ID: "archive-" + strings.Repeat("a", 64), Source: "flighty_csv", Number: tracked.ICAONumber, Status: "arrived",
 		Origin: "KJFK", Destination: "ORD", ObservedAt: observed, ScheduledDeparture: &local,
 		HistoryDate: "2026-06-10",
 	}

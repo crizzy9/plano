@@ -153,18 +153,6 @@ func passportCSVFlight(field func(string) string, now time.Time, today string) (
 		localDate := at.Format(time.DateOnly)
 		return !at.IsZero() && localDate >= firstDate && localDate <= lastDate
 	}
-	if scheduledOutAbsolute && nearDate(scheduledOut) {
-		flight.ScheduledDeparture = new(scheduledOut.UTC())
-	}
-	if actualOutAbsolute && nearDate(actualOut) && !actualOut.After(now) {
-		flight.ActualDeparture = new(actualOut.UTC())
-	}
-	if at, absolute := passportCSVTimestamp(field("gate arrival (scheduled)")); absolute && nearDate(at) && passportCSVArrivalFollowsDeparture(flight.ScheduledDeparture, at) {
-		flight.ScheduledArrival = new(at.UTC())
-	}
-	if at, absolute := passportCSVTimestamp(field("gate arrival (actual)")); absolute && nearDate(at) && !at.After(now) && passportCSVArrivalFollowsDeparture(flight.ActualDeparture, at) {
-		flight.ActualArrival = new(at.UTC())
-	}
 	identity := strings.ToLower(field("flight flighty id"))
 	if passportFlightyID.MatchString(identity) {
 		identity = "flighty-id\x00" + identity
@@ -179,6 +167,32 @@ func passportCSVFlight(field func(string) string, now time.Time, today string) (
 		identity = strings.Join([]string{"flighty-flight", date, flight.Number, from, to, clock}, "\x00")
 	}
 	flight.ID = fmt.Sprintf("archive-%x", sha256.Sum256([]byte(identity)))
+
+	// Derive instants after establishing the archive identity from the export's clocks.
+	resolve := func(at time.Time, absolute bool, airport string, scheduled bool) time.Time {
+		if !nearDate(at) {
+			return time.Time{}
+		}
+		// Older exports can use offset-free midnight for unknown scheduled times.
+		if scheduled && !absolute && at.Hour() == 0 && at.Minute() == 0 && at.Second() == 0 && at.Nanosecond() == 0 {
+			return time.Time{}
+		}
+		return passportCSVInstant(at, absolute, airport)
+	}
+	if at := resolve(scheduledOut, scheduledOutAbsolute, from, true); !at.IsZero() {
+		flight.ScheduledDeparture = new(at)
+	}
+	if at := resolve(actualOut, actualOutAbsolute, from, false); !at.IsZero() && !at.After(now) {
+		flight.ActualDeparture = new(at)
+	}
+	scheduledIn, scheduledInAbsolute := passportCSVTimestamp(field("gate arrival (scheduled)"))
+	if at := resolve(scheduledIn, scheduledInAbsolute, to, true); !at.IsZero() && passportCSVArrivalFollowsDeparture(flight.ScheduledDeparture, at) {
+		flight.ScheduledArrival = new(at)
+	}
+	actualIn, actualInAbsolute := passportCSVTimestamp(field("gate arrival (actual)"))
+	if at := resolve(actualIn, actualInAbsolute, to, false); !at.IsZero() && !at.After(now) && passportCSVArrivalFollowsDeparture(flight.ActualDeparture, at) {
+		flight.ActualArrival = new(at)
+	}
 	return flight, true
 }
 
@@ -195,8 +209,7 @@ func passportCSVFlightNumber(airline, flight string) string {
 	return ""
 }
 
-// Offset-free times can identify records and supply a calendar date. They
-// cannot establish an absolute time without the airport's historical zone.
+// Keep the exported clock and whether it carries an explicit UTC offset.
 func passportCSVTimestamp(value string) (time.Time, bool) {
 	if at, err := time.Parse(time.RFC3339Nano, value); err == nil {
 		_, offset := at.Zone()
@@ -210,6 +223,38 @@ func passportCSVTimestamp(value string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+func passportCSVInstant(at time.Time, absolute bool, airport string) time.Time {
+	if absolute {
+		return at.UTC()
+	}
+	location := passportAirportLocation(airport)
+	if location == nil {
+		return time.Time{}
+	}
+	local := time.Date(at.Year(), at.Month(), at.Day(), at.Hour(), at.Minute(), at.Second(), at.Nanosecond(), location)
+	_, offset := local.Zone()
+	if !local.Add(time.Duration(offset) * time.Second).Equal(at) {
+		return time.Time{} // The exported wall clock falls in a gap.
+	}
+	start, end := local.ZoneBounds()
+	for _, transition := range [2]time.Time{start, end} {
+		if transition.IsZero() {
+			continue
+		}
+		_, before := transition.Add(-time.Nanosecond).Zone()
+		_, after := transition.Zone()
+		if before <= after {
+			continue
+		}
+		lower := transition.UTC().Add(time.Duration(after) * time.Second)
+		upper := transition.UTC().Add(time.Duration(before) * time.Second)
+		if !at.Before(lower) && at.Before(upper) {
+			return time.Time{} // Both offsets produce the exported wall clock.
+		}
+	}
+	return local.UTC()
 }
 
 func passportCSVClockKey(at time.Time, absolute bool) string {

@@ -19,6 +19,7 @@ RUN apt-get update \
     && install -m 0640 -o plano -g plano /dev/null /data/.plano-volume
 
 COPY --from=build /out/plano /out/plano-train /usr/local/bin/
+COPY --from=build /src/internal/itinerary/passport_airport_zones.LICENSE /usr/share/doc/plano/
 ENV PLANO_ADDR=:8080 PLANO_DB=/data/plano.db
 WORKDIR /data
 USER 10001:10001

@@ -41,7 +41,7 @@ func TestPassportArchiveImportIsPrivateAndMapsWithoutProvider(t *testing.T) {
 	}
 	const importPath = "/v1/passport/import"
 	const csv = `Date,Airline,Flight,From,To,Canceled,Gate Departure (Actual),Gate Arrival (Actual),Gate Arrival (Scheduled),PNR,Seat,Notes
-2019-06-02,DL,42,JFK,CDG,false,2019-06-02T20:00:00-04:00,2019-06-03T10:00:00+02:00,2019-06-03T09:45:00+02:00,fixture-booking,32A,fixture-private-note
+2019-06-02,DL,42,JFK,CDG,false,2019-06-02T20:00,2019-06-03T10:00,2019-06-03T09:45,fixture-booking,32A,fixture-private-note
 2018-05-03,,,QZX,ZZZ,false,,,,,,
 2018-05-03,UA,10,SFO,EWR,true,,,,,,
 `

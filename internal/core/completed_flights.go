@@ -88,6 +88,7 @@ const completedFlightsSQL = `WITH owned AS MATERIALIZED (
   FROM compatible
 ), tracked_departures AS MATERIALIZED (
   SELECT upper(trim(json_extract(snapshot,'$.number'))) AS number,
+    upper(trim(json_extract(snapshot,'$.icaoNumber'))) AS icao_number,
     upper(trim(json_extract(snapshot,'$.origin'))) AS origin,
     upper(trim(json_extract(snapshot,'$.originICAO'))) AS origin_icao,
     upper(trim(json_extract(snapshot,'$.destination'))) AS destination,
@@ -109,11 +110,11 @@ const completedFlightsSQL = `WITH owned AS MATERIALIZED (
   SELECT * FROM tracked_completed
   UNION ALL
   SELECT a.id,0,'a.'||a.id,a.snapshot,NULL,a.arrival,0,0 FROM archive a
-  -- Offset-free CSV times carry no comparable departure instant. Keep those
-  -- rows, even when the flight number and route match a tracked flight.
+  -- Keep archive rows without a comparable departure instant, even when
+  -- the flight number and route match a tracked flight.
   WHERE a.departure IS NULL OR a.number='' OR NOT EXISTS (
     SELECT 1 FROM tracked_departures t
-    WHERE t.number=a.number AND a.origin IN (t.origin,t.origin_icao)
+    WHERE a.number IN (t.number,t.icao_number) AND a.origin IN (t.origin,t.origin_icao)
       AND a.destination IN (t.destination,t.destination_icao)
       AND (substr(t.departure,-1)='Z' OR (
         substr(t.departure,-6,1) IN ('+','-') AND substr(t.departure,-3,1)=':'

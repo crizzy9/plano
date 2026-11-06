@@ -20,6 +20,22 @@ CREATE TABLE IF NOT EXISTS passport_archive (
 
 const maxPassportArchiveFlights = 10_000
 
+const fillPassportArchiveTimesSQL = `UPDATE passport_archive
+SET snapshot=json_patch(snapshot,json_object(
+  'scheduledDeparture',json_extract(?3,'$.scheduledDeparture'),
+  'scheduledArrival',json_extract(?3,'$.scheduledArrival'),
+  'actualDeparture',json_extract(?3,'$.actualDeparture'),
+  'actualArrival',json_extract(?3,'$.actualArrival')
+))
+WHERE owner=?1 AND id=?2 AND flight_date=json_extract(?3,'$.historyDate')
+  AND json_extract(snapshot,'$.number')=json_extract(?3,'$.number')
+  AND json_extract(snapshot,'$.origin')=json_extract(?3,'$.origin')
+  AND json_extract(snapshot,'$.destination')=json_extract(?3,'$.destination')
+  AND json_extract(snapshot,'$.scheduledDeparture') IS NULL
+  AND json_extract(snapshot,'$.scheduledArrival') IS NULL
+  AND json_extract(snapshot,'$.actualDeparture') IS NULL
+  AND json_extract(snapshot,'$.actualArrival') IS NULL`
+
 var (
 	ErrPassportArchiveFull = errors.New("passport archive flight limit reached")
 	passportArchiveID      = regexp.MustCompile(`^archive-[a-f0-9]{64}$`)
@@ -61,6 +77,12 @@ VALUES(?,?,?,?) ON CONFLICT(owner,id) DO NOTHING`)
 			return 0, 0, err
 		}
 		if count == 0 {
+			// A reimport can fill timing data omitted by the legacy parser.
+			if flight.ScheduledDeparture != nil || flight.ScheduledArrival != nil || flight.ActualDeparture != nil || flight.ActualArrival != nil {
+				if _, err := tx.ExecContext(ctx, fillPassportArchiveTimesSQL, owner, flight.ID, string(snapshot)); err != nil {
+					return 0, 0, err
+				}
+			}
 			duplicates++
 			continue
 		}

@@ -41,7 +41,7 @@ func TestPassportCSVPreservesOnlyFlightData(t *testing.T) {
 	}
 }
 
-func TestPassportCSVOffsetFreeTimesSupplyDateButNotInstants(t *testing.T) {
+func TestPassportCSVLocalTimesPreserveDateAndArchiveIdentity(t *testing.T) {
 	input := "From,To,Airline,Flight,Gate Departure (Scheduled),Gate Departure (Actual),Gate Arrival (Scheduled),Gate Arrival (Actual)\n" +
 		"EWR,LHR,UAL,14,2026-01-02T08:50,2026-01-02T08:55,2026-01-02T21:05,2026-01-02T21:10\n"
 	result, err := PassportCSV(strings.NewReader(input), passportCSVNow)
@@ -49,9 +49,80 @@ func TestPassportCSVOffsetFreeTimesSupplyDateButNotInstants(t *testing.T) {
 		t.Fatalf("result = %+v, err = %v", result, err)
 	}
 	flight := result.Flights[0]
-	if flight.HistoryDate != "2026-01-02" || flight.ScheduledDeparture != nil || flight.ActualDeparture != nil ||
-		flight.ScheduledArrival != nil || flight.ActualArrival != nil {
-		t.Fatalf("unexpected absolute times or date: %+v", flight)
+	const priorID = "archive-3ee6330f465b7862c81dcc8899bf58c9da9de0bfff687287603444511957b1a8"
+	if flight.HistoryDate != "2026-01-02" || flight.ID != priorID {
+		t.Fatalf("archive date or identity changed: %+v", flight)
+	}
+	assertPassportCSVInstants(t, [4]*time.Time{flight.ScheduledDeparture, flight.ActualDeparture, flight.ScheduledArrival, flight.ActualArrival},
+		[4]string{"2026-01-02T13:50:00Z", "2026-01-02T13:55:00Z", "2026-01-02T21:05:00Z", "2026-01-02T21:10:00Z"})
+}
+
+func TestPassportCSVLocalTimeResolution(t *testing.T) {
+	const header = "Date,From,To,Gate Departure (Scheduled),Gate Departure (Actual),Gate Arrival (Scheduled),Gate Arrival (Actual)\n"
+	for _, tt := range []struct {
+		name string
+		row  string
+		want [4]string
+	}{
+		{
+			name: "date line and ICAO codes",
+			row:  "2025-01-02,NZAA,KLAX,2025-01-02T19:40,2025-01-02T19:50,2025-01-02T11:55,2025-01-02T12:10",
+			want: [4]string{"2025-01-02T06:40:00Z", "2025-01-02T06:50:00Z", "2025-01-02T19:55:00Z", "2025-01-02T20:10:00Z"},
+		},
+		{
+			name: "historical offset",
+			row:  "1985-12-30,KTM,DEL,1985-12-30T11:00,,,",
+			want: [4]string{"1985-12-30T05:30:00Z"},
+		},
+		{
+			name: "spring gap at departure",
+			row:  "2025-03-09,EWR,LHR,2025-03-09T01:59,2025-03-09T02:30,2025-03-09T14:30,",
+			want: [4]string{"2025-03-09T06:59:00Z", "", "2025-03-09T14:30:00Z"},
+		},
+		{
+			name: "fall fold at arrival",
+			row:  "2025-10-25,EWR,LHR,2025-10-25T20:20,2025-10-25T20:30,2025-10-26T01:30,2025-10-26T06:50",
+			want: [4]string{"2025-10-26T00:20:00Z", "2025-10-26T00:30:00Z", "", "2025-10-26T06:50:00Z"},
+		},
+		{
+			name: "unknown zones preserve only the history date",
+			row:  "2025-01-03,QZX,ZZZ,2025-01-03T08:00,2025-01-03T08:05,2025-01-03T17:30,2025-01-03T17:45",
+		},
+		{
+			name: "scheduled local midnight is unknown and actual midnight is usable",
+			row:  "2025-01-03,EWR,LHR,2025-01-03T00:00,2025-01-03T00:00,2025-01-04T00:00:00.000,2025-01-03T12:15",
+			want: [4]string{"", "2025-01-03T05:00:00Z", "", "2025-01-03T12:15:00Z"},
+		},
+		{
+			name: "explicit offset at midnight remains usable",
+			row:  "2025-01-03,QZX,ZZZ,2025-01-03T00:00:00-05:00,,2025-01-04T00:00:00Z,",
+			want: [4]string{"2025-01-03T05:00:00Z", "", "2025-01-04T00:00:00Z"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := PassportCSV(strings.NewReader(header+tt.row+"\n"), passportCSVNow)
+			if err != nil || len(result.Flights) != 1 || result.Skipped != 0 {
+				t.Fatalf("result = %+v, err = %v", result, err)
+			}
+			flight := result.Flights[0]
+			if flight.HistoryDate != tt.row[:len(time.DateOnly)] {
+				t.Fatalf("unexpected date: %s", flight.HistoryDate)
+			}
+			assertPassportCSVInstants(t, [4]*time.Time{flight.ScheduledDeparture, flight.ActualDeparture, flight.ScheduledArrival, flight.ActualArrival}, tt.want)
+		})
+	}
+}
+
+func assertPassportCSVInstants(t *testing.T, instants [4]*time.Time, want [4]string) {
+	t.Helper()
+	var got [4]string
+	for i, instant := range instants {
+		if instant != nil {
+			got[i] = instant.Format(time.RFC3339)
+		}
+	}
+	if got != want {
+		t.Fatalf("gate times = %q, want %q", got, want)
 	}
 }
 
