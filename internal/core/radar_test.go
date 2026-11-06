@@ -4,11 +4,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +202,85 @@ func TestRadarFirstKnownTailClearsUnattributedLegacyTrack(t *testing.T) {
 	detail, err := s.Details(ctx, flight.ID)
 	if err != nil || len(detail.Telemetry) != 0 || detail.Flight.TailNumber != flight.TailNumber {
 		t.Fatalf("newly identified aircraft inherited old telemetry: %+v, %v", detail, err)
+	}
+}
+
+func TestRadarPrunesReceiverHistoryBeforeCorrectedTakeoff(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	original, corrected := now.Add(-time.Hour), now.Add(-time.Minute)
+	before := feeds.Position{At: corrected.Add(-time.Nanosecond), Latitude: 32, Source: "operator_readsb"}
+	boundary := feeds.Position{At: corrected, Latitude: 33, Source: "operator_readsb"}
+	legacy := feeds.Position{At: corrected.Add(time.Nanosecond), Latitude: 34, Source: "operator_readsb"}
+	after := feeds.Position{At: corrected.Add(2 * time.Nanosecond), Latitude: 35, Source: "operator_readsb"}
+	provider := feeds.Position{At: before.At, Latitude: before.Latitude, Source: "flightaware_aeroapi"}
+	for _, tc := range []struct {
+		name             string
+		track            []feeds.Position
+		storedCorrection bool
+		wantProvider     []feeds.Position
+		wantTelemetry    []feeds.Position
+	}{
+		{"cached track", nil, false, []feeds.Position{provider}, []feeds.Position{provider, boundary, legacy, after}},
+		{"updated track", []feeds.Position{before, provider}, false, []feeds.Position{provider}, []feeds.Position{provider, boundary, legacy, after}},
+		{"empty track", []feeds.Position{}, false, nil, []feeds.Position{boundary, after}},
+		{"stored correction", nil, true, []feeds.Position{provider}, []feeds.Position{provider, boundary, legacy, after}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			s, err := Open(filepath.Join(t.TempDir(), "radar.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			flight := feeds.Flight{ID: "radar-takeoff-correction", Number: "XY123", TailNumber: "N1AA", Status: "airborne",
+				ActualTakeoff: &original, ObservedAt: now}
+			if err := s.Observe(ctx, flight, []feeds.Position{provider, before, legacy}, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			token, err := s.CreateInstallation(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner, err := s.Installation(ctx, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Track(ctx, owner, flight.ID, ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := storeRadarSamples(ctx, s, []radarSample{{flight, before}, {flight, boundary}, {flight, after}}); err != nil {
+				t.Fatal(err)
+			}
+			initial, err := s.RadarPage(ctx, owner, flight.ID, nil, nil, nil, nil, 256, 256)
+			if err != nil || initial.ReceiverRevision == nil || !slices.Equal(initial.Positions, []feeds.Position{before, boundary, after}) {
+				t.Fatalf("initial receiver page = %+v, %v", initial, err)
+			}
+			flight.ActualTakeoff, flight.ObservedAt = &corrected, now.Add(time.Second)
+			if tc.storedCorrection {
+				// Simulate a database saved before takeoff corrections pruned fixes.
+				snapshot, err := json.Marshal(flight)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.db.ExecContext(ctx, `UPDATE flights SET snapshot=?,observed_ns=? WHERE id=?`,
+					string(snapshot), flight.ObservedAt.UnixNano(), flight.ID); err != nil {
+					t.Fatal(err)
+				}
+				flight.ObservedAt = flight.ObservedAt.Add(time.Second)
+			}
+			if err := s.Observe(ctx, flight, tc.track, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			page, err := s.RadarPage(ctx, owner, flight.ID, &after.At, initial.ReceiverRevision, nil, nil, 256, 256)
+			if err != nil || page.ReceiverRevision == nil || *page.ReceiverRevision == *initial.ReceiverRevision ||
+				!slices.Equal(page.Positions, []feeds.Position{boundary, after}) || !slices.Equal(page.ProviderPositions, tc.wantProvider) {
+				t.Fatalf("corrected radar page = %+v, %v", page, err)
+			}
+			detail, err := s.DetailsForInstallation(ctx, owner, flight.ID)
+			if err != nil || !slices.Equal(detail.Telemetry, tc.wantTelemetry) {
+				t.Fatalf("corrected detail telemetry = %+v, %v", detail.Telemetry, err)
+			}
+		})
 	}
 }
 

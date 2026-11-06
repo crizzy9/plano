@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -499,7 +500,7 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 	var raw, oldInbound, oldPrediction, oldTrack []byte
 	var estimateAnchors estimateAlertAnchors
 	var previousProvider, lastRadarTail string
-	var retainedDirect, providerChanged bool
+	var retainedDirect, providerChanged, receiverReset, refreshReceiver bool
 	provider := flight.AeroProviderID()
 	err = tx.QueryRowContext(ctx, `SELECT snapshot,inbound,prediction,telemetry,
 COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id),''),
@@ -536,14 +537,16 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 		}
 		aircraftChanged := lastRadarTail != "" && flight.TailNumber != "" && lastRadarTail != flight.TailNumber
 		tailWithdrawn := prior.TailNumber != "" && flight.TailNumber == ""
+		refreshReceiver = prior.ActualTakeoff != nil && flight.ActualTakeoff != nil && flight.ActualTakeoff.After(*prior.ActualTakeoff)
 		// A database from before receiver revisions can have fixes from an
 		// earlier aircraft even when its last snapshot omitted the tail.
 		tailRevealed := lastRadarTail == "" && flight.TailNumber != ""
-		if aircraftChanged || providerChanged || tailWithdrawn || tailRevealed {
+		receiverReset = aircraftChanged || providerChanged || tailWithdrawn || tailRevealed
+		if receiverReset {
 			if !tailWithdrawn || providerChanged {
 				lastRadarTail = flight.TailNumber
 			}
-			if err := resetRadarReceiver(ctx, tx, flight, lastRadarTail); err != nil {
+			if err := reviseRadarReceiver(ctx, tx, flight, lastRadarTail, nil, true); err != nil {
 				return err
 			}
 			if track == nil && (aircraftChanged || providerChanged || tailRevealed) {
@@ -626,16 +629,42 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 		}
 	}
 
-	if len(track) > 0 && len(oldTrack) > 0 {
+	cutoff := flight.ActualTakeoff
+	mergeCachedReceiver := len(track) > 0 && len(oldTrack) > 0
+	// The store serializes cached tracks with encoding/json. Avoid decoding a
+	// provider-only cache when the observation supplies no replacement track.
+	if mergeCachedReceiver || cutoff != nil && bytes.Contains(oldTrack, []byte(`"operator_readsb"`)) {
 		var earlier []feeds.Position
 		if err := json.Unmarshal(oldTrack, &earlier); err != nil {
 			return err
 		}
-		for _, p := range earlier {
-			if p.Source == "operator_readsb" {
-				track = append(track, p)
+		if cutoff != nil {
+			count := len(earlier)
+			earlier = discardLegacyReceiverFixesBefore(earlier, *cutoff)
+			if len(earlier) < count {
+				refreshReceiver = true
+				if track == nil {
+					track = earlier
+				}
 			}
 		}
+		if mergeCachedReceiver {
+			for _, p := range earlier {
+				if p.Source == "operator_readsb" {
+					track = append(track, p)
+				}
+			}
+		}
+	}
+	if cutoff != nil {
+		track = discardLegacyReceiverFixesBefore(track, *cutoff)
+		if prior.ID != "" && !receiverReset {
+			if err := reviseRadarReceiver(ctx, tx, flight, lastRadarTail, cutoff, refreshReceiver); err != nil {
+				return err
+			}
+		}
+	}
+	if mergeCachedReceiver {
 		sort.SliceStable(track, func(i, j int) bool { return track[i].At.Before(track[j].At) })
 		track = slices.CompactFunc(track, func(a, b feeds.Position) bool {
 			return a.At.Equal(b.At) && a.Latitude == b.Latitude && a.Longitude == b.Longitude

@@ -62,14 +62,35 @@ type RadarPage struct {
 	EurocontrolRevision  *int64
 }
 
-func resetRadarReceiver(ctx context.Context, tx *sql.Tx, flight feeds.Flight, lastTail string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM radar_positions WHERE flight_id=?`, flight.ID); err != nil {
+// reviseRadarReceiver invalidates cached pages after pruning receiver history.
+// A nil cutoff removes all fixes for the previous receiver scope.
+func reviseRadarReceiver(ctx context.Context, tx *sql.Tx, flight feeds.Flight, lastTail string, cutoff *time.Time, forceRevision bool) error {
+	query := `DELETE FROM radar_positions WHERE flight_id=?`
+	args := []any{flight.ID}
+	if cutoff != nil {
+		query += ` AND at_ns<?`
+		args = append(args, cutoff.UnixNano())
+	}
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO radar_receiver_revisions(flight_id,revision_ns,last_tail) VALUES(?,?,?)
+	if cutoff != nil && !forceRevision {
+		removed, err := result.RowsAffected()
+		if err != nil || removed == 0 {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO radar_receiver_revisions(flight_id,revision_ns,last_tail) VALUES(?,?,?)
 ON CONFLICT(flight_id) DO UPDATE SET revision_ns=excluded.revision_ns,last_tail=excluded.last_tail`,
 		flight.ID, flight.ObservedAt.UnixNano(), lastTail)
 	return err
+}
+
+func discardLegacyReceiverFixesBefore(positions []feeds.Position, cutoff time.Time) []feeds.Position {
+	return slices.DeleteFunc(positions, func(p feeds.Position) bool {
+		return p.Source == "operator_readsb" && p.At.Before(cutoff)
+	})
 }
 
 func recordRadarSamples(ctx context.Context, tx *sql.Tx, samples []radarSample) error {

@@ -666,6 +666,7 @@ function AirportNotices({ flight, notices }: { flight: Flight; notices: FlightNo
 
 const radarInterval = 8_000;
 const radarPageInterval = 1_000;
+const radarCompletedRetries = 2;
 const radarMaxPoints = 512;
 const radarPageSize = 256;
 
@@ -805,6 +806,7 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
     let foreground = AppState.currentState == null || AppState.currentState === 'active';
     let inProgress = false;
     let supported = true;
+    let consecutiveFailures = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
     async function load() {
       if (!focused || !foreground || inProgress || !supported) return;
@@ -862,15 +864,20 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
         const refreshPrivateScope = changedPrivateScope && result.providerRevision && radarAfter(result.providerRevision, flight.observedAt);
         if (refreshPrivateScope) setPrivateScopeObservedAt(result.providerRevision);
         if ((replaceReceiver && detailRevision !== nextReceiverRevision) || refreshPrivateScope) refreshFlight();
+        consecutiveFailures = 0;
       } catch {
         delay *= 3;
         if (focused && foreground) {
+          consecutiveFailures += 1;
           setCheckedAt(Date.now());
           setStream('interrupted');
         }
       } finally {
         inProgress = false;
-        if (focused && foreground && supported && (inFlight || delay === radarPageInterval)) timer = setTimeout(() => { void load(); }, delay);
+        const retry = consecutiveFailures > 0 && consecutiveFailures <= radarCompletedRetries;
+        if (focused && foreground && supported && (inFlight || delay === radarPageInterval || retry)) {
+          timer = setTimeout(() => { void load(); }, delay);
+        }
       }
     }
     const subscription = AppState.addEventListener('change', (state) => {
