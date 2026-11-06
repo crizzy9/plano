@@ -208,6 +208,7 @@ CREATE TABLE IF NOT EXISTS live_start_confirmations (
   PRIMARY KEY(device_id, flight_id),
   FOREIGN KEY(device_id, flight_id) REFERENCES live_started(device_id, flight_id) ON DELETE CASCADE
 );
+` + iosLiveStartSubmissionSchema + `
 CREATE TABLE IF NOT EXISTS delay_samples (
   flight_id TEXT PRIMARY KEY REFERENCES flights(id), observed_ns INTEGER NOT NULL,
   scheduled_ns INTEGER NOT NULL, features TEXT NOT NULL, departed_ns INTEGER, label_observed_ns INTEGER

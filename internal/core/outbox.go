@@ -138,6 +138,9 @@ ON CONFLICT(device_id) DO UPDATE SET revision=excluded.revision`, deviceID, devi
 ON CONFLICT(owner) DO UPDATE SET binding=excluded.binding`, owner, device.Binding); err != nil {
 				return err
 			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM ios_live_start_submissions WHERE owner=? AND binding<>?`, owner, device.Binding); err != nil {
+				return err
+			}
 		}
 		if device.Binding != "" {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM devices AS d WHERE d.owner=? AND d.platform='ios' AND d.kind IN ('live_start','live_update')
@@ -282,17 +285,13 @@ ON CONFLICT(owner,slot) DO UPDATE SET revision=excluded.revision,device_id=exclu
 }
 
 func carryConfirmedStarts(ctx context.Context, tx *sql.Tx, deviceID, priorID int64) error {
-	// A completed legacy job counts only while its latch still exists. The
-	// dispatcher clears that latch on terminal failure. Pending jobs do not
-	// prevent another start from being queued for the new token.
-	const confirmed = `SELECT flight_id FROM live_start_confirmations WHERE device_id=?
-UNION SELECT l.flight_id FROM live_started l JOIN outbox o ON o.device_id=l.device_id AND o.flight_id=l.flight_id
-WHERE l.device_id=? AND o.done=1 AND json_extract(o.message,'$.Kind')=?`
-	args := []any{deviceID, priorID, priorID, push.LiveStart}
-	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO live_started SELECT ?,flight_id FROM (`+confirmed+`)`, args...); err != nil {
+	// Preserve legacy device-scoped receipts on a slot rotation. Bound
+	// submissions also survive independently of the device row.
+	const confirmed = `SELECT ?,flight_id FROM live_start_confirmations WHERE device_id=?`
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO live_started `+confirmed, deviceID, priorID); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO live_start_confirmations SELECT ?,flight_id FROM (`+confirmed+`)`, args...)
+	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO live_start_confirmations `+confirmed, deviceID, priorID)
 	return err
 }
 
@@ -443,7 +442,9 @@ func enqueueLive(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight, re
 	recentExpiry := now.Add(liveFreshness - liveHeartbeatInterval)
 	// Android records a start when it queues it. Outside the start window,
 	// wait for that job to settle before treating the recipient as active.
-	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.platform,d.kind,t.seat,l.device_id IS NOT NULL, q.device_id IS NOT NULL,
+	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.platform,d.kind,t.seat,l.device_id IS NOT NULL OR EXISTS(
+SELECT 1 FROM ios_live_start_submissions a WHERE d.kind='live_start' AND a.owner=d.owner AND a.flight_id=t.flight_id AND a.binding=b.binding
+), q.device_id IS NOT NULL,
 recent.message, COALESCE(recent.done=0,0)
 FROM devices d JOIN tracked t ON t.owner=d.owner
 LEFT JOIN device_bindings b ON b.device_id=d.id
@@ -693,14 +694,13 @@ func (s *Store) resolve(ctx context.Context, job deliveryJob, sent error, now ti
 	}
 	defer tx.Rollback()
 	var delivery *push.DeliveryError
-	if errors.As(sent, &delivery) && delivery.InvalidToken && (delivery.TokenInvalidatedAt.IsZero() || delivery.TokenInvalidatedAt.UnixNano() >= job.registered) {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE id=? AND registered=?`, job.deviceID, job.registered); err != nil {
-			return err
-		}
-	}
+	_ = errors.As(sent, &delivery)
+	unknownStart := job.message.Kind == push.LiveStart && job.target.Platform == "ios" &&
+		(errors.Is(sent, context.DeadlineExceeded) || errors.Is(sent, context.Canceled) ||
+			delivery != nil && delivery.Status == 0 && delivery.Code == "TransportError")
 	done := true
 	due := now
-	if (delivery != nil && delivery.Retryable || errors.Is(sent, context.DeadlineExceeded)) && job.attempts < 10 {
+	if !unknownStart && (delivery != nil && delivery.Retryable || errors.Is(sent, context.DeadlineExceeded)) && job.attempts < 10 {
 		retryAfter := time.Duration(0)
 		if delivery != nil {
 			retryAfter = delivery.RetryAfter
@@ -712,20 +712,18 @@ func (s *Store) resolve(ctx context.Context, job deliveryJob, sent error, now ti
 	if err != nil {
 		return err
 	}
-	if done && job.message.Kind == push.LiveStart && (sent != nil || job.target.Platform == "ios") {
+	if job.message.Kind == push.LiveStart {
 		updated, err := result.RowsAffected()
 		if err != nil {
 			return err
 		}
-		if updated == 1 {
-			query := `DELETE FROM live_started WHERE device_id=? AND flight_id=?`
-			if sent == nil {
-				query = `INSERT OR IGNORE INTO live_start_confirmations SELECT device_id,flight_id
-FROM live_started WHERE device_id=? AND flight_id=?`
-			}
-			if _, err := tx.ExecContext(ctx, query, job.deviceID, job.message.FlightID); err != nil {
-				return err
-			}
+		if err := resolveLiveStart(ctx, tx, job, updated == 1, done, sent == nil, unknownStart); err != nil {
+			return err
+		}
+	}
+	if delivery != nil && delivery.InvalidToken && (delivery.TokenInvalidatedAt.IsZero() || delivery.TokenInvalidatedAt.UnixNano() >= job.registered) {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE id=? AND registered=?`, job.deviceID, job.registered); err != nil {
+			return err
 		}
 	}
 	return tx.Commit()
@@ -1141,7 +1139,11 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM live_started WHERE (device_id,flight_id) IN (SELECT device_id,flight_id FROM outbox WHERE lease_until<=? AND expires<=? AND done=0 AND json_extract(message,'$.Kind')=?)`, now.UnixNano(), now.UnixNano(), push.LiveStart); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM live_started WHERE (device_id,flight_id) IN (
+SELECT o.device_id,o.flight_id FROM outbox o JOIN devices d ON d.id=o.device_id
+LEFT JOIN outbox_live_start_leases l ON l.outbox_id=o.id
+WHERE o.lease_until<=? AND o.expires<=? AND o.done=0 AND json_extract(o.message,'$.Kind')=?
+AND (d.platform<>'ios' OR `+possibleLiveStart+`=0))`, now.UnixNano(), now.UnixNano(), push.LiveStart); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE lease_until<=? AND (expires<=? OR (done=1 AND due<=?))`, now.UnixNano(), now.UnixNano(), now.Add(-24*time.Hour).UnixNano()); err != nil {

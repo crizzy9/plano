@@ -131,12 +131,12 @@ func TestDispatcherSkipsClaimedRemoteStartAfterLocalActivityRegisters(t *testing
 	}
 }
 
-func TestDispatcherKeepsPossiblySubmittedLiveStartLatchWhenRetryBecomesIneligible(t *testing.T) {
+func TestDispatcherRevalidatesRejectedLiveStartBeforeRetry(t *testing.T) {
 	for _, platform := range []string{"ios", "android"} {
 		t.Run(platform, func(t *testing.T) {
 			fixture := newLiveStartDispatchFixture(t, platform)
 			first := fixture.claimStart(t, fixture.now.Add(time.Second))
-			fixture.deliver(t, first, &push.DeliveryError{Code: "temporary fixture", Retryable: true})
+			fixture.deliver(t, first, &push.DeliveryError{Status: 429, Retryable: true})
 			if len(fixture.sent) != 1 {
 				t.Fatalf("first start sent %d messages, want 1", len(fixture.sent))
 			}
@@ -155,8 +155,8 @@ func TestDispatcherKeepsPossiblySubmittedLiveStartLatchWhenRetryBecomesIneligibl
 			var latched bool
 			if err := fixture.store.db.QueryRowContext(t.Context(), `SELECT EXISTS(
 SELECT 1 FROM live_started WHERE device_id=? AND flight_id=?
-)`, first.deviceID, fixture.flight.ID).Scan(&latched); err != nil || !latched {
-				t.Fatalf("possibly submitted start lost its latch: got %t, %v", latched, err)
+)`, first.deviceID, fixture.flight.ID).Scan(&latched); err != nil || latched != (platform == "android") {
+				t.Fatalf("unexpected latch after ineligible retry on %s: %t, %v", platform, latched, err)
 			}
 		})
 	}

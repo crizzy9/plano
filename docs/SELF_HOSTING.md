@@ -480,9 +480,12 @@ window or the departure time becomes unknown.
 Before submitting a queued start, Plano checks the latest tracked flight and
 drops ineligible requests. An eligible, unsent iOS start picks up the latest
 flight state and seat. Android keeps the original start observation so the
-device can reject it after a local stop. If the provider may already have
-received an earlier attempt, Plano keeps its start record to avoid creating
-a duplicate activity.
+device can reject it after a local stop. For iOS, Plano records each possible
+submission before contacting APNs. A lost response or interrupted attempt
+keeps the record with the tracked flight and notification session, including
+after the start token changes. A definite rejection permits a retry. If a
+start never appears after an interrupted attempt, open the tracked flight
+and start its Live Activity from the app.
 
 iOS state alerts for the same installation, flight, and category share an APNs
 collapse ID. A newer gate or carousel revision waits for any in-flight request

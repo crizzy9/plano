@@ -29,8 +29,8 @@ func retireRemappedFlightJobs(ctx context.Context, tx *sql.Tx, flightID string) 
 	// An older lease without submission tracking or a retry is ambiguous.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM live_started WHERE flight_id=? AND device_id IN (
   SELECT o.device_id FROM outbox o LEFT JOIN outbox_live_start_leases l ON l.outbox_id=o.id
-  WHERE o.flight_id=? AND o.done=0 AND o.attempts=0 AND json_extract(o.message,'$.Kind')=?
-  AND COALESCE(l.may_have_sent,o.lease_until<>0)=0
+	  WHERE o.flight_id=? AND o.done=0 AND json_extract(o.message,'$.Kind')=?
+  AND `+possibleLiveStart+`=0
 )`, flightID, flightID, push.LiveStart); err != nil {
 		return err
 	}
