@@ -245,11 +245,7 @@ func queueCheckIn(ctx context.Context, tx *sql.Tx, flight feeds.Flight, now time
 		return nil
 	}
 	event := Event{ID: hash(flight.ID + "\x00check_in"), Kind: "check_in", Title: "Check-in reminder", Body: "Check check-in availability for " + flight.Number + " with your airline.", At: now}
-	data, err := json.Marshal(event)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO events VALUES(?,?,?,?)`, event.ID, flight.ID, event.At.UnixNano(), string(data)); err != nil {
+	if _, err := insertFlightEvent(ctx, tx, flight.ID, &event); err != nil {
 		return err
 	}
 	rows, err := tx.QueryContext(ctx, `INSERT OR IGNORE INTO check_in_queued(device_id,flight_id)
@@ -313,7 +309,7 @@ func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time
 	return msg
 }
 
-func enqueueLive(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight) error {
+func enqueueLive(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight, remapped bool) error {
 	now := flight.ObservedAt
 	end := finished(flight)
 	if flightBeforeDeparture(flight) {
@@ -337,11 +333,11 @@ recent.message, COALESCE(recent.done=0,0)
 FROM devices d JOIN tracked t ON t.owner=d.owner
 LEFT JOIN live_started l ON l.device_id=d.id AND l.flight_id=t.flight_id
 LEFT JOIN live_token_requests q ON q.device_id=d.id
-LEFT JOIN outbox recent ON recent.id=(SELECT o.id FROM outbox o
+LEFT JOIN outbox recent ON NOT ? AND recent.id=(SELECT o.id FROM outbox o
 WHERE o.device_id=d.id AND o.flight_id=t.flight_id AND o.expires>CASE WHEN d.platform='android' THEN ? ELSE ? END
 AND (json_extract(o.message,'$.Kind') IN ('start','update') OR d.platform='android' AND json_extract(o.message,'$.Kind')='end')
 ORDER BY o.id DESC LIMIT 1)
-WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='live_start' AND NOT EXISTS (SELECT 1 FROM devices u WHERE u.owner=d.owner AND u.kind='live_update' AND u.flight_id=t.flight_id)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, now.UnixNano(), recentExpiry.UnixNano(), flight.ID)
+WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='live_start' AND NOT EXISTS (SELECT 1 FROM devices u WHERE u.owner=d.owner AND u.kind='live_update' AND u.flight_id=t.flight_id)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, remapped, now.UnixNano(), recentExpiry.UnixNano(), flight.ID)
 	if err != nil {
 		return err
 	}
@@ -369,7 +365,7 @@ WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='l
 			}
 			kind = push.LiveStart
 		case end:
-			if finished(prior) || a.platform == "android" && !a.started {
+			if !remapped && finished(prior) || a.platform == "android" && !a.started {
 				continue
 			}
 			kind = push.LiveEnd
@@ -515,6 +511,13 @@ AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
 		return nil, err
 	}
 	for _, job := range jobs {
+		if job.message.Kind == push.LiveStart {
+			// A lease from before submission tracking may already have sent.
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox_live_start_leases
+SELECT id,0 FROM outbox WHERE id=? AND lease_until=0 AND attempts=0`, job.id); err != nil {
+				return nil, err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET lease_until=? WHERE id=?`, job.lease, job.id); err != nil {
 			return nil, err
 		}
@@ -669,6 +672,8 @@ CASE WHEN json_extract(e.data,'$.kind')='delay_prediction' THEN f.prediction END
 CASE WHEN json_extract(e.data,'$.kind')='delay_prediction' THEN f.inbound END,
 EXISTS(SELECT 1 FROM events newer WHERE newer.flight_id=e.flight_id AND newer.at_ns>e.at_ns
   AND json_extract(newer.data,'$.kind')=json_extract(e.data,'$.kind')
+  AND COALESCE((SELECT revision FROM event_revisions WHERE event_id=newer.id),0)=
+    COALESCE((SELECT revision FROM event_revisions WHERE event_id=e.id),0)
   AND EXISTS(SELECT 1 FROM outbox replacement WHERE replacement.device_id=o.device_id AND replacement.flight_id=o.flight_id
     AND json_extract(replacement.message,'$.CollapseID')=newer.id))
 FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leaseFilter,
@@ -816,8 +821,23 @@ CASE WHEN ? THEN (SELECT snapshot FROM flights WHERE id=o.flight_id) END`+leased
 	}
 	job.message.AdvisoryWindow = nil
 	attempt, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	if job.message.Kind == push.LiveStart {
+		// Serialize authorization with retirement so a remap can replace a
+		// leased start if it never reached the transport boundary.
+		result, err := s.db.ExecContext(attempt, `INSERT INTO outbox_live_start_leases
+SELECT o.id,1`+leasedRow+` ON CONFLICT(outbox_id) DO UPDATE SET may_have_sent=1`, job.id, job.deviceID, job.lease)
+		if err != nil {
+			if attempt.Err() == nil {
+				logger.Error("could not authorize live start", "job", job.id, "error", err)
+			}
+			return
+		}
+		if authorized, err := result.RowsAffected(); err != nil || authorized != 1 {
+			return
+		}
+	}
 	err = sender.Send(attempt, job.target, job.message)
-	cancel()
 	if err != nil {
 		logger.Warn("push delivery failed", "job", job.id, "platform", job.target.Platform)
 	} else {

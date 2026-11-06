@@ -224,7 +224,9 @@ func delayForecastTransition(ctx context.Context, tx *sql.Tx, prior, flight feed
 		return Event{}, cleared, nil
 	}
 	var latest sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT MAX(at_ns) FROM events WHERE flight_id=? AND json_extract(data,'$.kind')='delay_prediction'`, flight.ID).Scan(&latest); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT MAX(e.at_ns) FROM events e
+LEFT JOIN event_revisions r ON r.event_id=e.id LEFT JOIN flight_event_revisions f ON f.flight_id=e.flight_id
+WHERE e.flight_id=? AND COALESCE(r.revision,0)=COALESCE(f.revision,0) AND json_extract(e.data,'$.kind')='delay_prediction'`, flight.ID).Scan(&latest); err != nil {
 		return Event{}, false, err
 	}
 	if latest.Valid && decisionAt.UnixNano() <= latest.Int64 {

@@ -148,6 +148,12 @@ CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY, flight_id TEXT NOT NULL REFERENCES flights(id), at_ns INTEGER NOT NULL, data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_by_flight ON events(flight_id, at_ns DESC);
+CREATE TABLE IF NOT EXISTS flight_event_revisions (
+  flight_id TEXT PRIMARY KEY REFERENCES flights(id) ON DELETE CASCADE, revision INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS event_revisions (
+  event_id TEXT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE, revision INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS outbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   flight_id TEXT NOT NULL REFERENCES flights(id), message TEXT NOT NULL,
@@ -157,6 +163,10 @@ CREATE TABLE IF NOT EXISTS outbox (
 CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(due, id) WHERE done = 0;
 CREATE INDEX IF NOT EXISTS outbox_by_device_flight ON outbox(device_id,flight_id,done,id);
 CREATE INDEX IF NOT EXISTS outbox_pending_by_flight ON outbox(flight_id) WHERE done = 0;
+CREATE TABLE IF NOT EXISTS outbox_live_start_leases (
+  outbox_id INTEGER PRIMARY KEY REFERENCES outbox(id) ON DELETE CASCADE,
+  may_have_sent INTEGER NOT NULL CHECK(may_have_sent IN (0,1))
+);
 CREATE TABLE IF NOT EXISTS live_wire_clocks (
   device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   flight_id TEXT NOT NULL REFERENCES flights(id) ON DELETE CASCADE, wire_epoch INTEGER NOT NULL,
@@ -352,11 +362,12 @@ func (s *Store) Details(ctx context.Context, id string) (Details, error) {
 func (s *Store) DetailsForInstallation(ctx context.Context, owner, id string) (Details, error) {
 	d := Details{Events: make([]Event, 0)}
 	var snapshot, telemetry, inbound, prediction []byte
-	var observedNS, receiverRevision int64
+	var observedNS, receiverRevision, eventRevision int64
 	err := s.db.QueryRowContext(ctx, `SELECT snapshot,telemetry,inbound,prediction,observed_ns,
 COALESCE((SELECT revision_ns FROM radar_receiver_revisions WHERE flight_id=flights.id),0),
+COALESCE((SELECT revision FROM flight_event_revisions WHERE flight_id=flights.id),0),
 EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flights WHERE id=?`, owner, id).
-		Scan(&snapshot, &telemetry, &inbound, &prediction, &observedNS, &receiverRevision, &d.Tracked)
+		Scan(&snapshot, &telemetry, &inbound, &prediction, &observedNS, &receiverRevision, &eventRevision, &d.Tracked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return d, ErrNotFound
 	}
@@ -389,7 +400,8 @@ EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flight
 			}
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT data FROM events WHERE flight_id=? ORDER BY at_ns DESC,id LIMIT 200`, id)
+	rows, err := s.db.QueryContext(ctx, `SELECT e.data FROM events e LEFT JOIN event_revisions r ON r.event_id=e.id
+WHERE e.flight_id=? AND COALESCE(r.revision,0)=? ORDER BY e.at_ns DESC,e.id LIMIT 200`, id, eventRevision)
 	if err != nil {
 		return d, err
 	}
@@ -621,6 +633,18 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 			return err
 		}
 	}
+	if providerChanged {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO flight_event_revisions VALUES(?,1)
+ON CONFLICT(flight_id) DO UPDATE SET revision=flight_event_revisions.revision+1`, flight.ID); err != nil {
+			return err
+		}
+		if err := (estimateAlertAnchors{}).save(ctx, tx, flight.ID); err != nil {
+			return err
+		}
+		if err := retireRemappedFlightJobs(ctx, tx, flight.ID); err != nil {
+			return err
+		}
+	}
 
 	if s.collectDelaySamples {
 		if err := recordDelaySample(ctx, tx, flight, inbound, advisories, decisionAt, trackedRefresh); err != nil {
@@ -631,11 +655,13 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 	events := make([]Event, 0, 8)
 	var predictionCleared bool
 	if prior.ID != "" {
-		var nextAnchors estimateAlertAnchors
-		events, nextAnchors = changes(prior, flight, estimateAnchors)
-		if nextAnchors != estimateAnchors {
-			if err := nextAnchors.save(ctx, tx, flight.ID); err != nil {
-				return err
+		if !providerChanged {
+			var nextAnchors estimateAlertAnchors
+			events, nextAnchors = changes(prior, flight, estimateAnchors)
+			if nextAnchors != estimateAnchors {
+				if err := nextAnchors.save(ctx, tx, flight.ID); err != nil {
+					return err
+				}
 			}
 		}
 		event, cleared, err := delayForecastTransition(ctx, tx, prior, flight, oldInbound, oldPrediction, predictionValue, decisionAt, sameSchedule)
@@ -647,9 +673,9 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 			events = append(events, event)
 		}
 	}
-	if prior.ID != "" {
+	if prior.ID != "" && !providerChanged {
 		obsolete := supersededFlightAlertKinds(prior, flight, events)
-		if (predictionCleared || providerChanged) && !slices.Contains(obsolete, "delay_prediction") {
+		if predictionCleared && !slices.Contains(obsolete, "delay_prediction") {
 			obsolete = append(obsolete, "delay_prediction")
 		}
 		if err := pruneSupersededFlightAlerts(ctx, tx, flight.ID, obsolete); err != nil {
@@ -671,7 +697,7 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 			}
 		}
 	}
-	if err := enqueueLive(ctx, tx, prior, flight); err != nil {
+	if err := enqueueLive(ctx, tx, prior, flight, providerChanged); err != nil {
 		return err
 	}
 	return s.commitOutbox(tx)
@@ -685,19 +711,37 @@ func optionalJSON[T any](values []T) (any, error) {
 	return string(raw), err
 }
 
-func saveEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event, notify bool) error {
+func insertFlightEvent(ctx context.Context, tx *sql.Tx, flightID string, event *Event) (bool, error) {
+	var revision int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT revision FROM flight_event_revisions WHERE flight_id=?),0)`, flightID).Scan(&revision); err != nil {
+		return false, err
+	}
 	if event.ID == "" {
 		event.ID = hash(flightID + "\x00" + event.Kind + "\x00" + event.At.Format(time.RFC3339Nano))
 	}
+	if revision != 0 {
+		event.ID = hash(event.ID + "\x00" + strconv.FormatInt(revision, 10))
+	}
 	data, err := json.Marshal(event)
 	if err != nil {
-		return err
+		return false, err
 	}
 	res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO events VALUES(?,?,?,?)`, event.ID, flightID, event.At.UnixNano(), string(data))
 	if err != nil {
-		return err
+		return false, err
 	}
-	if n, err := res.RowsAffected(); err != nil || n == 0 || !notify {
+	inserted, err := res.RowsAffected()
+	if err != nil || inserted == 0 {
+		return false, err
+	}
+	if revision != 0 {
+		_, err = tx.ExecContext(ctx, `INSERT INTO event_revisions VALUES(?,?)`, event.ID, revision)
+	}
+	return true, err
+}
+
+func saveEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event, notify bool) error {
+	if inserted, err := insertFlightEvent(ctx, tx, flightID, &event); err != nil || !inserted || !notify {
 		return err
 	}
 	expires := event.At.Add(2 * time.Hour)
