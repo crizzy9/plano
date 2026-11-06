@@ -9,7 +9,8 @@ the connection risk score.
 ## Official maps and connection directions
 
 Plano links to official terminal maps by default at SEA, DFW, ATL, SFO, EWR,
-JFK, LAX, ORD, DEN, LHR, AMS, and CDG. The map opens on the airport's website.
+JFK, LAX, ORD, DEN, LHR, AMS, CDG, FRA, SIN, YYZ, and HND. The map opens on
+the airport's website.
 When reported gates or terminals identify a supported path, Plano also shows
 directions. Secure routes apply when the traveler can stay past security.
 
@@ -76,6 +77,15 @@ directions. Secure routes apply when the traveler can stay past security.
   from the designated boarding point. Allow for security at your departure
   gate in Terminals 1–3 or central screening in Terminal 4. Check the transfer
   with your airline on separate tickets. [Changi transit guide](https://www.changiairport.com/en/fly/transit-guide.html) · [Terminal transport](https://www.changiairport.com/en/at-changi/transport-and-directions/transferring-between-terminals-jewel.html)
+- YYZ connects Terminals 1 and 3 with the public Terminal Link train. Plano
+  includes Canadian arrival processing for supported connections to domestic
+  flights and U.S. preclearance for eligible routes. Check with the airline
+  about transferring checked bags. [Pearson connections](https://www.torontopearson.com/en/connections) · [Terminal Link](https://www.torontopearson.com/en/transportation-and-parking/terminal-link-train) · [Customs and immigration](https://www.torontopearson.com/en/connections/customs-immigration)
+- HND uses separate routes for domestic and international transfers. Plano
+  includes Japanese arrival processing and domestic screening on supported
+  international-to-domestic connections. Check with your airline about
+  dedicated transfer buses. Public terminal shuttles serve all three
+  terminals. [Haneda connections](https://tokyo-haneda.com/en/flight/transit/index.html) · [Terminal transport](https://tokyo-haneda.com/en/access/travel_between_terminals/index.html)
 
 These directions use general estimates for risk scoring. The default for
 routes that plan for screening or passport control is 65 minutes plus the
@@ -85,8 +95,9 @@ for transfers between 2G and another supported terminal, and 90 minutes for
 the other supported pairs. [Paris Aéroport transfer times, p. 34](https://www.parisaeroport.fr/docs/default-source/professionnel-fichiers/service-aux-entreprises/cdg/adp-april2026--welcome-guide-for-our-business-customers-cdg.pdf?sfvrsn=2a7aa5bd_2#page=34)
 
 The official map remains available when location information is incomplete or
-a connection is disrupted. Follow airport staff for passport control, baggage
-recheck, and current screening requirements.
+a connection is disrupted. After the onward flight departs, Plano keeps the
+known transfer time in its risk assessment. Follow airport staff for passport
+control, baggage recheck, and current screening requirements.
 
 Operator maps take precedence over the default map. An operator graph with
 checkpoints also takes precedence over built-in directions, including when

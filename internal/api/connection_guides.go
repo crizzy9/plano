@@ -44,6 +44,8 @@ var airportConnectionGuides = []airportConnectionGuide{
 	{"CDG", "LFPG", "https://www.parisaeroport.fr/en/passengers/at-the-airport/terminals-map/cdg", "https://wwws.airfrance.us/information/aeroport/conseils-correspondances-paris-cdg-ory", cdgConnectionDirections},
 	{"FRA", "EDDF", "https://www.frankfurt-airport.com/en/at-the-airport/orientation/airport-map.html", "https://www.frankfurt-airport.com/en/flights-and-transfer/transferring-at-fra.html", fraConnectionDirections},
 	{"SIN", "WSSS", "https://www.changiairport.com/en/at-changi/map.html", "https://www.changiairport.com/en/fly/transit-guide.html", sinConnectionDirections},
+	{"YYZ", "CYYZ", "https://www.torontopearson.com/en/while-you-are-here/terminal-maps", "https://www.torontopearson.com/en/connections", yyzConnectionDirections},
+	{"HND", "RJTT", "https://tokyo-haneda.com/en/floor/index.html", "https://tokyo-haneda.com/en/flight/transit/index.html", hndConnectionDirections},
 }
 
 func (g airportConnectionGuide) matches(primary, icao string) bool {
@@ -64,24 +66,26 @@ func (r *ConnectionRules) routeForConnection(in, out feeds.Flight) (ConnectionRo
 		}
 		// Operator checkpoints can account for local restrictions. If their
 		// graph has no applicable path, keep the general directions.
-		if !configured && (graph == nil || len(graph.nodes) == 0) && guide.directions != nil &&
-			!connectionDisrupted(in, out) && !connectionDeparted(out) {
+		if !configured && (graph == nil || len(graph.nodes) == 0) && guide.directions != nil && !connectionDisrupted(in, out) {
 			if directions := guide.directions(in, out); len(directions.steps) != 0 {
 				switch {
-				case directions.landside:
+				case directions.landside, directions.requiresScreening, directions.requiresBorderControl:
 					route.TransferMinutes = defaultConnectionTerminalTransferMinutes
-					route.Instructions = append([]string{"Complete any required passport control and collect checked bags as directed. Check where to recheck them before going through security."}, directions.steps...)
-				case directions.requiresScreening, directions.requiresBorderControl:
-					route.TransferMinutes = defaultConnectionTerminalTransferMinutes
-					route.Instructions = directions.steps
-				default:
-					if directions.secureSameTerminal && connectionCode(in.ArrivalTerminal) != "" && connectionCode(out.DepartureTerminal) != "" {
-						route.TransferMinutes = defaultConnectionSameTerminalMinutes
-					}
-					route.Instructions = append([]string{"Use these directions if you can stay in the secure area from your arrival gate."}, directions.steps...)
+				case directions.secureSameTerminal && connectionCode(in.ArrivalTerminal) != "" && connectionCode(out.DepartureTerminal) != "":
+					route.TransferMinutes = defaultConnectionSameTerminalMinutes
 				}
 				route.TransferMinutes = max(route.TransferMinutes, directions.transferMinutes)
-				route.GuideURL = guide.guideURL
+				// Keep the planning time for scoring after departure.
+				if !connectionDeparted(out) {
+					route.Instructions = directions.steps
+					switch {
+					case directions.landside:
+						route.Instructions = append([]string{"Complete any required passport control and collect checked bags as directed. Check where to recheck them before going through security."}, directions.steps...)
+					case !directions.requiresScreening && !directions.requiresBorderControl:
+						route.Instructions = append([]string{"Use these directions if you can stay in the secure area from your arrival gate."}, directions.steps...)
+					}
+					route.GuideURL = guide.guideURL
+				}
 			}
 		}
 		break

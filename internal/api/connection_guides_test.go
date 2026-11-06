@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -31,6 +32,8 @@ func TestBuiltInConnectionMapsUseReportedAirportCodes(t *testing.T) {
 		{"CDG", "LFPG", "https://www.parisaeroport.fr/en/passengers/at-the-airport/terminals-map/cdg"},
 		{"FRA", "EDDF", "https://www.frankfurt-airport.com/en/at-the-airport/orientation/airport-map.html"},
 		{"SIN", "WSSS", "https://www.changiairport.com/en/at-changi/map.html"},
+		{"YYZ", "CYYZ", "https://www.torontopearson.com/en/while-you-are-here/terminal-maps"},
+		{"HND", "RJTT", "https://tokyo-haneda.com/en/floor/index.html"},
 	} {
 		t.Run(tc.iata, func(t *testing.T) {
 			for _, codes := range []struct{ primary, icao string }{{primary: strings.ToLower(tc.iata)}, {icao: tc.icao}} {
@@ -79,6 +82,20 @@ func TestBuiltInSchengenTransferPlanning(t *testing.T) {
 				t.Fatalf("unexpected transfer plan %+v, %v", got, err)
 			}
 		})
+	}
+}
+
+func TestBuiltInConnectionPlanningAfterDeparture(t *testing.T) {
+	now := time.Date(2026, time.November, 6, 18, 0, 0, 0, time.UTC)
+	arrival, departure := now.Add(-90*time.Minute), now.Add(-25*time.Minute)
+	in := feeds.Flight{Destination: "LHR", ArrivalTerminal: "5", ActualArrival: &arrival}
+	out := feeds.Flight{Origin: "LHR", DepartureTerminal: "5", ActualDeparture: &departure}
+	got, assessment, err := (Server{}).assessConnection(t.Context(), in, out, now,
+		func(context.Context, feeds.Flight, bool, time.Time) (*core.GatePrediction, error) { return nil, nil })
+	if err != nil || got.Risk != "Missed" || got.AvailableMinutes != 65 || got.TransferMinutes != 65 ||
+		got.BoardingReserveMinutes != 15 || got.MapURL == "" || got.GuideURL != "" || assessment.Monitorable ||
+		strings.Contains(strings.Join(got.Instructions, " "), "Flight Connections") {
+		t.Fatalf("unexpected departed connection: %+v, %+v, %v", got, assessment, err)
 	}
 }
 
@@ -225,6 +242,7 @@ func TestBuiltInConnectionGuidesRespectOperatorGraphs(t *testing.T) {
 func TestBuiltInConnectionGuideFromTrackedFlights(t *testing.T) {
 	for _, tc := range []struct {
 		airport, icao, fromGate, toGate, fromTerminal, toTerminal, mapURL, guideURL, instruction string
+		inOrigin, inOriginICAO, outDestination, outDestinationICAO                               string
 		transfer                                                                                 int
 	}{
 		{airport: "SEA", icao: "KSEA", fromGate: "N12", toGate: "S4", mapURL: "https://www.portseattle.org/sea/maps",
@@ -239,6 +257,14 @@ func TestBuiltInConnectionGuideFromTrackedFlights(t *testing.T) {
 			guideURL: "https://www.flydenver.com/about-den/facilities/#train", instruction: "Train to the Gates", transfer: 50},
 		{airport: "LHR", icao: "EGLL", fromTerminal: "Terminal 5", toTerminal: "Terminal 5", mapURL: "https://www.heathrow.com/at-the-airport/airport-maps",
 			guideURL: "https://www.heathrow.com/connecting-flights", instruction: "security", transfer: 65},
+		{airport: "YYZ", icao: "CYYZ", fromGate: "D38", toGate: "A7", fromTerminal: "Terminal 1", toTerminal: "Terminal 3",
+			inOrigin: "YVR", inOriginICAO: "CYVR", outDestination: "LGA", outDestinationICAO: "KLGA",
+			mapURL: "https://www.torontopearson.com/en/while-you-are-here/terminal-maps", guideURL: "https://www.torontopearson.com/en/connections",
+			instruction: "Terminal Link train from Terminal 1 to Terminal 3", transfer: 65},
+		{airport: "HND", icao: "RJTT", fromGate: "112", toGate: "60", fromTerminal: "3", toTerminal: "Terminal 2",
+			inOrigin: "LAX", inOriginICAO: "KLAX", outDestination: "OKA", outDestinationICAO: "ROAH",
+			mapURL: "https://tokyo-haneda.com/en/floor/index.html", guideURL: "https://tokyo-haneda.com/en/flight/transit/index.html",
+			instruction: "Complete Japanese immigration", transfer: 65},
 	} {
 		t.Run(tc.airport, func(t *testing.T) {
 			ctx := t.Context()
@@ -259,9 +285,9 @@ func TestBuiltInConnectionGuideFromTrackedFlights(t *testing.T) {
 			arrive := now.Add(time.Hour)
 			depart := arrive.Add(64 * time.Minute)
 			for _, flight := range []feeds.Flight{
-				{ID: "inbound", Number: "PL101", Origin: "SFO", Destination: tc.airport, DestinationICAO: tc.icao, ArrivalGate: tc.fromGate,
+				{ID: "inbound", Number: "PL101", Origin: cmp.Or(tc.inOrigin, "SFO"), OriginICAO: tc.inOriginICAO, Destination: tc.airport, DestinationICAO: tc.icao, ArrivalGate: tc.fromGate,
 					ArrivalTerminal: tc.fromTerminal, ScheduledArrival: &arrive, ObservedAt: now, Status: "scheduled"},
-				{ID: "outbound", Number: "PL202", Origin: tc.airport, OriginICAO: tc.icao, Destination: "BOS", DepartureGate: tc.toGate,
+				{ID: "outbound", Number: "PL202", Origin: tc.airport, OriginICAO: tc.icao, Destination: cmp.Or(tc.outDestination, "BOS"), DestinationICAO: tc.outDestinationICAO, DepartureGate: tc.toGate,
 					DepartureTerminal: tc.toTerminal, ScheduledDeparture: &depart, ObservedAt: now, Status: "scheduled"},
 			} {
 				if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
