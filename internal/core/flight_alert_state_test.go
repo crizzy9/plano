@@ -114,7 +114,8 @@ func TestSupersededFlightAlertKindsKeepMilestonesAndMinorEstimateChanges(t *test
 		t.Run(test.name, func(t *testing.T) {
 			after := before
 			test.change(&after)
-			events := append(changes(before, after), test.extra...)
+			events, _ := changes(before, after, estimateAlertAnchors{})
+			events = append(events, test.extra...)
 			if got := supersededFlightAlertKinds(before, after, events); !slices.Equal(got, test.want) {
 				t.Errorf("superseded kinds = %v, want %v", got, test.want)
 			}

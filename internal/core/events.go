@@ -19,7 +19,7 @@ type Event struct {
 	advisoryEvidence []forecastAdvisory
 }
 
-func changes(before, after feeds.Flight) []Event {
+func changes(before, after feeds.Flight, anchors estimateAlertAnchors) ([]Event, estimateAlertAnchors) {
 	events := make([]Event, 0, 8)
 	add := func(kind, title, body string) {
 		events = append(events, Event{Kind: kind, Title: title, Body: body, At: after.ObservedAt})
@@ -39,21 +39,7 @@ func changes(before, after feeds.Flight) []Event {
 		}
 		add(item.kind, title, fmt.Sprintf("%s · %s", after.Number, item.current))
 	}
-	for _, item := range []struct {
-		kind, title               string
-		prior, current, scheduled *time.Time
-	}{
-		{"etd", "Departure estimate changed", before.EstimatedDeparture, after.EstimatedDeparture, after.ScheduledDeparture},
-		{"eta", "Arrival estimate changed", before.EstimatedArrival, after.EstimatedArrival, after.ScheduledArrival},
-	} {
-		prior := firstTime(item.prior, item.scheduled)
-		if item.current != nil && prior != nil {
-			difference := item.current.Sub(*prior).Round(time.Minute)
-			if difference >= 5*time.Minute || difference <= -5*time.Minute {
-				add(item.kind, item.title, fmt.Sprintf("%s · %s", after.Number, signedMinutes(difference)))
-			}
-		}
-	}
+	anchors.appendChanges(before, after, add)
 	for _, item := range []struct {
 		kind, title    string
 		prior, current *time.Time
@@ -77,7 +63,7 @@ func changes(before, after feeds.Flight) []Event {
 			add(after.Status, title, after.Number)
 		}
 	}
-	return events
+	return events, anchors
 }
 
 func signedMinutes(delta time.Duration) string {

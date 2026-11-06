@@ -85,6 +85,10 @@ CREATE TABLE IF NOT EXISTS flights (
   id TEXT PRIMARY KEY, snapshot TEXT NOT NULL, observed_ns INTEGER NOT NULL,
   telemetry TEXT NOT NULL DEFAULT '[]', inbound TEXT NOT NULL DEFAULT '[]', prediction TEXT NOT NULL DEFAULT 'null'
 );
+CREATE TABLE IF NOT EXISTS flight_estimate_anchors (
+  flight_id TEXT PRIMARY KEY REFERENCES flights(id) ON DELETE CASCADE,
+  departure DATETIME, arrival DATETIME
+);
 CREATE TABLE IF NOT EXISTS pushed_advisories (
   source TEXT NOT NULL, id TEXT NOT NULL, observed_ns INTEGER NOT NULL,
   expires_ns INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(source,id)
@@ -431,10 +435,13 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 	}
 	var prior feeds.Flight
 	var raw, oldInbound, oldPrediction, oldTrack []byte
+	var estimateAnchors estimateAlertAnchors
 	var previousProvider string
 	provider := flight.AeroProviderID()
 	err = tx.QueryRowContext(ctx, `SELECT snapshot,inbound,prediction,telemetry,
-COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id),'') FROM flights WHERE id=?`, flight.ID).Scan(&raw, &oldInbound, &oldPrediction, &oldTrack, &previousProvider)
+COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id),''), anchors.departure, anchors.arrival
+FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flights.id WHERE flights.id=?`, flight.ID).
+		Scan(&raw, &oldInbound, &oldPrediction, &oldTrack, &previousProvider, &estimateAnchors.departure, &estimateAnchors.arrival)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -565,7 +572,13 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 	events := make([]Event, 0, 8)
 	var predictionCleared bool
 	if prior.ID != "" {
-		events = changes(prior, flight)
+		var nextAnchors estimateAlertAnchors
+		events, nextAnchors = changes(prior, flight, estimateAnchors)
+		if nextAnchors != estimateAnchors {
+			if err := nextAnchors.save(ctx, tx, flight.ID); err != nil {
+				return err
+			}
+		}
 		var old *Prediction
 		if err := json.Unmarshal(oldPrediction, &old); err != nil {
 			return err

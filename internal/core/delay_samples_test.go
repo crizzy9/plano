@@ -124,3 +124,47 @@ func TestGateHistoryUsesSameRouteWithObservedOperation(t *testing.T) {
 		t.Fatalf("assigned gate replaced: %v (%v)", gate, err)
 	}
 }
+
+func TestGateHistoryUsesTheReportedTerminalForEachDirection(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(filepath.Join(t.TempDir(), "gates.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	flight := feeds.Flight{ID: "upcoming", Number: "UA123", Origin: "SFO", Destination: "EWR", Status: "scheduled",
+		DepartureTerminal: "C", ArrivalTerminal: "d"}
+	for i := range 9 {
+		past := flight
+		actual := now.AddDate(0, 0, -i-1)
+		past.ID, past.Status, past.ObservedAt = actual.Format(time.DateOnly), "arrived", actual
+		past.ActualDeparture, past.ActualArrival = new(actual.Add(-6*time.Hour)), &actual
+		past.DepartureTerminal, past.DepartureGate = "A", "A12"
+		past.ArrivalTerminal, past.ArrivalGate = "B", "B7"
+		switch {
+		case i < 3:
+			past.DepartureTerminal, past.DepartureGate = " c ", "C12"
+		case i < 6:
+			past.ArrivalTerminal, past.ArrivalGate = " D ", "D22"
+		default:
+			past.DepartureTerminal, past.ArrivalTerminal = "", ""
+		}
+		if err := store.Observe(ctx, past, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		arrival bool
+		gate    string
+	}{{false, "C12"}, {true, "D22"}} {
+		got, err := store.PredictGate(ctx, flight, tc.arrival, now)
+		if err != nil || got == nil || got.Gate != tc.gate || got.Samples != 3 || got.Share != 1 {
+			t.Fatalf("arrival=%v: prediction = %+v, error = %v", tc.arrival, got, err)
+		}
+	}
+	flight.ArrivalTerminal = "E"
+	if got, err := store.PredictGate(ctx, flight, true, now); err != nil || got != nil {
+		t.Fatalf("prediction without compatible terminal history = %+v, error = %v", got, err)
+	}
+}
