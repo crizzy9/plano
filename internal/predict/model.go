@@ -69,6 +69,15 @@ func (f Features) operationalBaseline() float64 {
 	return max(f.physicalFloor(), f.AirlineDelayMinutes, f.AirportDelayMinutes)
 }
 
+// ElapsedDepartureDelay is the delay already observed on a flight awaiting
+// gate-out at statusAt. An absent predeparture observation supplies no floor.
+func ElapsedDepartureDelay(scheduledDeparture, statusAt time.Time) float64 {
+	if scheduledDeparture.IsZero() || statusAt.IsZero() {
+		return 0
+	}
+	return max(0, statusAt.Sub(scheduledDeparture).Minutes())
+}
+
 type term struct {
 	Feature     string  `json:"feature"`
 	Mean        float64 `json:"mean"`

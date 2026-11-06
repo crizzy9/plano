@@ -23,6 +23,12 @@ func TestCaptureDelaySamplesWithObservedLabel(t *testing.T) {
 	depart := time.Date(2026, 11, 12, 19, 30, 0, 0, time.UTC)
 	eta := depart.Add(10 * time.Minute)
 	flight := feeds.Flight{ID: "test-provider-instance", Number: "XY123", Origin: "JFK", Destination: "LHR", Status: "scheduled", ObservedAt: depart.Add(-time.Hour), ScheduledDeparture: &depart, EstimatedDeparture: &eta}
+	ordinary := flight
+	ordinary.ObservedAt = ordinary.ObservedAt.Add(-time.Minute)
+	ordinary.EstimatedDeparture = nil
+	if err := store.Observe(ctx, ordinary, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.observeTracked(ctx, flight, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -49,6 +55,36 @@ func TestCaptureDelaySamplesWithObservedLabel(t *testing.T) {
 	}
 	if rows[0].Features.AirlineDelayMinutes != 10 || !rows[0].DepartedAt.Equal(actual) || rows[0].LabelObservedAt == nil || !rows[0].LabelObservedAt.Equal(labelTime) {
 		t.Fatalf("unexpected example %#v", rows[0])
+	}
+	read := func() predict.Example {
+		t.Helper()
+		output.Reset()
+		if err := ExportDelaySamples(ctx, path, &output); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := predict.ReadExamples(&output)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("invalid export: %+v %v", rows, err)
+		}
+		return rows[0]
+	}
+	rescheduled := depart.Add(90 * time.Minute)
+	flight.ScheduledDeparture, flight.ObservedAt, flight.ActualDeparture = &rescheduled, labelTime.Add(time.Minute), nil
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); !got.DepartedAt.Equal(actual) || got.LabelObservedAt == nil || !got.LabelObservedAt.Equal(labelTime) {
+		t.Fatalf("missing gate-out changed the label: %+v", got)
+	}
+	corrected := actual.Add(time.Minute)
+	flight.ObservedAt, flight.ActualDeparture = labelTime.Add(2*time.Minute), &corrected
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := read()
+	if !got.DepartedAt.Equal(corrected) || got.LabelObservedAt == nil || !got.LabelObservedAt.Equal(flight.ObservedAt) ||
+		!got.ScheduledDeparture.Equal(depart) || !got.ObservedAt.Equal(depart.Add(-time.Hour)) || got.Features.AirlineDelayMinutes != 10 {
+		t.Fatalf("correction changed the original forecast or lost its revised outcome: %+v", got)
 	}
 }
 
@@ -94,6 +130,117 @@ func TestAeroCallbackCompletesAnExistingDelaySample(t *testing.T) {
 	rows, err := predict.ReadExamples(&output)
 	if err != nil || len(rows) != 1 || rows[0].LabelObservedAt == nil || !rows[0].LabelObservedAt.Equal(label) {
 		t.Fatalf("callback label was not kept: %+v %v", rows, err)
+	}
+	flight.Status, flight.ActualDeparture, flight.ObservedAt = "cancelled", nil, label.Add(2*time.Minute)
+	if err := store.observe(ctx, flight, nil, nil, nil, false, flight.ID); err != nil {
+		t.Fatal(err)
+	}
+	var cleared int
+	if err := store.db.QueryRowContext(ctx, `SELECT departed_ns IS NULL AND label_observed_ns IS NULL FROM delay_samples WHERE flight_id=?`, flight.ID).Scan(&cleared); err != nil || cleared != 1 {
+		t.Fatalf("cancellation did not clear the captured outcome: %d %v", cleared, err)
+	}
+	output.Reset()
+	if err := ExportDelaySamples(ctx, path, &output); err != nil || output.Len() != 0 {
+		t.Fatalf("cancelled sample exported: %v %s", err, output.String())
+	}
+}
+
+func TestDelaySampleClearsInvalidGateOutCorrections(t *testing.T) {
+	schedule := time.Date(2026, 11, 12, 19, 30, 0, 0, time.UTC)
+	forecastAt := schedule.Add(-time.Hour)
+	for _, tc := range []struct {
+		name     string
+		actual   time.Time
+		observed time.Time
+	}{
+		{"at forecast", forecastAt, schedule.Add(time.Hour)},
+		{"late relative to original schedule", schedule.Add(25 * time.Hour), schedule.Add(26 * time.Hour)},
+		{"after observation", schedule.Add(2 * time.Hour), schedule.Add(time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "test.db")
+			store, err := OpenWithOptions(path, StoreOptions{CollectDelaySamples: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			flight := feeds.Flight{ID: "XY123-correction", Number: "XY123", Status: "scheduled", ObservedAt: forecastAt, ScheduledDeparture: &schedule}
+			if err := store.observeTracked(ctx, flight, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			actual := schedule.Add(10 * time.Minute)
+			flight.Status, flight.ObservedAt, flight.ActualDeparture = "taxi_out", actual.Add(time.Minute), &actual
+			if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			flight.ScheduledDeparture, flight.ObservedAt, flight.ActualDeparture = &tc.actual, tc.observed, &tc.actual
+			if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			var cleared int
+			if err := store.db.QueryRowContext(ctx, `SELECT departed_ns IS NULL AND label_observed_ns IS NULL FROM delay_samples WHERE flight_id=?`, flight.ID).Scan(&cleared); err != nil || cleared != 1 {
+				t.Fatalf("correction did not clear the captured outcome: %d %v", cleared, err)
+			}
+			var output bytes.Buffer
+			if err := ExportDelaySamples(ctx, path, &output); err != nil || output.Len() != 0 {
+				t.Fatalf("invalid sample exported: %v %s", err, output.String())
+			}
+			flight.ObservedAt, flight.ActualDeparture = tc.observed.Add(time.Minute), &actual
+			if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := ExportDelaySamples(ctx, path, &output); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := predict.ReadExamples(&output)
+			if err != nil || len(rows) != 1 || !rows[0].ScheduledDeparture.Equal(schedule) || !rows[0].DepartedAt.Equal(actual) ||
+				rows[0].LabelObservedAt == nil || !rows[0].LabelObservedAt.Equal(flight.ObservedAt) {
+				t.Fatalf("valid correction did not relabel the original forecast: %+v %v", rows, err)
+			}
+		})
+	}
+}
+
+func TestExportDelaySamplesSkipsLegacyContradictedLabels(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "test.db")
+	store, err := OpenWithOptions(path, StoreOptions{CollectDelaySamples: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	schedule := time.Date(2026, 11, 12, 19, 30, 0, 0, time.UTC)
+	actual := schedule.Add(10 * time.Minute)
+	for _, id := range []string{"cancelled-fixture", "corrected-fixture", "missing-fixture"} {
+		flight := feeds.Flight{ID: id, Status: "scheduled", ObservedAt: schedule.Add(-time.Hour), ScheduledDeparture: &schedule}
+		if err := store.observeTracked(ctx, flight, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		flight.Status, flight.ObservedAt, flight.ActualDeparture = "taxi_out", actual.Add(time.Minute), &actual
+		if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Simulate observations stored by an older collector or with capture disabled.
+	store.collectDelaySamples = false
+	for _, flight := range []feeds.Flight{
+		{ID: "cancelled-fixture", Status: "cancelled"},
+		{ID: "corrected-fixture", Status: "taxi_out", ActualDeparture: new(actual.Add(time.Second))},
+		{ID: "missing-fixture", Status: "taxi_out"},
+	} {
+		flight.ObservedAt = actual.Add(2 * time.Minute)
+		if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var output bytes.Buffer
+	if err := ExportDelaySamples(ctx, path, &output); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := predict.ReadExamples(&output)
+	if err != nil || len(rows) != 1 || rows[0].FlightID != hash("delay-sample\x00missing-fixture") || !rows[0].DepartedAt.Equal(actual) {
+		t.Fatalf("unexpected labels after legacy reconciliation: %+v %v", rows, err)
 	}
 }
 

@@ -296,7 +296,9 @@ Set `PLANO_COLLECT_DELAY_SAMPLES=true` in live mode to collect one forecast
 snapshot per flight from 30 to 120 minutes before scheduled gate-out, with
 its eventual reported outcome. Confirm that your source license permits model
 training. The exporter streams completed samples without passenger details or
-raw provider flight IDs. From the running Compose project:
+raw provider flight IDs. A later cancellation or invalid gate-out correction
+removes the outcome from subsequent exports. A valid correction keeps the
+original forecast features and schedule. From the running Compose project:
 
 ```sh
 umask 077

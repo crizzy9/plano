@@ -619,8 +619,8 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 		}
 	}
 
-	if s.collectDelaySamples && (trackedRefresh || expectedAeroID != "" && flight.ActualDeparture != nil) {
-		if err := recordDelaySample(ctx, tx, flight, inbound, advisories, decisionAt); err != nil {
+	if s.collectDelaySamples {
+		if err := recordDelaySample(ctx, tx, flight, inbound, advisories, decisionAt, trackedRefresh); err != nil {
 			return err
 		}
 	}

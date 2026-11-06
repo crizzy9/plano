@@ -65,6 +65,17 @@ func PredictWithModel(model *predict.Model, flight feeds.Flight, rotation []feed
 	forecast.ValidUntil = inputs.validUntil
 	forecast.AdvisoryEvidence = inputs.advisories
 	departure := scheduled.Add(time.Duration(minutes * float64(time.Minute)))
+	statusAt := flight.ObservedAt
+	if statusAt.After(now) {
+		statusAt = now
+	}
+	if elapsed := predict.ElapsedDepartureDelay(scheduled, statusAt); elapsed > minutes {
+		departure = statusAt
+		forecast.DelayMinutes = int(math.Ceil(elapsed))
+		if len(reasons) != 0 {
+			reasons = append(reasons, "The flight was still awaiting gate-out at the last flight update.")
+		}
+	}
 	if closure := departureClosureFloor(flight, advisories, now, departure); !closure.end.IsZero() {
 		if closure.end.Sub(scheduled) > closureForecastLimit {
 			return nil
@@ -112,7 +123,7 @@ func delayInputs(flight feeds.Flight, rotation []feeds.Flight, advisories []feed
 		// NOTAM text is airport context. A verified full closure constrains
 		// the forecast separately, without changing trained model features.
 		switch a.Kind {
-		case "notam", "airport_closure", "airport_restriction", "runway_closure", "taxiway_closure", "apron_closure", "airport_operations":
+		case "notam", feeds.AdvisoryAirportNotice, "airport_closure", "airport_restriction", "runway_closure", "taxiway_closure", "apron_closure", "airport_operations":
 			continue
 		}
 		at := advisoryTime(flight, a)
@@ -333,6 +344,10 @@ func usesInboundTiming(forecast *Prediction) bool {
 
 func predictionValidity(forecast *Prediction, flight feeds.Flight, rotation []feeds.Flight, now time.Time) (validUntil *time.Time, valid bool) {
 	if forecast == nil || forecast.ValidUntil != nil && !forecast.ValidUntil.After(now) {
+		return nil, false
+	}
+	if forecast.Departure != nil && flightBeforeDeparture(flight) &&
+		forecast.Departure.Before(flight.ObservedAt) && forecast.Departure.Before(now) {
 		return nil, false
 	}
 	if len(forecast.AdvisoryEvidence) == 0 && slices.ContainsFunc(forecast.Reasons, legacyAdvisoryReason) {

@@ -80,6 +80,35 @@ func TestFitChronologicalHoldoutAndDeterministicArtifact(t *testing.T) {
 	}
 }
 
+func TestEvaluateClampsModelAndOperationalBaselineToElapsedDelay(t *testing.T) {
+	rows := syntheticExamples()
+	for i := range rows {
+		row := &rows[i]
+		elapsed := time.Duration(5*(i%10+1)) * time.Minute
+		row.ScheduledDeparture = row.ObservedAt.Add(-elapsed)
+		row.DepartedAt = row.ObservedAt.Add(5 * time.Minute)
+		row.Features = Features{AirlineDelayMinutes: 5}
+	}
+	model, _, err := Fit(rows, Options{HoldoutFraction: 0.2, Ridge: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := slices.Clone(rows[64:])
+	for i := range later {
+		row := &later[i]
+		row.ScheduledDeparture = row.ObservedAt.Add(-50 * time.Minute)
+		estimate, ok := model.Estimate(row.Features, row.ObservedAt, row.ScheduledDeparture)
+		if !ok || estimate.DelayMinutes >= 50 {
+			t.Fatalf("fixture must exercise a learned estimate below the elapsed delay: %+v, %t", estimate, ok)
+		}
+	}
+	report, err := Evaluate(model, later)
+	if err != nil || report.LearnedRows != len(later) || report.Operational.MeanAbsoluteMinutes != 5 ||
+		report.LearnedOrFallback.MeanAbsoluteMinutes != 5 || report.Published.MeanAbsoluteMinutes != 50 {
+		t.Fatalf("elapsed-aware evaluation = %+v, %v", report, err)
+	}
+}
+
 func TestEstimateContributionsAndUnsupportedFeatures(t *testing.T) {
 	rows := syntheticExamples()
 	model, _, err := Fit(rows, Options{HoldoutFraction: 0.2, Ridge: 0.01})

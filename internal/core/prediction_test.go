@@ -42,6 +42,40 @@ func TestPredictionFeaturesUseMatchingAndKnownSignals(t *testing.T) {
 	}
 }
 
+func TestPredictionUsesVerifiedPredepartureObservationAsFloor(t *testing.T) {
+	scheduled := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)
+	observed, now := scheduled.Add(42*time.Minute+30*time.Second), scheduled.Add(55*time.Minute)
+	published := scheduled.Add(10 * time.Minute)
+	flight := feeds.Flight{ID: "late-departure", Status: "boarding", Origin: "SFO", OriginICAO: "KSFO",
+		ScheduledDeparture: &scheduled, EstimatedDeparture: &published, ObservedAt: observed}
+	context := feeds.Advisory{Airport: "KSFO", Kind: feeds.AdvisoryAirportNotice, Source: feeds.FAASWIM,
+		Reason: "weather and ATC congestion in contextual notice", ObservedAt: now, DelayMinutes: new(90)}
+	if got := Predict(flight, nil, []feeds.Advisory{context}, now); got != nil {
+		t.Fatalf("elapsed time and airport context alone generated a forecast: %+v", got)
+	}
+	delay := feeds.Advisory{Airport: "KSFO", Direction: "departure", Kind: "departure_delay", Source: feeds.FAASWIM,
+		Reason: "airport volume", ObservedAt: now, DelayMinutes: new(20)}
+	got := Predict(flight, nil, []feeds.Advisory{context, delay}, now)
+	if got == nil || !got.Departure.Equal(observed) || got.DelayMinutes != 43 || len(got.Reasons) != 2 ||
+		!strings.Contains(got.Reasons[1], "last flight update") || len(got.AdvisoryEvidence) != 1 {
+		t.Fatalf("elapsed departure floor = %+v", got)
+	}
+	legacy := *got
+	legacy.Departure = &published
+	if _, valid := predictionValidity(&legacy, flight, nil, now); valid {
+		t.Fatal("saved forecast survived a later predeparture observation")
+	}
+	features, ok := ExtractDelayFeatures(flight, nil, []feeds.Advisory{context, delay}, now)
+	if !ok || features != (predict.Features{AirlineDelayMinutes: 10, AirportDelayMinutes: 20, AirTrafficControl: true}) ||
+		!flight.EstimatedDeparture.Equal(published) || !flight.ScheduledDeparture.Equal(scheduled) {
+		t.Fatalf("forecast changed published times or features: %+v, %t", features, ok)
+	}
+	flight.ObservedAt = now.Add(time.Second)
+	if got := Predict(flight, nil, []feeds.Advisory{delay}, now); got == nil || !got.Departure.Equal(now) {
+		t.Fatalf("forecast used an observation beyond the decision time: %+v", got)
+	}
+}
+
 func TestPredictionUsesTrainedModelAndRetainsOperationalFallback(t *testing.T) {
 	start := time.Date(2026, time.November, 1, 0, 0, 0, 0, time.UTC)
 	rows := make([]predict.Example, 40)

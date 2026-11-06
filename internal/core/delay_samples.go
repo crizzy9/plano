@@ -11,16 +11,29 @@ import (
 	"github.com/crizzy9/plano/internal/predict"
 )
 
-func recordDelaySample(ctx context.Context, tx *sql.Tx, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, decision time.Time) error {
-	if flight.Status == "cancelled" {
-		return nil
-	}
-	if departed := flight.ActualDeparture; departed != nil && !departed.After(flight.ObservedAt) {
-		_, err := tx.ExecContext(ctx, `UPDATE delay_samples SET departed_ns=?,label_observed_ns=? WHERE flight_id=? AND observed_ns<?
-AND scheduled_ns>=? AND (departed_ns IS NULL OR departed_ns<>?)`, departed.UnixNano(), flight.ObservedAt.UnixNano(), flight.ID, departed.UnixNano(), departed.Add(-24*time.Hour).UnixNano(), departed.UnixNano())
+const maxDelaySampleLateness = 24 * time.Hour
+
+func recordDelaySample(ctx context.Context, tx *sql.Tx, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, decision time.Time, capture bool) error {
+	departed := flight.ActualDeparture
+	if flight.Status == "cancelled" || departed != nil && (departed.IsZero() || departed.After(flight.ObservedAt)) {
+		_, err := tx.ExecContext(ctx, `UPDATE delay_samples SET departed_ns=NULL,label_observed_ns=NULL
+WHERE flight_id=? AND (departed_ns IS NOT NULL OR label_observed_ns IS NOT NULL)`, flight.ID)
 		return err
 	}
-	if flight.ScheduledDeparture == nil {
+	if departed != nil {
+		// Check the corrected outcome against the forecast's original schedule.
+		// Repeated observations of a valid gate-out retain its first label time.
+		const eligible = `observed_ns < @departed AND scheduled_ns >= @earliest_schedule`
+		_, err := tx.ExecContext(ctx, `UPDATE delay_samples
+SET departed_ns=CASE WHEN `+eligible+` THEN @departed END,
+    label_observed_ns=CASE WHEN `+eligible+` THEN @label_observed END
+WHERE flight_id=@id AND (departed_ns IS NOT @departed OR label_observed_ns IS NULL
+ OR label_observed_ns < @departed OR label_observed_ns > @label_observed OR NOT (`+eligible+`))`,
+			sql.Named("departed", departed.UnixNano()), sql.Named("earliest_schedule", departed.Add(-maxDelaySampleLateness).UnixNano()),
+			sql.Named("label_observed", flight.ObservedAt.UnixNano()), sql.Named("id", flight.ID))
+		return err
+	}
+	if !capture || flight.ScheduledDeparture == nil {
 		return nil
 	}
 	lead := flight.ScheduledDeparture.Sub(decision)
@@ -47,8 +60,11 @@ func ExportDelaySamples(ctx context.Context, path string, dst io.Writer) error {
 		return err
 	}
 	defer db.Close()
-	rows, err := db.QueryContext(ctx, `SELECT flight_id,observed_ns,scheduled_ns,features,departed_ns,label_observed_ns
-FROM (SELECT * FROM delay_samples WHERE departed_ns IS NOT NULL ORDER BY observed_ns DESC,flight_id LIMIT 100000) ORDER BY observed_ns,flight_id`)
+	rows, err := db.QueryContext(ctx, `SELECT s.flight_id,s.observed_ns,s.scheduled_ns,s.features,s.departed_ns,s.label_observed_ns,
+       f.observed_ns,COALESCE(json_extract(f.snapshot,'$.status'),''),json_extract(f.snapshot,'$.actualDeparture')
+FROM (SELECT * FROM delay_samples WHERE departed_ns>observed_ns AND label_observed_ns>=departed_ns
+ AND scheduled_ns>=departed_ns-? ORDER BY observed_ns DESC,flight_id LIMIT 100000) s
+JOIN flights f ON f.id=s.flight_id ORDER BY s.observed_ns,s.flight_id`, int64(maxDelaySampleLateness))
 	if err != nil {
 		return err
 	}
@@ -56,10 +72,26 @@ FROM (SELECT * FROM delay_samples WHERE departed_ns IS NOT NULL ORDER BY observe
 	encoder := json.NewEncoder(dst)
 	for rows.Next() {
 		var sample predict.Example
-		var observed, scheduled, departed, labelObserved int64
+		var observed, scheduled, departed, labelObserved, currentObserved int64
+		var currentStatus string
+		var currentDeparture sql.NullString
 		var raw []byte
-		if err := rows.Scan(&sample.FlightID, &observed, &scheduled, &raw, &departed, &labelObserved); err != nil {
+		if err := rows.Scan(&sample.FlightID, &observed, &scheduled, &raw, &departed, &labelObserved,
+			&currentObserved, &currentStatus, &currentDeparture); err != nil {
 			return err
+		}
+		// Older collectors could leave the original label after the provider
+		// corrected it. A newer snapshot without gate-out is still inconclusive.
+		if currentObserved >= labelObserved {
+			if currentStatus == "cancelled" {
+				continue
+			}
+			if currentDeparture.Valid {
+				actual, err := time.Parse(time.RFC3339Nano, currentDeparture.String)
+				if err != nil || !actual.Equal(time.Unix(0, departed)) {
+					continue
+				}
+			}
 		}
 		if err := json.Unmarshal(raw, &sample.Features); err != nil {
 			return err

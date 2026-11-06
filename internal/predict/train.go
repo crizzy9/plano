@@ -286,10 +286,11 @@ func backtest(model *Model, holdout []Example, boundary time.Time, purged int) B
 	}
 	for _, row := range holdout {
 		point, _ := row.point()
-		operational := row.Features.operationalBaseline()
+		elapsed := ElapsedDepartureDelay(row.ScheduledDeparture, row.ObservedAt)
+		operational := max(row.Features.operationalBaseline(), elapsed)
 		prediction := operational
 		if estimate, ok := model.Estimate(row.Features, row.ObservedAt, row.ScheduledDeparture); ok {
-			prediction = estimate.DelayMinutes
+			prediction = max(estimate.DelayMinutes, elapsed)
 			result.LearnedRows++
 		}
 		result.Operational.record(operational - point.label)
