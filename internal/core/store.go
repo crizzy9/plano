@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS outbox (
   lease_until INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(due, id) WHERE done = 0;
+CREATE INDEX IF NOT EXISTS outbox_ready_alerts ON outbox(due, id) WHERE done = 0 AND ` + pendingAlertKind + `;
 CREATE INDEX IF NOT EXISTS outbox_by_device_flight ON outbox(device_id,flight_id,done,id);
 CREATE INDEX IF NOT EXISTS outbox_pending_by_flight ON outbox(flight_id) WHERE done = 0;
 CREATE TABLE IF NOT EXISTS outbox_live_start_leases (

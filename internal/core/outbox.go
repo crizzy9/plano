@@ -517,6 +517,10 @@ func (s *Store) claim(ctx context.Context, now time.Time, limit int) ([]delivery
 }
 
 func (s *Store) claimForPlatform(ctx context.Context, now time.Time, limit int, platform string) ([]deliveryJob, error) {
+	return s.claimReadyPush(ctx, now, limit, platform, false)
+}
+
+func (s *Store) claimReadyPush(ctx context.Context, now time.Time, limit int, platform string, alertsOnly bool) ([]deliveryJob, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -524,15 +528,21 @@ func (s *Store) claimForPlatform(ctx context.Context, now time.Time, limit int, 
 	defer tx.Rollback()
 	t := now.UnixNano()
 	args := []any{t, t, t}
-	platformFilter := ""
+	filter := ""
+	deviceJoin := "JOIN"
 	if platform != "" {
-		platformFilter = " AND d.platform=?"
+		filter = " AND d.platform=?"
 		args = append(args, platform)
+	}
+	if alertsOnly {
+		filter += " AND " + pendingAlertKind
+		// Walk the ready-alert index in due order before looking up devices.
+		deviceJoin = "CROSS JOIN"
 	}
 	args = append(args, t, limit)
 	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.device_id,d.registered,o.attempts,d.owner,d.platform,d.token,COALESCE(b.binding,''),o.message
-FROM outbox o JOIN devices d ON d.id=o.device_id LEFT JOIN device_bindings b ON b.device_id=d.id
-WHERE o.done=0 AND o.due<=? AND o.expires>? AND o.lease_until<=?`+platformFilter+` AND NOT `+dirtyConnectionAlert+`
+FROM outbox o `+deviceJoin+` devices d ON d.id=o.device_id LEFT JOIN device_bindings b ON b.device_id=d.id
+WHERE o.done=0 AND o.due<=? AND o.expires>? AND o.lease_until<=?`+filter+` AND NOT `+dirtyConnectionAlert+`
 AND NOT `+revokedFriendAlert+`
 AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
   SELECT 1 FROM outbox older WHERE older.device_id=o.device_id AND older.flight_id=o.flight_id AND older.id<o.id
@@ -661,35 +671,50 @@ func dispatcherPlatforms(sender PushSender) []string {
 	return []string{"ios", "android"}
 }
 
-const dispatchPollInterval = 200 * time.Millisecond
+const (
+	dispatchPollInterval = 200 * time.Millisecond
+	pendingAlertKind     = `json_extract(message,'$.Kind')='alert'`
+)
 
-// RunDispatcher reserves send capacity for each provider. The tick recovers
-// persisted jobs and retries if a process-local wake was lost.
+// RunDispatcher reserves capacity for each provider and for passenger alerts
+// within each provider. The tick recovers persisted jobs and retries.
 func (s *Store) RunDispatcher(ctx context.Context, sender PushSender, logger *slog.Logger) {
-	const slots = 16
+	const slots, reservedAlerts = 16, 2
 	platforms := dispatcherPlatforms(sender)
 	if len(platforms) == 0 {
 		return
 	}
 	perPlatform := slots / len(platforms)
+	type sendLane struct {
+		platform    string
+		alertsOnly  bool
+		limit, busy int
+	}
+	lanes := make([]sendLane, 0, len(platforms)*2)
+	for _, platform := range platforms {
+		lanes = append(lanes, sendLane{platform: platform, alertsOnly: true, limit: reservedAlerts})
+	}
+	for _, platform := range platforms {
+		lanes = append(lanes, sendLane{platform: platform, limit: perPlatform - reservedAlerts})
+	}
 	tick := time.NewTicker(dispatchPollInterval)
 	defer tick.Stop()
 	completed := make(chan int, slots)
 	var workers sync.WaitGroup
 	defer workers.Wait()
-	busy := make([]int, len(platforms))
 	for ctx.Err() == nil {
-		for lane, platform := range platforms {
-			available := perPlatform - busy[lane]
+		for lane := range lanes {
+			pool := &lanes[lane]
+			available := pool.limit - pool.busy
 			if available == 0 {
 				continue
 			}
-			jobs, err := s.claimForPlatform(ctx, time.Now(), available, platform)
+			jobs, err := s.claimReadyPush(ctx, time.Now(), available, pool.platform, pool.alertsOnly)
 			if err != nil && ctx.Err() == nil {
-				logger.Error("push dispatcher failed", "platform", platform, "error", err)
+				logger.Error("push dispatcher failed", "platform", pool.platform, "error", err)
 			}
 			for _, job := range jobs {
-				busy[lane]++
+				pool.busy++
 				workers.Go(func() {
 					defer func() { completed <- lane }()
 					s.deliver(ctx, sender, logger, job)
@@ -700,7 +725,7 @@ func (s *Store) RunDispatcher(ctx context.Context, sender PushSender, logger *sl
 		case <-ctx.Done():
 			return
 		case lane := <-completed:
-			busy[lane]--
+			lanes[lane].busy--
 		case <-s.outboxWake:
 		case <-tick.C:
 		}

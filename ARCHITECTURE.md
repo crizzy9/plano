@@ -57,7 +57,7 @@ AeroAPI search / polling / callbacks     FAA NAS / signed advisory bridges
 - The iOS coordinator retries unfinished token uploads on foreground. It stops per-activity observation at the end of an activity and fences uploads when the server or installation credential changes. Slot-aware registration replaces the previous token for the same installation and activity in one SQLite transaction. [ActivityKit push notifications](https://developer.apple.com/documentation/activitykit/starting-and-updating-live-activities-with-activitykit-push-notifications)
 - The iOS app stores a random ownership binding with its native registration. Local and remote starts include that binding in immutable ActivityKit attributes. The coordinator dismisses activities from a retired registration before it can upload their update tokens. A delayed push can appear briefly before the app wakes to dismiss it. [ActivityKit attributes](https://developer.apple.com/documentation/activitykit/activityattributes)
 - iOS alert revocation persists an installation cutoff in SQLite. The app cancels token uploads before taking the cutoff and can retry a queued revocation against its original installation after a restart. Registration and cutoff checks share the device transaction.
-- The default active-flight polling interval is 60 seconds. FlightAware callbacks can wake a durable targeted refresh for tracked flights and their explicitly linked direct inbound legs. An inbound callback updates the onward rotation and forecast with eligible cached advisories and keeps the onward observation timestamp. Signed bridge advisories can enqueue airport alerts directly. Outbox commits wake the dispatcher immediately, while a 200 ms fallback recovers ready retries. Provider acceptance, device arrival, end-to-end alert latency and behavior on specific onboard networks require separate measurement.
+- The default active-flight polling interval is 60 seconds. FlightAware callbacks can wake a durable targeted refresh for tracked flights and their explicitly linked direct inbound legs. An inbound callback updates the onward rotation and forecast with eligible cached advisories and keeps the onward observation timestamp. Signed bridge advisories can enqueue airport alerts directly. Outbox commits wake the dispatcher immediately, while a 200 ms fallback recovers ready retries. The dispatcher shares up to 16 concurrent sends among configured providers. Each provider reserves two of its slots for passenger alerts so Live Activity traffic cannot occupy every slot. Provider acceptance, device arrival, end-to-end alert latency and behavior on specific onboard networks require separate measurement.
 - A signed operator bridge can submit a complete, timestamped flight snapshot for the same verified AeroAPI flight identity. Plano applies it directly to the event and push transaction without waiting for a provider lookup. The original capture time orders it against poll and callback observations. [Signed flight snapshots](docs/AVIATION_CALLBACKS.md#signed-flight-snapshots)
 - Live Activity updates compare the current state with the last queued state for each device and flight. An unchanged observation renews the surface at most once a minute, even with faster polling. Reported flight progress keeps a long flight eligible when gate-out is unavailable.
 - The dispatcher reserves capacity for each configured push provider when both are enabled. It rechecks each lease just before transport and caps the request deadline at the earlier of lease or message expiry. An outbox index narrows the ordering lookup to the same device and flight.
@@ -114,9 +114,10 @@ with the same capture time left one gate-change event in SQLite. [Signed flight 
 These benchmarks time a signed aviation webhook from handler entry to the
 start of a fake push send. Each uses one tracked flight and one registered
 device in a temporary SQLite database. In three serial runs of 100 updates on
-Linux amd64, the signed flight snapshot benchmark measured 1.67 to 1.73 ms at
-the 95th percentile. This measures local processing. Live APNs, FCM, and
-device measurements are separate.
+Linux amd64, the 95th percentile was 1.97 to 2.19 ms for signed flight snapshots
+and 2.34 to 2.61 ms for signed advisories. A separate regression test delivers
+a gate alert while six Live Activity sends occupy the same provider's general
+slots. Live APNs, FCM, and device measurements are separate.
 
 ```sh
 CGO_ENABLED=1 GOMAXPROCS=2 go test -p=1 ./internal/api -run '^$' \
