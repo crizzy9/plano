@@ -312,9 +312,12 @@ private final class PlanoActivityCoordinator {
     let state = try JSONDecoder().decode(PlanoActivityAttributes.ContentState.self, from: Data(stateJSON.utf8))
     guard !["arrived", "cancelled"].contains(state.status) else { throw RegistrationError.inactive }
     if Activity<PlanoActivityAttributes>.activities.contains(where: { $0.attributes.flightId == state.flightId }) { return }
+    let now = Date.now
+    let observedAt = Date(timeIntervalSince1970: TimeInterval(state.observedEpoch))
+    let staleDate = state.observedEpoch > 0 ? min(observedAt, now).addingTimeInterval(600) : now
     let activity = try Activity.request(
       attributes: PlanoActivityAttributes(flightId: state.flightId),
-      content: ActivityContent(state: state, staleDate: .now.addingTimeInterval(600)),
+      content: ActivityContent(state: state, staleDate: staleDate),
       pushType: .token
     )
     observe(activity, using: registration, generation: generation)

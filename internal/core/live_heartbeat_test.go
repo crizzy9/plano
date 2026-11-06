@@ -143,6 +143,46 @@ func TestLiveEligibilityWithoutGateDeparture(t *testing.T) {
 	}
 }
 
+func TestLiveTokenRegistrationKeepsCachedObservationStale(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(filepath.Join(t.TempDir(), "stale-activity.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	flight := feeds.Flight{ID: "stale-flight", Number: "UA123", Origin: "SFO", Destination: "LHR",
+		Status: "airborne", ObservedAt: now.Add(-30 * time.Minute)}
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	owner := slotInstallation(t, store)
+	if err := store.Track(ctx, owner, flight.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	device := Device{Platform: "ios", Kind: "live_update", Token: "stale-activity-token", FlightID: flight.ID}
+	if err := store.Register(ctx, owner, device, now); err != nil {
+		t.Fatal(err)
+	}
+	jobs := liveJobsAt(t, store, now)
+	if len(jobs) != 1 || jobs[0].message.Kind != push.LiveUpdate {
+		t.Fatalf("wanted one live update, got %d jobs", len(jobs))
+	}
+	msg := jobs[0].message
+	if !msg.StaleAt.Equal(flight.ObservedAt.Add(liveFreshness)) || !msg.Timestamp.Equal(now) || !msg.ExpiresAt.After(now) {
+		t.Fatalf("cached observation should stay stale on registration, got stale=%s timestamp=%s expiry=%s", msg.StaleAt, msg.Timestamp, msg.ExpiresAt)
+	}
+	flight.ObservedAt = now.Add(5 * time.Second)
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	jobs = liveJobsAt(t, store, flight.ObservedAt)
+	if len(jobs) != 1 || jobs[0].message.Kind != push.LiveUpdate ||
+		!jobs[0].message.StaleAt.Equal(flight.ObservedAt.Add(liveFreshness)) {
+		t.Fatalf("first fresh observation should recover immediately, got %d jobs", len(jobs))
+	}
+}
+
 func liveJobsAt(t *testing.T, store *Store, now time.Time) []deliveryJob {
 	t.Helper()
 	ctx := t.Context()

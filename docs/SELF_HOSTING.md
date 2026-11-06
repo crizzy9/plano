@@ -68,6 +68,10 @@ EXPO_PUBLIC_API_URL=https://plano.example.net npm run ios
 `EXPO_PUBLIC_API_URL` is a build-time default. Settings lets each installation
 choose a different server at runtime. Keep provider keys on the server.
 
+The pinned Expo version uses Android SDK 36, Build-Tools 36, and NDK
+`27.1.12297006`. Expo Notifications builds from source on Android so Plano's
+native messaging service can extend it.
+
 For a live server reachable from the Internet, require an enrollment code
 before connecting devices. Generate a random code of 16 to 128 bytes and
 provide it through `PLANO_ENROLLMENT_CODE_FILE` or `PLANO_ENROLLMENT_CODE`.

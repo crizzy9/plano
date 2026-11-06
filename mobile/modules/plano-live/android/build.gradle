@@ -8,6 +8,9 @@ version = '0.1.0'
 
 android {
   namespace 'app.plano.live'
+  defaultConfig {
+    versionName project.version.toString()
+  }
 }
 
 dependencies {

@@ -297,7 +297,15 @@ func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time
 	if arr := effectiveArrival(flight); arr != nil {
 		state.ArrivalEpoch = arr.Unix()
 	}
-	msg := push.Message{Kind: kind, FlightID: flight.ID, Title: flight.Number + " · " + flight.Origin + " to " + flight.Destination, Body: "Track this flight with Plano.", State: state, Timestamp: now, StaleAt: now.Add(liveFreshness), ExpiresAt: now.Add(liveFreshness), CollapseID: hash(flight.ID)}
+	staleAt := now
+	if state.ObservedEpoch > 0 {
+		observed := now
+		if flight.ObservedAt.Before(now) {
+			observed = flight.ObservedAt
+		}
+		staleAt = observed.Add(liveFreshness)
+	}
+	msg := push.Message{Kind: kind, FlightID: flight.ID, Title: flight.Number + " · " + flight.Origin + " to " + flight.Destination, Body: "Track this flight with Plano.", State: state, Timestamp: now, StaleAt: staleAt, ExpiresAt: now.Add(liveFreshness), CollapseID: hash(flight.ID)}
 	if kind == push.LiveEnd {
 		msg.DismissAt = now.Add(20 * time.Minute)
 	}
@@ -370,9 +378,13 @@ WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='l
 			if err := json.Unmarshal(a.recentState, &recent); err != nil {
 				return err
 			}
-			recent.ObservedEpoch = msg.State.ObservedEpoch
-			if recent == *msg.State {
-				continue
+			// A token registered from cached data may have queued stale state.
+			// Let the first fresh observation recover the surface immediately.
+			if recent.ObservedEpoch > now.Add(-liveFreshness).Unix() {
+				recent.ObservedEpoch = msg.State.ObservedEpoch
+				if recent == *msg.State {
+					continue
+				}
 			}
 		}
 		msg.RequestUpdateToken = a.requestUpdateToken && kind == push.LiveStart

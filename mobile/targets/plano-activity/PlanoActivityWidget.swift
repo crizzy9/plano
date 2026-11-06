@@ -21,8 +21,8 @@ struct PlanoActivityWidget: Widget {
           Spacer()
           FlightTimer(state: context.state, stale: context.isStale)
           Spacer()
-          AirportGate(code: context.state.destination, gate: context.state.arrivalGate,
-                      terminal: context.state.arrivalTerminal)
+          AirportGate(code: context.state.destination, gate: context.state.arrivalGateForDisplay,
+                      terminal: context.state.arrivalTerminalForDisplay)
         }
         FlightProgress(state: context.state, stale: context.isStale)
         FlightSeat(seat: context.state.seat)
@@ -39,8 +39,8 @@ struct PlanoActivityWidget: Widget {
                       terminal: context.state.departureTerminal)
         }
         DynamicIslandExpandedRegion(.trailing) {
-          AirportGate(code: context.state.destination, gate: context.state.arrivalGate,
-                      terminal: context.state.arrivalTerminal)
+          AirportGate(code: context.state.destination, gate: context.state.arrivalGateForDisplay,
+                      terminal: context.state.arrivalTerminalForDisplay)
         }
         DynamicIslandExpandedRegion(.center) {
           FlightTimer(state: context.state, stale: context.isStale)
@@ -188,6 +188,8 @@ private struct FlightProgress: View {
 }
 
 private extension PlanoActivityAttributes.ContentState {
+  var arrivalGateForDisplay: String? { status == "diverted" ? nil : arrivalGate }
+  var arrivalTerminalForDisplay: String? { status == "diverted" ? nil : arrivalTerminal }
   var isInFlight: Bool { ["airborne", "diverted"].contains(status) }
   var isArrivalPhase: Bool { isInFlight || ["landed", "arrived"].contains(status) }
   var countdownLabel: String { isInFlight ? "Until arrival" : "Until departure" }
