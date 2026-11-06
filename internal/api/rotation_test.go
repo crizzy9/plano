@@ -3,9 +3,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +104,19 @@ func TestTrackedRotationLegDetailsAndProviderTrack(t *testing.T) {
 	source.beforeReturn = func() {
 		parent.ObservedAt = parent.ObservedAt.Add(time.Millisecond)
 		inbound.ObservedAt = parent.ObservedAt
+		inbound.Source = "replacement-feed"
+		if err := store.Observe(ctx, parent, nil, []feeds.Flight{inbound, earlier}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result.Telemetry = nil
+	if err := json.Unmarshal(get("/v1/flights/in?rotationOf=out", ownerToken, 200), &result); err != nil ||
+		result.Flight.Source != inbound.Source || len(result.Telemetry) != 0 {
+		t.Fatalf("replacement feed got old inbound telemetry: %+v %v", result, err)
+	}
+	source.beforeReturn = func() {
+		parent.ObservedAt = parent.ObservedAt.Add(time.Millisecond)
+		inbound.ObservedAt = parent.ObservedAt
 		inbound.TailNumber = "N2BB"
 		inbound.ActualTakeoff = new(now.Add(-30 * time.Minute))
 		if err := store.Observe(ctx, parent, nil, []feeds.Flight{inbound, earlier}, nil); err != nil {
@@ -118,10 +135,105 @@ func TestTrackedRotationLegDetailsAndProviderTrack(t *testing.T) {
 	}
 	get("/v1/flights/in?rotationOf=out", ownerToken, 404)
 	get("/v1/flights/in?rotationOf=out", ownerToken, 404)
-	if len(source.calls) != 5 {
+	if len(source.calls) != 6 {
 		t.Fatalf("provider request was not fenced after untracking: %v", source.calls)
 	}
 }
+
+func TestTrackedRotationReceiverTrackDuringProviderOutage(t *testing.T) {
+	ctx := t.Context()
+	store, err := core.Open(filepath.Join(t.TempDir(), "rotation-receiver.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	parent := feeds.Flight{ID: "out", Number: "UA8", Origin: "EWR", Destination: "SFO",
+		Status: "scheduled", TailNumber: "N1AA", ObservedAt: now, ScheduledDeparture: new(now.Add(2 * time.Hour))}
+	inbound := feeds.Flight{ID: "in", Number: "UA7", Origin: "BOS", Destination: "EWR",
+		Status: "airborne", TailNumber: "N1AA", ObservedAt: now, ActualTakeoff: new(now.Add(-time.Hour)),
+		ScheduledArrival: new(now.Add(time.Hour))}
+	if err := store.Observe(ctx, parent, nil, []feeds.Flight{inbound}, nil); err != nil {
+		t.Fatal(err)
+	}
+	token, owner := newImportTestInstallation(t, store)
+	other, _ := newImportTestInstallation(t, store)
+	if err := store.Track(ctx, owner, parent.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// The second request starts only after the first cycle has finished writing.
+	nextCycle, stopped := make(chan struct{}), make(chan struct{})
+	calls := 0
+	receiver, err := feeds.NewADSBReceiver("https://receiver.example.test/aircraft.json", &http.Client{
+		Transport: rotationReceiverTransport(func(r *http.Request) (*http.Response, error) {
+			calls++
+			if calls > 1 {
+				if calls == 2 {
+					close(nextCycle)
+				}
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			}
+			raw := fmt.Sprintf(`{"now":%d,"aircraft":[{"hex":"ab1234","r":"N1AA","flight":"UA7","type":"adsb_icao","lat":42,"lon":-72,"seen_pos":1}]}`, now.Unix())
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(raw))}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.DiscardHandler)
+	workerCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		defer close(stopped)
+		store.RunRadar(workerCtx, receiver, nil, 5*time.Millisecond, logger)
+	}()
+	select {
+	case <-nextCycle:
+		cancel()
+		<-stopped
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-stopped
+		t.Fatal("receiver worker did not complete a sample cycle")
+	}
+
+	at := now.Add(-time.Second)
+	source := &rotationTrackFixture{points: []feeds.Position{
+		{At: at.Add(-time.Second), Latitude: 41, Longitude: -72, Source: "flightaware_aeroapi"},
+	}}
+	server := Server{Store: store, Source: source, Logger: logger}
+	load := func() []feeds.Position {
+		t.Helper()
+		raw := importTestRequest(t, server.Handler(), "GET", "/v1/flights/in?rotationOf=out", token, "", 200)
+		var result core.Details
+		if err := json.Unmarshal([]byte(raw), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result.Telemetry
+	}
+	points := load()
+	if len(points) != 2 || !points[0].At.Before(points[1].At) || points[1].Source != "operator_readsb" || !points[1].At.Equal(at) {
+		t.Fatalf("expected chronological provider and receiver positions, got %+v", points)
+	}
+	source.points = append(source.points, points[1])
+	if points := load(); len(points) != 2 {
+		t.Fatalf("expected exact provider and receiver duplicates to collapse, got %+v", points)
+	}
+	source.err = feeds.ErrUnavailable
+	if points := load(); len(points) != 1 || points[0].Source != "operator_readsb" {
+		t.Fatalf("expected receiver position during provider outage, got %+v", points)
+	}
+	server.Source = nil
+	if points := load(); len(points) != 1 || points[0].Source != "operator_readsb" {
+		t.Fatalf("expected receiver position without a provider, got %+v", points)
+	}
+	importTestRequest(t, server.Handler(), "GET", "/v1/flights/in?rotationOf=out", other, "", 404)
+}
+
+type rotationReceiverTransport func(*http.Request) (*http.Response, error)
+
+func (f rotationReceiverTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 type rotationTrackFixture struct {
 	feeds.FlightSource

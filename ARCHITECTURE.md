@@ -16,6 +16,8 @@ REA 6.5.0 returned a target-free native session on Linux. Its macOS provider rep
 
 Plano uses original interfaces and an independent implementation. The Flighty feature descriptions establish product behavior to reproduce. Native and server internals remain unverified.
 
+REA separately inspected the public Flighty Newark dashboard on 2026-11-06. Static analysis parsed four of the 21 first-party JavaScript files linked in the captured HTML, covering 118,028 bytes with a bounded semantic graph. Next.js markers identified the shipped web framework. The `b08fe5c28f103700.js` chunk formats the supplied `metarLastUpdated` timestamp as elapsed time and falls back to a plane icon when an airline logo is unavailable. The script directory SHA-256 was `1421ccebdbcac087d060b28c94970ae7e1513aa8db93dddaabef490f48a81c6f`. REA recorded evidence ID `ev_97835415909b402049249dc3820c81dccade700728627789c93f212bcb8e491e`. This inspection covered static web code. Runtime requests, feed origins, and native internals remain unverified. [Flighty Newark dashboard](https://flighty.com/airports/newark-ewr)
+
 ## Plano data flow
 
 ```text

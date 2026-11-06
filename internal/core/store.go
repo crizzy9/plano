@@ -450,7 +450,7 @@ WHERE e.flight_id=? AND COALESCE(r.revision,0)=? ORDER BY e.at_ns DESC,e.id LIMI
 		if err != nil {
 			return d, err
 		}
-		d.Telemetry = mergeFlightPositions(d.Telemetry, local)
+		d.Telemetry = MergeFlightPositions(d.Telemetry, local)
 	} else {
 		d.Telemetry = slices.DeleteFunc(d.Telemetry, func(p feeds.Position) bool { return p.Source == "operator_readsb" })
 	}

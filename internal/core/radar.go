@@ -1,12 +1,14 @@
 package core
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
@@ -22,7 +24,7 @@ CREATE TABLE IF NOT EXISTS radar_receiver_revisions (
   flight_id TEXT PRIMARY KEY REFERENCES flights(id) ON DELETE CASCADE,
   revision_ns INTEGER NOT NULL, last_tail TEXT NOT NULL
 );
-`
+` + rotationRadarSchema
 
 const radarFlightStatus = `json_extract(snapshot,'$.status') IN ('airborne','diverted')
 AND json_extract(snapshot,'$.actualTakeoff') IS NOT NULL
@@ -38,6 +40,14 @@ AND EXISTS (SELECT 1 FROM tracked WHERE flight_id=flights.id)`
 type radarSample struct {
 	flight   feeds.Flight
 	position feeds.Position
+}
+
+type radarReceiverMatch struct {
+	flight    feeds.Flight
+	identity  string
+	tracked   []radarSample
+	rotations []rotationRadarSample
+	ambiguous bool
 }
 
 type RadarPage struct {
@@ -84,7 +94,7 @@ AND EXISTS(SELECT 1 FROM tracked WHERE flight_id=flights.id)`,
 	return nil
 }
 
-// RunRadar samples one operator receiver for all airborne tracked flights.
+// RunRadar samples one operator receiver for tracked flights and their inbound legs.
 // Source failures leave the existing history and status observation untouched.
 func (s *Store) RunRadar(ctx context.Context, receiver *feeds.ADSBReceiver, registry *feeds.FAARegistry, cadence time.Duration, logger *slog.Logger) {
 	tick := time.NewTicker(cadence)
@@ -106,8 +116,14 @@ func (s *Store) sampleRadar(ctx context.Context, receiver *feeds.ADSBReceiver, r
 	var active bool
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 `+radarFlightCandidates+`)`,
 		now.Add(-15*time.Minute).UnixNano(), now.Add(-30*time.Minute).Format(time.RFC3339)).Scan(&active)
-	if err != nil || !active {
+	if err != nil {
 		return err
+	}
+	if !active {
+		legs, err := eligibleRotationRadarLegs(ctx, s.db, now)
+		if err != nil || len(legs) == 0 {
+			return err
+		}
 	}
 	snapshot, err := receiver.Snapshot(ctx)
 	if err != nil {
@@ -121,47 +137,75 @@ func (s *Store) sampleRadar(ctx context.Context, receiver *feeds.ADSBReceiver, r
 	}
 	defer tx.Rollback()
 	now = time.Now()
-	rows, err := tx.QueryContext(ctx, `SELECT snapshot `+radarFlightCandidates,
+	rows, err := tx.QueryContext(ctx, `SELECT snapshot,
+COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id),'') `+radarFlightCandidates,
 		now.Add(-15*time.Minute).UnixNano(), now.Add(-30*time.Minute).Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	matches := make(map[string]radarSample)
-	for rows.Next() {
-		var raw []byte
-		var flight feeds.Flight
-		if err := rows.Scan(&raw); err != nil {
-			return err
-		}
-		if err := json.Unmarshal(raw, &flight); err != nil {
-			return err
-		}
+	matches := make(map[string]*radarReceiverMatch)
+	matchFlight := func(flight feeds.Flight, providerID string) (*radarReceiverMatch, feeds.Position) {
 		var modeS string
 		if registry != nil {
 			modeS = registry.ModeSHex(flight.TailNumber)
 		}
 		position, address, ok := snapshot.Match(flight, modeS)
 		if !ok || flight.ActualTakeoff == nil || position.At.Before(*flight.ActualTakeoff) {
-			continue
+			return nil, feeds.Position{}
 		}
-		if _, exists := matches[address]; exists {
-			// Keep the address marked ambiguous even if more legs match it.
-			matches[address] = radarSample{}
-		} else {
-			matches[address] = radarSample{flight, position}
+		identity := cmp.Or(providerID, flight.AeroProviderID(), flight.ID)
+		match := matches[address]
+		if match == nil {
+			match = &radarReceiverMatch{flight: flight, identity: identity}
+			matches[address] = match
+		} else if match.identity != identity || match.flight.Source != flight.Source ||
+			!strings.EqualFold(match.flight.TailNumber, flight.TailNumber) || !match.flight.ActualTakeoff.Equal(*flight.ActualTakeoff) {
+			match.ambiguous = true
+		}
+		return match, position
+	}
+	for rows.Next() {
+		var raw []byte
+		var flight feeds.Flight
+		var providerID string
+		if err := rows.Scan(&raw, &providerID); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(raw, &flight); err != nil {
+			return err
+		}
+		if match, position := matchFlight(flight, providerID); match != nil && !match.ambiguous {
+			match.tracked = append(match.tracked, radarSample{flight, position})
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	legs, err := eligibleRotationRadarLegs(ctx, tx, now)
+	if err != nil {
+		return err
+	}
+	for _, leg := range legs {
+		if match, position := matchFlight(leg.flight, ""); match != nil && !match.ambiguous {
+			match.rotations = append(match.rotations, rotationRadarSample{leg, position})
+		}
+	}
 	var samples []radarSample
-	for _, sample := range matches {
-		if sample.flight.ID != "" {
-			samples = append(samples, sample)
+	var rotations []rotationRadarSample
+	for _, match := range matches {
+		if !match.ambiguous {
+			samples = append(samples, match.tracked...)
+			rotations = append(rotations, match.rotations...)
 		}
 	}
 	if err := recordRadarSamples(ctx, tx, samples); err != nil {
+		return err
+	}
+	if err := recordRotationRadarSamples(ctx, tx, rotations); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -324,11 +368,14 @@ LEFT JOIN radar_receiver_revisions r ON r.flight_id=f.id WHERE f.id=?`, owner, i
 	return page, tx.Commit()
 }
 
-func mergeFlightPositions(provider, local []feeds.Position) []feeds.Position {
+// MergeFlightPositions combines provider and receiver fixes in timestamp order.
+func MergeFlightPositions(provider, local []feeds.Position) []feeds.Position {
 	if len(local) == 0 {
 		return provider
 	}
-	all := append(provider, local...)
+	all := make([]feeds.Position, 0, len(provider)+len(local))
+	all = append(all, provider...)
+	all = append(all, local...)
 	slices.SortStableFunc(all, func(a, b feeds.Position) int { return a.At.Compare(b.At) })
 	all = slices.CompactFunc(all, func(a, b feeds.Position) bool {
 		return a.At.Equal(b.At) && a.Latitude == b.Latitude && a.Longitude == b.Longitude

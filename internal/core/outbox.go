@@ -973,6 +973,9 @@ AND newer.observed_ns>r.observed_ns AND newer.observed_ns<=?)`,
 	if _, err := tx.ExecContext(ctx, `DELETE FROM radar_positions WHERE at_ns<=?`, now.Add(-7*24*time.Hour).UnixNano()); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM rotation_radar_positions WHERE at_ns<=?`, now.Add(-7*24*time.Hour).UnixNano()); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM friend_invites WHERE expires_ns<=?`, now.UnixNano()); err != nil {
 		return err
 	}

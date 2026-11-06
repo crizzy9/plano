@@ -447,8 +447,11 @@ while a tracked flight is airborne. Provider positions refresh on the main
 the revision changes. A withdrawn tail number or a change of aircraft or
 provider instance clears the affected receiver history.
 The current app resets its receiver cursor and removes those points when the
-server reports the reset. Local receiver points appear only to an installation
-tracking the flight.
+server reports the reset. When you open the immediate inbound leg from
+**Where’s my plane?**, its radar view includes receiver fixes while Plano can
+verify the aircraft and your onward flight is still tracked. Receiver fixes
+remain available during a provider track outage while the inbound observation
+is fresh.
 
 The map uses bundled Natural Earth coastlines. The latest position identifies
 its source and UTC observation time. Altitude, ground speed and vertical motion

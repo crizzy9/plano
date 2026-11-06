@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -364,4 +365,112 @@ func TestRadarCycleSuppressesOverlappingLegs(t *testing.T) {
 	assertPoints(second, 0)
 	assertPoints(other, 3)
 	assertPoints(stale, 0)
+}
+
+func TestRadarSharesOneVerifiedMovementWithItsOnwardRotation(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(filepath.Join(t.TempDir(), "rotation-radar.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC().Add(-time.Second).Truncate(time.Second)
+	takeoff, arrival, onward := now.Add(-time.Hour), now.Add(20*time.Minute), now.Add(time.Hour)
+	inbound := feeds.Flight{ID: "inbound", Number: "UA7", Origin: "SFO", Destination: "EWR", TailNumber: "N123AA",
+		Status: "airborne", ActualTakeoff: &takeoff, ScheduledArrival: &arrival, ObservedAt: now, Source: "flightaware_aeroapi"}
+	parent := feeds.Flight{ID: "onward", Number: "UA8", Origin: "EWR", Destination: "BOS", TailNumber: "N123AA",
+		Status: "scheduled", ScheduledDeparture: &onward, InboundID: inbound.ID, ObservedAt: now}
+	if err := s.Observe(ctx, parent, nil, []feeds.Flight{inbound}, nil); err != nil {
+		t.Fatal(err)
+	}
+	token, err := s.CreateInstallation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := s.Installation(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := func(flight feeds.Flight) {
+		t.Helper()
+		if err := s.Track(ctx, owner, flight.ID, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	track(parent)
+	calls := 0
+	client := &http.Client{Transport: radarFixtureTransport(func(*http.Request) (*http.Response, error) {
+		calls++
+		raw := fmt.Sprintf(`{"now":%d,"aircraft":[{"hex":"ab1234","r":"N123AA","type":"adsb_icao","lat":42,"lon":-72,"seen_pos":%d}]}`,
+			now.Unix(), 8-calls)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(raw))}, nil
+	})}
+	receiver, err := feeds.NewADSBReceiver("https://receiver.example.test/aircraft.json", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sample := func() {
+		t.Helper()
+		if err := s.sampleRadar(ctx, receiver, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertRotationPoints := func(count int) {
+		t.Helper()
+		_, _, positions, err := s.TrackedRotationRadar(ctx, owner, parent.ID, inbound.ID, time.Now())
+		if err != nil || len(positions) != count {
+			t.Fatalf("rotation got %d points, want %d, err=%v", len(positions), count, err)
+		}
+	}
+	sample()
+	assertRotationPoints(1)
+	alias := inbound
+	alias.ID = "scheduled_inbound"
+	if err := s.Observe(ctx, alias, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO aero_instance_keys(provider_id,flight_id) VALUES(?,?)`, inbound.ID, alias.ID); err != nil {
+		t.Fatal(err)
+	}
+	track(alias)
+	sample()
+	assertRotationPoints(2)
+	conflict := inbound
+	conflict.ID, conflict.Number = "different-leg", "UA9"
+	if err := s.Observe(ctx, conflict, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	track(conflict)
+	sample()
+	assertRotationPoints(2)
+	positions, err := s.RadarPositions(ctx, owner, alias.ID, nil, 256)
+	if err != nil || len(positions) != 1 || calls != 3 {
+		t.Fatalf("direct radar got %d points, receiver called %d times, err=%v", len(positions), calls, err)
+	}
+	if err := s.Untrack(ctx, owner, conflict.ID); err != nil {
+		t.Fatal(err)
+	}
+	parent.InboundID = "newly-assigned"
+	parent.ObservedAt = now.Add(time.Second)
+	if err := s.Observe(ctx, parent, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, positions, err := s.TrackedRotationRadar(ctx, owner, parent.ID, inbound.ID, time.Now()); !errors.Is(err, ErrNotFound) || len(positions) != 0 {
+		t.Fatalf("reassigned leg remained readable, positions=%v, err=%v", positions, err)
+	}
+	parent.ObservedAt = parent.ObservedAt.Add(time.Nanosecond)
+	if err := s.Observe(ctx, parent, nil, []feeds.Flight{inbound}, nil); err != nil {
+		t.Fatal(err)
+	}
+	sample()
+	assertRotationPoints(0)
+
+	// A newly verified same-tail fallback is usable after a partial refresh.
+	parent.ObservedAt = parent.ObservedAt.Add(time.Nanosecond)
+	inbound.ObservedAt = parent.ObservedAt
+	if err := s.Observe(ctx, parent, nil, []feeds.Flight{inbound}, nil); err != nil {
+		t.Fatal(err)
+	}
+	sample()
+	assertRotationPoints(1)
 }
