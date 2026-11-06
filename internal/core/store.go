@@ -46,6 +46,7 @@ type Device struct {
 	Kind               string `json:"kind"`
 	FlightID           string `json:"flightId,omitempty"`
 	RequestUpdateToken bool   `json:"requestUpdateToken,omitempty"`
+	Binding            string `json:"binding,omitempty"`
 }
 
 type StoreOptions struct {
@@ -103,6 +104,10 @@ CREATE TABLE IF NOT EXISTS devices (
   id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
   platform TEXT NOT NULL, token TEXT NOT NULL, kind TEXT NOT NULL, flight_id TEXT NOT NULL,
   registered INTEGER NOT NULL, UNIQUE(platform, token, kind)
+);
+CREATE TABLE IF NOT EXISTS device_bindings (
+  device_id INTEGER PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+  binding TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY, flight_id TEXT NOT NULL REFERENCES flights(id), at_ns INTEGER NOT NULL, data TEXT NOT NULL

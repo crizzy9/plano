@@ -223,3 +223,12 @@ set `PLANO_DELAY_MODEL_FILE` to its container path. [Delay model training](../cm
 Enable an HTTPS FlightAware callback or a signed FAA SWIM/EUROCONTROL bridge
 to supplement periodic ingestion. Each callback uses its own private mounted
 key file. [Aviation callbacks](AVIATION_CALLBACKS.md)
+
+## Android delivery binding
+
+Use the current backend and Android build together for flight alerts and the
+progress widget. An Android registration carries a device-generated binding
+for the selected host and alert session. Plano includes it in FCM data. The
+app verifies the binding before displaying a notification or updating its
+widget. Switching servers or turning alerts off invalidates the old binding
+on the device, including while a remote revocation is pending.

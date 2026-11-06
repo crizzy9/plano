@@ -34,10 +34,11 @@ type Server struct {
 type ownerHandler func(http.ResponseWriter, *http.Request, string) error
 
 var (
-	flightID     = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
-	flightNumber = regexp.MustCompile(`^[A-Z0-9]{2,3}[0-9]{1,5}[A-Z]?$`)
-	seatPattern  = regexp.MustCompile(`^[0-9]{1,3}[A-Z]{1,2}$`)
-	errInvalid   = errors.New("invalid request")
+	flightID       = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+	flightNumber   = regexp.MustCompile(`^[A-Z0-9]{2,3}[0-9]{1,5}[A-Z]?$`)
+	seatPattern    = regexp.MustCompile(`^[0-9]{1,3}[A-Z]{1,2}$`)
+	androidBinding = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	errInvalid     = errors.New("invalid request")
 )
 
 func (s Server) Handler() http.Handler {
@@ -257,7 +258,11 @@ func (s Server) device(w http.ResponseWriter, r *http.Request, owner string) err
 		w.WriteHeader(204)
 		return nil
 	}
-	if d.RequestUpdateToken && d.Kind != "live_start" || len(d.Token) < 20 || len(d.Token) > 4096 || strings.ContainsAny(d.Token, " \t\r\n") {
+	if d.Binding != "" && (d.Platform != "android" || d.Kind != "alert" || !androidBinding.MatchString(d.Binding)) {
+		return errInvalid
+	}
+	bindingRevocation := r.Method == http.MethodDelete && d.Token == "" && d.Binding != ""
+	if d.RequestUpdateToken && d.Kind != "live_start" || !bindingRevocation && (len(d.Token) < 20 || len(d.Token) > 4096 || strings.ContainsAny(d.Token, " \t\r\n")) {
 		return errInvalid
 	}
 	switch d.Kind {

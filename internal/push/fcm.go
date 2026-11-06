@@ -250,6 +250,9 @@ func (f *FCM) request(m Message, deviceToken string, now time.Time) (fcmRequest,
 		BandwidthConstrained: f.bandwidthConstrained,
 	}
 	data := map[string]string{"flightId": m.FlightID}
+	if m.binding != "" {
+		data["binding"] = m.binding
+	}
 	if m.Title != "" {
 		data["title"] = m.Title
 	}

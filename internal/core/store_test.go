@@ -202,3 +202,64 @@ func TestAPNSLiveWritesUseDistinctOrderedWireTimestamps(t *testing.T) {
 		t.Fatalf("second %v %v", second, err)
 	}
 }
+
+func TestAndroidBindingRotationKeepsOldDeliveriesAndRevocationScoped(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "binding.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	dep := now.Add(30 * time.Hour)
+	flight := feeds.Flight{ID: "binding-test", Number: "UA55", Origin: "LAX", Destination: "SFO", Status: "scheduled", DepartureGate: "A1", ObservedAt: now, ScheduledDeparture: &dep}
+	if err := s.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	token, err := s.CreateInstallation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := s.Installation(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Track(ctx, owner, flight.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	oldDevice := Device{Platform: "android", Kind: "alert", Token: "binding-fixture", Binding: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"}
+	if err := s.Register(ctx, owner, oldDevice, now); err != nil {
+		t.Fatal(err)
+	}
+	flight.DepartureGate, flight.ObservedAt = "B2", now.Add(time.Second)
+	if err := s.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	old, err := s.claim(ctx, flight.ObservedAt, 8)
+	if err != nil || len(old) != 1 || old[0].target.Binding != oldDevice.Binding {
+		t.Fatalf("old %v %v", old, err)
+	}
+	newDevice := oldDevice
+	newDevice.Binding = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
+	if err := s.Register(ctx, owner, newDevice, flight.ObservedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveDevice(ctx, owner, oldDevice); err != nil {
+		t.Fatal(err)
+	}
+	oldDevice.Token = ""
+	if err := s.RemoveDevice(ctx, owner, oldDevice); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.resolve(ctx, old[0], &push.DeliveryError{InvalidToken: true}, flight.ObservedAt); err != nil {
+		t.Fatal(err)
+	}
+	flight.DepartureGate, flight.ObservedAt = "C3", now.Add(2*time.Second)
+	if err := s.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	newJobs, err := s.claim(ctx, flight.ObservedAt, 8)
+	if err != nil || len(newJobs) != 1 || newJobs[0].target.Binding != newDevice.Binding || old[0].deviceID == newJobs[0].deviceID {
+		t.Fatalf("new %v %v", newJobs, err)
+	}
+}

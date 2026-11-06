@@ -35,7 +35,8 @@ func (s *Store) Register(ctx context.Context, owner string, device Device, now t
 		}
 	}
 	// Token ownership can move when an app is reinstalled. Cascade old queued work.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE platform=? AND token=? AND kind=? AND (owner<>? OR flight_id<>?)`, device.Platform, device.Token, device.Kind, owner, device.FlightID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE platform=? AND token=? AND kind=? AND (
+owner<>? OR flight_id<>? OR COALESCE((SELECT binding FROM device_bindings b WHERE b.device_id=devices.id),'')<>?)`, device.Platform, device.Token, device.Kind, owner, device.FlightID, device.Binding); err != nil {
 		return err
 	}
 	var deviceID int64
@@ -43,6 +44,11 @@ func (s *Store) Register(ctx context.Context, owner string, device Device, now t
 ON CONFLICT(platform,token,kind) DO UPDATE SET registered=excluded.registered RETURNING id`, owner, device.Platform, device.Token, device.Kind, device.FlightID, now.UnixNano()).Scan(&deviceID)
 	if err != nil {
 		return err
+	}
+	if device.Binding != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO device_bindings VALUES(?,?)`, deviceID, device.Binding); err != nil {
+			return err
+		}
 	}
 	if device.Kind == "live_start" {
 		if device.RequestUpdateToken {
@@ -292,8 +298,8 @@ func (s *Store) claim(ctx context.Context, now time.Time, limit int) ([]delivery
 	}
 	defer tx.Rollback()
 	t := now.UnixNano()
-	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.device_id,d.registered,o.attempts,d.platform,d.token,o.message
-FROM outbox o JOIN devices d ON d.id=o.device_id
+	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.device_id,d.registered,o.attempts,d.platform,d.token,COALESCE(b.binding,''),o.message
+FROM outbox o JOIN devices d ON d.id=o.device_id LEFT JOIN device_bindings b ON b.device_id=d.id
 WHERE o.done=0 AND o.due<=? AND o.expires>? AND o.lease_until<=?
 AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
   SELECT 1 FROM outbox older WHERE older.device_id=o.device_id AND older.flight_id=o.flight_id AND older.id<o.id
@@ -307,7 +313,7 @@ AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
 	for rows.Next() {
 		var job deliveryJob
 		var raw []byte
-		if err := rows.Scan(&job.id, &job.deviceID, &job.registered, &job.attempts, &job.target.Platform, &job.target.Token, &raw); err != nil {
+		if err := rows.Scan(&job.id, &job.deviceID, &job.registered, &job.attempts, &job.target.Platform, &job.target.Token, &job.target.Binding, &raw); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(raw, &job.message); err != nil {
@@ -462,7 +468,9 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 }
 
 func (s *Store) RemoveDevice(ctx context.Context, owner string, d Device) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE owner=? AND platform=? AND token=? AND kind=? AND flight_id=?`, owner, d.Platform, d.Token, d.Kind, d.FlightID)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE owner=? AND platform=? AND kind=? AND flight_id=?
+AND (token=? OR (?='' AND ?<>''))
+AND (?='' OR EXISTS(SELECT 1 FROM device_bindings WHERE device_id=devices.id AND binding=?))`, owner, d.Platform, d.Kind, d.FlightID, d.Token, d.Token, d.Binding, d.Binding, d.Binding)
 	return err
 }
 

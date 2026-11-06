@@ -35,6 +35,7 @@ const (
 type Target struct {
 	Platform string
 	Token    string
+	Binding  string
 }
 
 type LiveState struct {
@@ -64,7 +65,8 @@ type Message struct {
 	ExpiresAt          time.Time
 	StaleAt            time.Time
 	DismissAt          time.Time
-	RequestUpdateToken bool // Enable for iOS 18 or later push-to-start registrations.
+	RequestUpdateToken bool   // Enable for iOS 18 or later push-to-start registrations.
+	binding            string // Android delivery generation, added at dispatch from its device registration.
 }
 
 type Sender struct {
@@ -100,6 +102,7 @@ func (s Sender) Send(ctx context.Context, target Target, m Message) error {
 		if s.FCM == nil {
 			return &DeliveryError{Provider: "FCM", Code: "NotConfigured", Retryable: true}
 		}
+		m.binding = target.Binding
 		return s.FCM.Send(ctx, target.Token, m)
 	default:
 		return errors.New("unsupported push target platform")

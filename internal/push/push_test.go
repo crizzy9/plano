@@ -244,6 +244,7 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	const device = "fixture:android-registration"
+	const binding = "ffffffff-ffff-4fff-bfff-ffffffffffff"
 	now := time.Now()
 	messages := []Message{fixtureAlert(now), fixtureActivity(LiveStart, now), fixtureActivity(LiveUpdate, now), fixtureActivity(LiveEnd, now)}
 	var exchanges, sends int
@@ -302,7 +303,7 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 			}
 			got := wire.Message
 			ttl, err := time.ParseDuration(got.Android.TTL)
-			if got.Token != device || got.Android.Priority != "HIGH" || !got.Android.Bandwidth || err != nil || ttl <= 0 || ttl > 90*time.Second || got.Notification != nil || got.Android.UI != nil || got.Data["flightId"] != message.FlightID {
+			if got.Token != device || got.Android.Priority != "HIGH" || !got.Android.Bandwidth || err != nil || ttl <= 0 || ttl > 90*time.Second || got.Notification != nil || got.Android.UI != nil || got.Data["flightId"] != message.FlightID || got.Data["binding"] != binding {
 				t.Errorf("invalid FCM data request: %s", body)
 			}
 			if message.Kind == Alert {
@@ -328,7 +329,7 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 		}
 	})}
 	for i, message := range messages {
-		err := client.Send(t.Context(), device, message)
+		err := (Sender{FCM: client}).Send(t.Context(), Target{Platform: "android", Token: device, Binding: binding}, message)
 		if i == 1 {
 			var rejection *DeliveryError
 			if !errors.As(err, &rejection) || rejection.InvalidToken || rejection.Retryable || rejection.Status != 401 {
