@@ -23,6 +23,7 @@ type CalendarEvent = {
   startDate: string | Date;
   timeZone?: string;
   allDay?: boolean;
+  status?: string;
 };
 
 type CalendarFlight = {
@@ -67,6 +68,8 @@ export function selectCalendarFlights(events: CalendarEvent[], from: Date, until
   const firstDay = dateKey(from);
   const lastDay = dateKey(until);
   for (const event of events) {
+    // Expo's iOS legacy bridge uses 'cancelled' for EKEventStatus.canceled.
+    if (event.status === 'canceled' || event.status === 'cancelled') continue;
     const title = event.title?.trim() ?? '';
     const match = title.match(codePattern);
     if (!match) continue;

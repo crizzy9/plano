@@ -27,6 +27,17 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "forward-email" {
+		if len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: plano forward-email")
+			os.Exit(emailRelayConfigError)
+		}
+		status, err := forwardEmailFromEnv(context.Background(), os.Stdin)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		os.Exit(status)
+	}
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(env("PLANO_LOG_LEVEL", "info"))); err != nil {
 		fmt.Fprintln(os.Stderr, "invalid PLANO_LOG_LEVEL")
@@ -62,7 +73,7 @@ func main() {
 	}
 	checkOnly := len(os.Args) == 2 && os.Args[1] == "check-config"
 	if len(os.Args) > 1 && !checkOnly {
-		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples]")
+		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples|forward-email]")
 		os.Exit(2)
 	}
 	if err := run(logger, checkOnly); err != nil {

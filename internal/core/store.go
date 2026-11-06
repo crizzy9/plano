@@ -189,6 +189,11 @@ CREATE TABLE IF NOT EXISTS imported_messages (
   owner TEXT NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
   digest TEXT NOT NULL, imported INTEGER NOT NULL, PRIMARY KEY(owner, digest)
 );
+CREATE TABLE IF NOT EXISTS email_import_legs (
+  owner TEXT NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
+  digest TEXT NOT NULL, leg_hash TEXT NOT NULL, flight_hash TEXT NOT NULL,
+  PRIMARY KEY(owner, digest, leg_hash)
+);
 CREATE TABLE IF NOT EXISTS bookings (
   owner TEXT NOT NULL, flight_id TEXT NOT NULL, locator_hash TEXT NOT NULL,
   PRIMARY KEY(owner, flight_id, locator_hash),

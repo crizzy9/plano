@@ -180,7 +180,12 @@ func (s Server) emailWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, itinerary.MaxEmailBytes))
 	if err != nil {
-		respond(w, 413, map[string]string{"error": "could not read email within size limit"})
+		var oversized *http.MaxBytesError
+		if errors.As(err, &oversized) {
+			respond(w, 413, map[string]string{"error": "email exceeds size limit"})
+		} else {
+			respond(w, 503, map[string]string{"error": "email could not be read"})
+		}
 		return
 	}
 	checksum := sha256.Sum256(raw)
@@ -195,6 +200,10 @@ func (s Server) emailWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parsed, err := itinerary.Email(raw)
+	if err == nil && parsed.CancellationOnly {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if err != nil || len(parsed.Legs) == 0 {
 		respond(w, 422, map[string]string{"error": "email has no recognized dated flights"})
 		return
@@ -205,29 +214,62 @@ func (s Server) emailWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	result, err := s.resolveItinerary(ctx, parsed)
+	progress, err := s.Store.EmailImportProgress(ctx, owner, digest)
 	if err != nil {
 		s.failure(w, err)
 		return
 	}
-	if len(result.Flights) == 0 {
-		respond(w, 422, map[string]string{"error": "email has no uniquely matching flights"})
+	wanted := make([]string, 0, len(parsed.Legs))
+	resolved := make([]core.EmailImportLeg, 0, len(parsed.Legs))
+	for _, leg := range parsed.Legs {
+		key := emailLegKey(digest, leg)
+		if slices.Contains(wanted, key) {
+			continue
+		}
+		wanted = append(wanted, key)
+		if progress[key] {
+			continue
+		}
+		matches, err := s.lookupLeg(ctx, leg)
+		if err != nil {
+			s.failure(w, err)
+			return
+		}
+		if len(matches) == 1 {
+			resolved = append(resolved, core.EmailImportLeg{Key: key, FlightID: matches[0].ID})
+		}
+	}
+	complete, partial, err := s.Store.CommitEmailImport(ctx, owner, digest, token, s.bookingDigest(owner, parsed.BookingCode), wanted, resolved)
+	if errors.Is(err, core.ErrEmailRelayUnauthorized) {
+		respond(w, 401, map[string]string{"error": "valid email relay token required"})
 		return
 	}
-	partial := len(result.Unmatched) > 0
-	if partial {
-		digest = ""
+	if errors.Is(err, core.ErrNotFound) {
+		respond(w, 503, map[string]string{"error": "resolved flight temporarily unavailable"})
+		return
 	}
-	if _, err := s.Store.CommitImport(ctx, owner, result.Flights, s.bookingDigest(owner, parsed.BookingCode), digest, token); err != nil {
+	if err != nil {
 		s.failure(w, err)
 		return
 	}
-	if partial {
+	switch {
+	case complete:
+		w.WriteHeader(204)
+	case partial:
 		w.Header().Set("Retry-After", "300")
 		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "some flights could not yet be matched"})
-		return
+	default:
+		respond(w, 422, map[string]string{"error": "email has no uniquely matching flights"})
 	}
-	w.WriteHeader(204)
+}
+
+func emailLegKey(digest string, leg itinerary.Leg) string {
+	// Include the message digest so equal legs in separate emails have
+	// independent receipts. Normalize time zones to the same instant.
+	key := sha256.Sum256([]byte(strings.Join([]string{
+		digest, leg.Number, leg.Date, leg.LocalDeparture, leg.UTCDeparture.UTC().Format(time.RFC3339Nano),
+	}, "\x00")))
+	return hex.EncodeToString(key[:])
 }
 
 var bookingPattern = regexp.MustCompile(`^[A-Z0-9]{6}$`)

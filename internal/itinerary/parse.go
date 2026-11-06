@@ -19,9 +19,10 @@ type Leg struct {
 }
 
 type Itinerary struct {
-	Legs        []Leg
-	BookingCode string
-	Truncated   bool
+	Legs             []Leg
+	BookingCode      string
+	Truncated        bool
+	CancellationOnly bool
 }
 
 var (
@@ -36,7 +37,7 @@ func Parse(text, date string) (Itinerary, error) {
 		return Itinerary{}, ErrInvalid
 	}
 	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(text)), "BEGIN:VCALENDAR") {
-		return calendar(text, MaxFlights, "", nil)
+		return calendar(text, MaxFlights, "")
 	}
 	return fromText(text, date), nil
 }

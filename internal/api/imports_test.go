@@ -20,14 +20,70 @@ import (
 
 type evolvingImportSource struct {
 	demodata.Source
-	secondLeg bool
+	secondLeg       bool
+	firstLegLookups int
 }
 
 func (s *evolvingImportSource) Search(ctx context.Context, number string, date time.Time) ([]feeds.Flight, error) {
+	if number == "UA123" {
+		s.firstLegLookups++
+	}
 	if number == "UA456" && !s.secondLeg {
 		return []feeds.Flight{}, nil
 	}
 	return s.Source.Search(ctx, number, date)
+}
+
+func TestEmailRetryOnlyResolvesUnfinishedLegs(t *testing.T) {
+	ctx := t.Context()
+	store, err := core.Open(filepath.Join(t.TempDir(), "plano.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	installation, err := store.CreateInstallation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.Installation(ctx, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := store.RotateEmailRelay(ctx, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &evolvingImportSource{}
+	handler := (api.Server{Store: store, Source: source, Demo: true, Logger: slog.New(slog.DiscardHandler)}).Handler()
+	const email = "Subject: Itinerary\r\nContent-Type: text/plain\r\n\r\n" +
+		"UA123 | Departure: 5 January 2027\r\nUA456 | Departure: 7 January 2027\r\n"
+	forward := func(body string, want int) {
+		t.Helper()
+		r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/webhooks/email", strings.NewReader(body))
+		r.Header.Set("Content-Type", "message/rfc822")
+		r.Header.Set("Authorization", "Bearer "+relay)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("email delivery = %d (%s), want %d", w.Code, w.Body, want)
+		}
+	}
+	forward(email, http.StatusServiceUnavailable)
+	if err := store.Untrack(ctx, owner, "demo-UA123-2027-01-05"); err != nil {
+		t.Fatal(err)
+	}
+	forward(email, http.StatusServiceUnavailable)
+	source.secondLeg = true
+	forward(email, http.StatusNoContent)
+	forward(email, http.StatusNoContent)
+	const cancellation = "Subject: Calendar cancellation\r\nContent-Type: text/calendar; method=CANCEL\r\n\r\n" +
+		"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:CANCEL\r\nBEGIN:VEVENT\r\nUID:fixture-cancel\r\n" +
+		"DTSTART:20270105T150000Z\r\nSUMMARY:UA123\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	forward(cancellation, http.StatusNoContent)
+	flights, err := store.Tracked(ctx, owner)
+	if err != nil || len(flights) != 1 || flights[0].ID != "demo-UA456-2027-01-07" || source.firstLegLookups != 1 {
+		t.Fatalf("retry tracked %+v after %d first-leg lookups, error = %v", flights, source.firstLegLookups, err)
+	}
 }
 
 func TestRelayReplayRevocationAndPrivateBookingLookup(t *testing.T) {

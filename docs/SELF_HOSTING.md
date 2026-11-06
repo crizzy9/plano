@@ -269,8 +269,10 @@ Set `PLANO_AIRPORT_TRANSFERS_FILE` to a read-only route graph if you maintain
 terminal and gate directions. [Airport transfer configuration](AIRPORT_TRANSFERS.md)
 
 Set `PLANO_BOOKING_KEY_FILE` to a read-only private key file to index imported
-booking locators. Email relays and the TripIt import have their own input
-contracts. [Flight imports](FLIGHT_IMPORTS.md)
+booking locators. Run `plano forward-email` as a pipe command on your inbound
+mail host to deliver confirmations to the self-hosted webhook. The command
+uses its own relay token file and lets the mail queue retry temporary failures.
+[Flight imports](FLIGHT_IMPORTS.md)
 
 In live mode, set `PLANO_TRIPIT_SYNC_KEY_FILE` to a mounted file with a stable
 random key of at least 32 bytes to enable scheduled TripIt imports. Keep the

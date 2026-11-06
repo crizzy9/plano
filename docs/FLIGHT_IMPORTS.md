@@ -2,7 +2,7 @@
 
 Open **Tools → Import flights**. Plano imports only uniquely matched flight instances, up to eight distinct dated legs per request. Split larger pasted itineraries into separate requests. A pasted confirmation can contain separate dates for each leg. For iCalendar files, a UTC start or recognized IANA time zone lets Plano match the scheduled departure instant and check adjacent origin dates when needed. All-day events, floating times, and unrecognized time zones use the event date. The parser skips cancelled and recurring calendar entries. [iCalendar specification](https://www.rfc-editor.org/rfc/rfc5545.html)
 
-The mobile calendar integration requests permission before reading event titles and departure times. On-demand and optional background scans send only recognized flight designators with departure dates or times to the selected self-host. Background sync enabled in an earlier release keeps sending dates until you turn it off and back on. iOS and Android decide when the background task can run.
+The mobile calendar integration requests permission before reading event titles and departure times. On-demand and optional background scans skip events the device marks canceled and send only recognized flight designators with departure dates or times to the selected self-host. Background sync enabled in an earlier release keeps sending dates until you turn it off and back on. iOS and Android decide when the background task can run.
 
 For an overnight flight, label the departure and arrival separately. Plano uses the departure date. If the confirmation supplies a local departure time, Plano matches the scheduled minute in the flight’s origin time zone. A missing origin time zone or multiple matching flights leaves that leg unresolved. Forwarded HTML tables with Flight, Departure, and Arrival headers can supply the same information.
 
@@ -16,17 +16,17 @@ A labeled departure can also include a timestamp with a numeric UTC offset, such
 
 In the import screen, generate an email relay token. Each installation has one relay credential. Generating a replacement invalidates the previous token. A relay token can submit email for import. Installation credentials are required to view tracked flights or bookings.
 
-Configure your inbound mail service or local MTA to send the complete RFC 5322 message as `message/rfc822` over HTTPS. For example, a Postfix pipe can pass the incoming message on stdin to a wrapper invoking the following command. Put `Authorization: Bearer ` followed by the relay token in a private header file readable by the relay account. [Postfix delivery architecture](https://www.postfix.org/OVERVIEW.html)
+Configure your inbound mail service or local MTA to send the complete RFC 5322 message as `message/rfc822` over HTTPS. With Postfix, pass the incoming message on stdin from a pipe transport for a private import recipient. Restrict delivery to trusted forwarding sources because every accepted message can add a tracked flight. Run the pipe under a dedicated relay account and put only the relay token in a private file readable by that account. A wrapper can invoke the Plano binary as follows. [Postfix pipe delivery](https://www.postfix.net/pipe.8.html)
 
 ```sh
-curl --fail-with-body --silent --show-error \
-  --header @/run/secrets/plano-relay.headers \
-  --header 'Content-Type: message/rfc822' \
-  --data-binary @- \
-  https://plano.example.net/v1/webhooks/email
+export PLANO_EMAIL_RELAY_URL=https://plano.example.net/v1/webhooks/email
+export PLANO_EMAIL_RELAY_TOKEN_FILE=/run/secrets/plano-relay-token
+exec /usr/local/bin/plano forward-email
 ```
 
-Send at most 256 KiB per message. The parser recognizes plain text, HTML text, forwarded messages and calendar parts. It never follows links in the message. A `204` means all recognized legs resolved or the message was already accepted. A partial match keeps the resolved flights and returns `503` so a resend can finish the itinerary. For `422`, review the original message and enter the flight manually if needed. Retry network failures and temporary server failures through the mail system. Plano keeps a message digest for deduplication and does not retain the email body.
+Send at most 256 KiB per message. `forward-email` exits with `75` for temporary failures so the mail system can retry. It reports `65` for rejected input, `77` for an unauthorized relay, and `78` for configuration or unexpected endpoint errors. Diagnostics omit email contents and credentials.
+
+The parser recognizes plain text, HTML text, forwarded messages, and calendar parts. It never follows links in the message. A `204` acknowledges an accepted delivery. A recognized calendar cancellation with no importable legs also returns `204` and leaves tracking as it was. A partial match keeps the resolved flights and returns `503`. A retry of the same bytes resolves only unfinished legs, even if you have since untracked a resolved flight. For `422`, review the original message and enter the flight manually if needed. Plano keeps digests for deduplication and discards the email body. [iCalendar cancellation method](https://www.rfc-editor.org/rfc/rfc5546.html#section-3.2.5)
 
 ## Import a TripIt calendar feed
 
