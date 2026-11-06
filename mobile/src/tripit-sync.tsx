@@ -13,7 +13,7 @@ function syncTime(instant: string) {
 }
 
 export function TripItSync({ api, disabled }: { api: PlanoAPI; disabled?: boolean }) {
-  const load = useCallback(() => api.tripItSubscription(), [api]);
+  const load = useCallback((signal: AbortSignal) => api.tripItSubscription(signal), [api]);
   const remote = useRemote(load, !!api.server, 60_000);
   const [editing, setEditing] = useState(false);
   const [url, setURL] = useState('');

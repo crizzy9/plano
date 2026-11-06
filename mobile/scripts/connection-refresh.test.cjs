@@ -27,7 +27,10 @@ function connectionFixture(connection) {
     },
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@react-navigation/native': { useFocusEffect: (effect) => { focusCleanup ??= effect(); } },
-    'react-native': { Platform: { OS: 'android' }, StyleSheet: { create: (styles) => styles }, Text: 'Text', View: 'View' },
+    'react-native': {
+      AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
+      Platform: { OS: 'android' }, StyleSheet: { create: (styles) => styles }, Text: 'Text', View: 'View',
+    },
     './flight': { errorText: (cause) => cause.message },
     './theme': { usePalette: () => ({ colors: {} }) },
     './ui': { Action: 'Action', Body: 'Body', ErrorMessage: 'ErrorMessage', Heading: 'Heading', layout: {} },
@@ -41,6 +44,7 @@ function connectionFixture(connection) {
     runInNewContext(outputText, {
       exports,
       require: (id) => modules[id] ?? {},
+      AbortController,
       URL,
       setTimeout(callback, delay) {
         const id = ++nextTimer;
@@ -92,9 +96,10 @@ const assessment = {
 
 test('a failed connection poll hides prior guidance until a fresh assessment arrives', async () => {
   let calls = 0;
-  const fixture = connectionFixture(async (inbound, outbound) => {
+  const fixture = connectionFixture(async (inbound, outbound, signal) => {
     assert.equal(inbound, 'UA123');
     assert.equal(outbound, 'UA456');
+    assert.ok(signal instanceof AbortSignal && !signal.aborted);
     switch (++calls) {
       case 1: return assessment;
       case 2: throw new Error('This pair no longer connects at the same airport.');

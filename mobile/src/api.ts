@@ -695,14 +695,47 @@ class APIError extends Error {
 
 class ConnectionError extends Error {}
 
+class RequestAbortedError extends Error {
+  constructor() {
+    super('Plano request was canceled.');
+    this.name = 'AbortError';
+  }
+}
+
+function checkRequestSignal(signal?: AbortSignal | null) {
+  if (signal?.aborted) throw new RequestAbortedError();
+}
+
+// A read can leave while shared token acquisition or a storage check finishes.
+async function waitForRequest<T>(pending: Promise<T>, signal?: AbortSignal | null): Promise<T> {
+  if (!signal) return pending;
+  let abort = () => {};
+  const canceled = new Promise<never>((_, reject) => {
+    abort = () => reject(new RequestAbortedError());
+    signal.addEventListener('abort', abort);
+    if (signal.aborted) abort();
+  });
+  try {
+    const result = await Promise.race([pending, canceled]);
+    checkRequestSignal(signal);
+    return result;
+  } finally {
+    signal.removeEventListener('abort', abort);
+  }
+}
+
 function canReadOffline(error: unknown) {
   return error instanceof ConnectionError || error instanceof APIError && error.status >= 500;
 }
 
 async function request<T>(server: string, path: string, init: RequestInit = {}, timeoutMs = 12_000): Promise<T> {
+  const { signal } = init;
+  checkRequestSignal(signal);
   if (!server) throw new Error('Connect to a Plano server in Settings.');
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const abort = () => controller.abort();
+  signal?.addEventListener('abort', abort);
+  const timeout = setTimeout(abort, timeoutMs);
   let raw: string;
   try {
     const response = await fetch(server + path, {
@@ -711,6 +744,7 @@ async function request<T>(server: string, path: string, init: RequestInit = {}, 
       signal: controller.signal,
       redirect: 'error',
     });
+    checkRequestSignal(controller.signal);
     if (!response.ok) {
       if (response.status === 401) throw new APIError(401, 'This installation needs to reconnect.');
       if (response.status === 403) throw new APIError(403, 'This server requires an enrollment code. Enter it in Settings.');
@@ -723,11 +757,14 @@ async function request<T>(server: string, path: string, init: RequestInit = {}, 
       throw new APIError(response.status, 'Plano couldn’t complete that request.');
     }
     raw = await response.text();
+    checkRequestSignal(controller.signal);
   } catch (error) {
+    checkRequestSignal(signal);
     if (error instanceof APIError) throw error;
     throw new ConnectionError('Couldn’t reach Plano. Check the server address and your connection.');
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener('abort', abort);
   }
   try {
     return (raw ? JSON.parse(raw) : undefined) as T;
@@ -782,8 +819,13 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
     return tokenPromise;
   }
 
+  function readInstallationToken(signal?: AbortSignal | null) {
+    checkRequestSignal(signal);
+    return waitForRequest(installationToken(), signal);
+  }
+
   async function authenticated<T>(path: string, init: RequestInit = {}, timeoutMs?: number) {
-    const token = await installationToken();
+    const token = await readInstallationToken(init.signal);
     const send = () => request<T>(server, path, { ...init, headers: { ...init.headers, Authorization: `Bearer ${token}` } }, timeoutMs);
     const authorize = options.withRequestAuthorization;
     if (authorize) {
@@ -801,38 +843,51 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
     return send();
   }
 
-  async function withFlightCache<T>(token: string, revision: number | undefined, use: (scope: string) => T): Promise<T | undefined> {
+  async function withFlightCache<T>(token: string, revision: number | undefined, use: (scope: string) => T,
+    signal?: AbortSignal): Promise<T | undefined> {
+    checkRequestSignal(signal);
     if (options.access || Platform.OS === 'web') return;
-    try {
+    async function useCurrentCache() {
       const scope = await offlineFlightScope(server, token);
+      checkRequestSignal(signal);
       if (!scope) return;
-      return await serializeRetirement(async () => {
-        if (await loadServer() !== server || await savedToken() !== token) return;
+      return serializeRetirement(async () => {
+        checkRequestSignal(signal);
+        if (await loadServer() !== server) return;
+        checkRequestSignal(signal);
+        if (await savedToken() !== token) return;
+        checkRequestSignal(signal);
         if (revision !== undefined && offlineRevision !== revision) return;
         return use(scope);
       });
+    }
+    try {
+      return await waitForRequest(useCurrentCache(), signal);
     } catch {
+      checkRequestSignal(signal);
       // A cache error does not affect the live response.
     }
   }
 
-  async function clearRejectedCache(error: unknown, token: string) {
+  async function clearRejectedCache(error: unknown, token: string, signal?: AbortSignal) {
     if (error instanceof APIError && (error.status === 401 || error.status === 403)) {
-      offlineRevision += 1;
-      await withFlightCache(token, undefined, clearSavedFlights);
+      await withFlightCache(token, undefined, (scope) => {
+        offlineRevision += 1;
+        clearSavedFlights(scope);
+      }, signal);
     }
   }
 
-  async function tracked(flightIds: readonly string[] = []): Promise<Flight[]> {
+  async function tracked(flightIds: readonly string[] = [], signal?: AbortSignal): Promise<Flight[]> {
     const query = new URLSearchParams();
     for (const id of flightIds) query.append('flightId', id);
     const path = flightIds.length ? `/v1/tracked?${query}` : '/v1/tracked';
-    return (await authenticated<{ flights: Flight[] }>(path)).flights;
+    return (await authenticated<{ flights: Flight[] }>(path, { signal })).flights;
   }
 
-  function detail(id: string, rotationOf?: string) {
+  function detail(id: string, rotationOf?: string, signal?: AbortSignal) {
     const query = rotationOf ? `?${new URLSearchParams({ rotationOf })}` : '';
-    return authenticated<FlightDetail>(`${flightPath(id)}${query}`);
+    return authenticated<FlightDetail>(`${flightPath(id)}${query}`, { signal });
   }
 
   return {
@@ -845,26 +900,30 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
     },
     tracked,
     detail,
-    async flightOverview(): Promise<FlightOverview> {
-      const token = await installationToken();
+    async flightOverview(signal?: AbortSignal): Promise<FlightOverview> {
+      const token = await readInstallationToken(signal);
+      checkRequestSignal(signal);
       const revision = ++offlineRevision;
       try {
-        const flights = await tracked();
-        await withFlightCache(token, revision, (scope) => saveOverview(scope, flights));
+        const flights = await tracked([], signal);
+        await withFlightCache(token, revision, (scope) => saveOverview(scope, flights), signal);
         return { flights };
       } catch (error) {
+        checkRequestSignal(signal);
         if (canReadOffline(error)) {
-          const saved = await withFlightCache(token, revision, readSavedOverview);
+          const saved = await withFlightCache(token, revision, readSavedOverview, signal);
           if (saved) return saved;
         }
-        await clearRejectedCache(error, token);
+        await clearRejectedCache(error, token, signal);
         throw error;
       }
     },
-    async flightScreen(id: string, rotationOf?: string): Promise<FlightScreenData> {
-      const token = await installationToken();
+    async flightScreen(id: string, rotationOf?: string, signal?: AbortSignal): Promise<FlightScreenData> {
+      const token = await readInstallationToken(signal);
+      checkRequestSignal(signal);
       const revision = ++offlineRevision;
-      const [snapshot, selection] = await Promise.allSettled([detail(id, rotationOf), tracked([id])]);
+      const [snapshot, selection] = await Promise.allSettled([detail(id, rotationOf, signal), tracked([id], signal)]);
+      checkRequestSignal(signal);
       if (snapshot.status === 'fulfilled' && selection.status === 'fulfilled') {
         const flight = snapshot.value;
         const isTracked = !flight.rotationSnapshot && selection.value.some((item) => item.id === id);
@@ -872,7 +931,7 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
           await withFlightCache(token, revision, (scope) => {
             if (isTracked && flight.flight.id === id) saveFlightDetail(scope, flight);
             else if (!isTracked) forgetSavedFlight(scope, id);
-          });
+          }, signal);
         }
         return { detail: flight, tracked: isTracked };
       }
@@ -880,24 +939,24 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
       const rejection = failures.find((error) => error instanceof APIError && (error.status === 401 || error.status === 403))
         ?? failures.find((error) => !canReadOffline(error));
       if (rejection !== undefined) {
-        await clearRejectedCache(rejection, token);
+        await clearRejectedCache(rejection, token, signal);
         if (!rotationOf && rejection instanceof APIError && rejection.status === 404) {
-          await withFlightCache(token, revision, (scope) => forgetSavedFlight(scope, id));
+          await withFlightCache(token, revision, (scope) => forgetSavedFlight(scope, id), signal);
         }
         throw rejection;
       }
       if (!rotationOf) {
         if (selection.status === 'fulfilled' && !selection.value.some((flight) => flight.id === id)) {
-          await withFlightCache(token, revision, (scope) => forgetSavedFlight(scope, id));
+          await withFlightCache(token, revision, (scope) => forgetSavedFlight(scope, id), signal);
         } else {
-          const saved = await withFlightCache(token, revision, (scope) => readSavedFlight(scope, id));
+          const saved = await withFlightCache(token, revision, (scope) => readSavedFlight(scope, id), signal);
           if (saved) return { ...saved, tracked: true };
         }
       }
       throw failures[0];
     },
     async radar(id: string, after?: string, providerRevision?: string, receiverRevision?: string,
-      swim?: RadarCursor, eurocontrol?: RadarCursor) {
+      swim?: RadarCursor, eurocontrol?: RadarCursor, signal?: AbortSignal) {
       const query = new URLSearchParams({ provider: '1', swim: '1', eurocontrol: '1', snapshot: '1' });
       if (after) query.set('after', after);
       if (receiverRevision !== undefined) query.set('receiverRevision', receiverRevision);
@@ -907,7 +966,7 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
       if (eurocontrol?.after) query.set('eurocontrolAfter', eurocontrol.after);
       if (eurocontrol?.revision !== undefined) query.set('eurocontrolRevision', eurocontrol.revision);
       try {
-        return await authenticated<RadarBatch>(`${flightPath(id)}/radar?${query}`);
+        return await authenticated<RadarBatch>(`${flightPath(id)}/radar?${query}`, { signal });
       } catch (error) {
         if (error instanceof APIError && [404, 405, 501].includes(error.status)) return undefined;
         throw error;
@@ -989,7 +1048,7 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
     },
     removePassportArchive: (id: string) =>
       authenticated<void>(`/v1/passport/archive/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-    friends: () => authenticated<Friends>('/v1/friends'),
+    friends: (signal?: AbortSignal) => authenticated<Friends>('/v1/friends', { signal }),
     createFriendInvite: (alias: string) => authenticated<FriendInvite>('/v1/friends/invites', {
       method: 'POST', body: JSON.stringify({ alias }),
     }),
@@ -1010,9 +1069,9 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
     setFriendAlerts: (id: string, mode: FriendAlertMode) =>
       authenticated<void>(`${friendPath(id)}/alerts`, { method: 'PUT', body: JSON.stringify({ mode }) }),
     removeFriend: (id: string) => authenticated<void>(friendPath(id), { method: 'DELETE' }),
-    connection: (inbound: string, outbound: string) => {
+    connection: (inbound: string, outbound: string, signal?: AbortSignal) => {
       const query = new URLSearchParams({ inbound, outbound });
-      return authenticated<Connection>(`/v1/connections?${query}`);
+      return authenticated<Connection>(`/v1/connections?${query}`, { signal });
     },
     async connectionSuggestions(): Promise<ConnectionSuggestion[] | undefined> {
       try {
@@ -1022,9 +1081,9 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
         throw error;
       }
     },
-    async connectionMonitors(): Promise<ConnectionMonitor[]> {
+    async connectionMonitors(signal?: AbortSignal): Promise<ConnectionMonitor[]> {
       try {
-        return (await authenticated<{ monitors: ConnectionMonitor[] }>('/v1/connection-monitors')).monitors ?? [];
+        return (await authenticated<{ monitors: ConnectionMonitor[] }>('/v1/connection-monitors', { signal })).monitors ?? [];
       } catch (error) {
         if (error instanceof APIError && [404, 405, 501].includes(error.status)) return [];
         throw error;
@@ -1046,9 +1105,9 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
     importTripIt: (url: string, offset = 0) => authenticated<ImportResult>('/v1/import/tripit', {
       method: 'POST', body: JSON.stringify({ url, offset }),
     }, 28_000),
-    async tripItSubscription(): Promise<TripItSubscriptionStatus> {
+    async tripItSubscription(signal?: AbortSignal): Promise<TripItSubscriptionStatus> {
       try {
-        return await authenticated<TripItSubscriptionStatus>('/v1/import/tripit/subscription');
+        return await authenticated<TripItSubscriptionStatus>('/v1/import/tripit/subscription', { signal });
       } catch (error) {
         if (error instanceof APIError && [404, 405, 501].includes(error.status)) {
           return { available: false, enabled: false };

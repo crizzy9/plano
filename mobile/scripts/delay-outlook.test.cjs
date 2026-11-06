@@ -65,6 +65,7 @@ function flightFixture(flightScreen) {
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@react-navigation/native': { useFocusEffect: (callback) => useEffect(callback, [callback]) },
     'react-native': {
+      AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
       Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles },
       Linking: { openURL: async (url) => { openedLinks.push(url); } },
     },
@@ -77,6 +78,7 @@ function flightFixture(flightScreen) {
   runInNewContext(outputText, {
     exports,
     require: (id) => modules[id] ?? {},
+    AbortController,
     Date: class extends Date { static now() { return now; } },
     setTimeout(callback, delay) {
       const id = ++nextTimer;

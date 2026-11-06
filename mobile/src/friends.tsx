@@ -1,6 +1,5 @@
 import { useCallback, useRef, useState, type ReactNode } from 'react';
-import { useFocusEffect } from '@react-navigation/native';
-import { AppState, Platform, Pressable, Share, StyleSheet, Switch, Text, View } from 'react-native';
+import { Platform, Pressable, Share, StyleSheet, Switch, Text, View } from 'react-native';
 import type { Flight, Friend, FriendAlertMode, FriendInvite, PlanoAPI } from './api';
 import { arrival, departure, errorText, flightStatus, formatDay, formatTime } from './flight';
 import { Page, useRemote } from './screens';
@@ -16,16 +15,9 @@ const alertOptions: ReadonlyArray<{ mode: FriendAlertMode; label: string }> = [
 
 export function FriendsScreen({ api }: { api: PlanoAPI }) {
   const { colors } = usePalette();
-  const loadFriends = useCallback(() => api.friends(), [api]);
+  const loadFriends = useCallback((signal: AbortSignal) => api.friends(signal), [api]);
   const loadTracked = useCallback(() => api.tracked(), [api]);
   const remote = useRemote(loadFriends, true, 45_000);
-  const refreshFriends = remote.refresh;
-  useFocusEffect(useCallback(() => {
-    const subscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active') refreshFriends();
-    });
-    return () => subscription.remove();
-  }, [refreshFriends]));
   const [panel, setPanel] = useState<Panel>();
   const [alias, setAlias] = useState('');
   const [code, setCode] = useState('');

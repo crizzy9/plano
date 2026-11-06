@@ -275,7 +275,7 @@ export function ConnectionScreen({ api, initialPair }: { api: PlanoAPI; initialP
   const loadSuggestions = useCallback(() => api.connectionSuggestions(), [api]);
   const { value: suggestions, error: suggestionError, pending: suggestionsPending, refresh: refreshSuggestions } =
     useRemote(loadSuggestions, !!api.server && !openedPair);
-  const loadMonitors = useCallback(() => api.connectionMonitors(), [api]);
+  const loadMonitors = useCallback((signal: AbortSignal) => api.connectionMonitors(signal), [api]);
   const { value: monitors, error: monitorError, refresh: refreshMonitors } =
     useRemote(loadMonitors, !!api.server && !openedPair, 30_000);
   const [inboundID, setInboundID] = useState<string>();
@@ -459,7 +459,7 @@ function CheckedConnection({ api, inbound, outbound, monitorBusy, changeMonitori
   const { colors } = usePalette();
   const inboundID = inbound.id;
   const outboundID = outbound.id;
-  const load = useCallback(() => api.connection(inboundID, outboundID), [api, inboundID, outboundID]);
+  const load = useCallback((signal: AbortSignal) => api.connection(inboundID, outboundID, signal), [api, inboundID, outboundID]);
   const { value, setValue: setResult, error, pending, refresh } = useRemote(load, true, 30_000);
   const result = error ? undefined : value;
   const [issue, setIssue] = useState<string>();

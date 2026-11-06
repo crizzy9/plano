@@ -34,7 +34,7 @@ export type Routes = {
 export type Screen<K extends keyof Routes> = NativeStackScreenProps<Routes, K>;
 type APIProps<K extends keyof Routes> = Screen<K> & { api: PlanoAPI };
 
-export function useRemote<T>(fetch: () => Promise<T>, enabled = true, interval?: number) {
+export function useRemote<T>(fetch: (signal: AbortSignal) => Promise<T>, enabled = true, interval?: number) {
   const [value, setValue] = useState<T>();
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
@@ -47,31 +47,53 @@ export function useRemote<T>(fetch: () => Promise<T>, enabled = true, interval?:
   useFocusEffect(useCallback(() => {
     if (!enabled) return;
     let active = true;
+    let foreground = !interval || AppState.currentState == null || AppState.currentState === 'active';
+    let request: AbortController | undefined;
     const version = requestVersion.current;
-    const current = () => active && requestVersion.current === version;
-    let timer: ReturnType<typeof setTimeout>;
+    const current = () => active && foreground && requestVersion.current === version;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = () => {
+      clearTimeout(timer);
+      request?.abort();
+      request = undefined;
+    };
     async function load(quiet = false) {
-      if (!current()) return;
+      if (!current() || request) return;
+      const controller = new AbortController();
+      request = controller;
+      const accept = () => current() && request === controller;
       if (!quiet) setPending(true);
       try {
-        const result = await fetch();
-        if (current()) {
+        const result = await fetch(controller.signal);
+        if (accept()) {
           setValue(result);
           setError(undefined);
         }
       } catch (cause) {
-        if (current()) setError(errorText(cause));
+        if (accept()) setError(errorText(cause));
       } finally {
-        if (current()) {
+        if (accept()) {
+          request = undefined;
           setPending(false);
           if (interval) timer = setTimeout(() => { void load(true); }, interval);
         }
       }
     }
+    const subscription = interval ? AppState.addEventListener('change', (state) => {
+      const next = state === 'active';
+      if (foreground === next) return;
+      foreground = next;
+      if (foreground) void load();
+      else {
+        stop();
+        setPending(false);
+      }
+    }) : undefined;
     void load();
     return () => {
       active = false;
-      clearTimeout(timer);
+      stop();
+      subscription?.remove();
     };
   }, [enabled, fetch, interval, revision]));
   return { value, setValue, error, pending, refresh };
@@ -94,7 +116,7 @@ export function Page({ children, refreshing, refresh }: {
 }
 
 export function Home({ api, navigation }: APIProps<'Home'>) {
-  const load = useCallback(() => api.flightOverview(), [api]);
+  const load = useCallback((signal: AbortSignal) => api.flightOverview(signal), [api]);
   const { value: overview, error, pending, refresh } = useRemote(load, !!api.server, 60_000);
   const value = overview?.savedAt && error ? undefined : overview?.flights;
   const savedAt = value && overview?.savedAt;
@@ -214,7 +236,7 @@ export function Search({ api, navigation }: APIProps<'Search'>) {
 export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'>) {
   const { colors } = usePalette();
   const { id, initial, initialSavedAt, rotationOf } = route.params;
-  const load = useCallback(() => api.flightScreen(id, rotationOf), [api, id, rotationOf]);
+  const load = useCallback((signal: AbortSignal) => api.flightScreen(id, rotationOf, signal), [api, id, rotationOf]);
   const { value: result, setValue, error, pending, refresh } = useRemote(load, true, 30_000);
   const value = result?.savedAt && error ? undefined : result;
   const savedAt = value?.savedAt ?? (!value && !error ? initialSavedAt : undefined);
@@ -848,20 +870,27 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
     if (!canReadRadar) return;
     let focused = true;
     let foreground = AppState.currentState == null || AppState.currentState === 'active';
-    let inProgress = false;
+    let request: AbortController | undefined;
     let supported = true;
     let consecutiveFailures = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = () => {
+      clearTimeout(timer);
+      request?.abort();
+      request = undefined;
+    };
     async function load() {
-      if (!focused || !foreground || inProgress || !supported) return;
-      inProgress = true;
+      if (!focused || !foreground || request || !supported) return;
+      const controller = new AbortController();
+      request = controller;
+      const accept = () => focused && foreground && request === controller;
       let delay = radarInterval;
       try {
         const knownReceiver = receiverCursor.current;
         const knownSWIM = swimCursor.current;
         const knownEurocontrol = eurocontrolCursor.current;
-        const result = await api.radar(id, knownReceiver.after, providerRevision.current, knownReceiver.revision, knownSWIM, knownEurocontrol);
-        if (!focused || !foreground) return;
+        const result = await api.radar(id, knownReceiver.after, providerRevision.current, knownReceiver.revision, knownSWIM, knownEurocontrol, controller.signal);
+        if (!accept()) return;
         setCheckedAt(Date.now());
         if (!result) {
           supported = false;
@@ -909,35 +938,42 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
         consecutiveFailures = 0;
       } catch {
         delay *= 3;
-        if (focused && foreground) {
+        if (accept()) {
           consecutiveFailures += 1;
           setCheckedAt(Date.now());
           setStream('interrupted');
         }
       } finally {
-        inProgress = false;
-        const retry = consecutiveFailures > 0 && consecutiveFailures <= radarCompletedRetries;
-        if (focused && foreground && supported && (inFlight || delay === radarPageInterval || retry)) {
-          timer = setTimeout(() => { void load(); }, delay);
+        if (accept()) {
+          request = undefined;
+          const retry = consecutiveFailures > 0 && consecutiveFailures <= radarCompletedRetries;
+          if (supported && (inFlight || delay === radarPageInterval || retry)) {
+            timer = setTimeout(() => { void load(); }, delay);
+          }
         }
       }
     }
     const subscription = AppState.addEventListener('change', (state) => {
-      foreground = state === 'active';
-      clearTimeout(timer);
+      const next = state === 'active';
+      if (foreground === next) return;
+      foreground = next;
       if (foreground) void load();
+      else {
+        stop();
+        setStream((previous) => previous === 'ready' ? undefined : previous);
+      }
     });
     void load();
     return () => {
       focused = false;
-      clearTimeout(timer);
+      stop();
       subscription.remove();
     };
   }, [api, id, inFlight, canReadRadar, flight.observedAt, detailRevision, refreshFlight]));
 
   const latest = points.at(-1);
   if (!inFlight && !latest) return null;
-  const age = latest ? checkedAt - radarInstant(latest.at).millis : Number.POSITIVE_INFINITY;
+  const age = latest ? Math.max(checkedAt, Date.now()) - radarInstant(latest.at).millis : Number.POSITIVE_INFINITY;
   const fresh = inFlight && stream === 'ready' && age >= -30_000 && age <= 120_000;
   const note = replacingAircraft ? 'Refreshing flight details before showing radar.'
     : stream === 'interrupted' ? 'Live updates are temporarily unavailable.'

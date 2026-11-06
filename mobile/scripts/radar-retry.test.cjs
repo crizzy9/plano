@@ -16,6 +16,15 @@ function completedRadar(radar, history) {
   let hookIndex = 0;
   let cleanup;
   let nextTimer = 0;
+  let onAppStateChange;
+  const appState = {
+    currentState: 'active',
+    addEventListener(event, listener) {
+      assert.equal(event, 'change');
+      onAppStateChange = listener;
+      return { remove() { onAppStateChange = undefined; } };
+    },
+  };
   const jsx = (type, props) => ({ type, props });
   const modules = {
     react: {
@@ -33,7 +42,7 @@ function completedRadar(radar, history) {
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@react-navigation/native': { useFocusEffect: (callback) => { cleanup ??= callback(); } },
     'react-native': {
-      AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
+      AppState: appState,
       StyleSheet: { create: (styles) => styles },
       View: 'View',
     },
@@ -44,6 +53,7 @@ function completedRadar(radar, history) {
   runInNewContext(outputText, {
     exports,
     require: (id) => modules[id] ?? {},
+    AbortController,
     setTimeout(callback, delay) {
       const id = ++nextTimer;
       timers.set(id, { callback, delay });
@@ -60,6 +70,10 @@ function completedRadar(radar, history) {
   return {
     timers,
     settle,
+    setAppState(state) {
+      appState.currentState = state;
+      onAppStateChange?.(state);
+    },
     render() {
       hookIndex = 0;
       return exports.FlightRadar({ api: { radar }, flight, history, tracked: true, detailRevision: '0', refreshFlight() {} });
@@ -90,6 +104,39 @@ test('completed flight retries radar and shows private telemetry after a transie
   const [map, readout] = track.props.children;
   assert.equal(map.props.positions[0], position);
   assert.equal(readout.props.position, position);
+  assert.equal(radar.timers.size, 0);
+});
+
+test('radar restarts on foreground and discards a response from before backgrounding', async () => {
+  const fresh = { at: '2025-06-01T19:55:00Z', source: 'operator_readsb', latitude: 40, longitude: -74 };
+  const start = Date.parse('2025-06-01T19:45:00Z');
+  const stalePage = Array.from({ length: 256 }, (_, index) => ({
+    ...fresh, at: new Date(start + index * 1_000).toISOString(),
+  }));
+  const signals = [];
+  let resolveStale;
+  const radar = completedRadar(async (_id, _after, _provider, _receiver, _swim, _eurocontrol, signal) => {
+    signals.push(signal);
+    if (signals.length === 1) return new Promise((resolve) => { resolveStale = resolve; });
+    return { positions: [fresh], receiverRevision: '0' };
+  });
+  radar.render();
+  assert.ok(signals[0] instanceof AbortSignal && !signals[0].aborted);
+  radar.setAppState('background');
+  assert.equal(signals[0].aborted, true);
+  assert.equal(signals.length, 1);
+  radar.setAppState('active');
+  assert.equal(signals.length, 2);
+  assert.ok(signals[1] instanceof AbortSignal && !signals[1].aborted);
+  await radar.settle();
+
+  // An accepted full page would append old positions and trigger pagination.
+  resolveStale({ positions: stalePage });
+  await radar.settle();
+  const [, track] = radar.render().props.children;
+  const [map] = track.props.children;
+  assert.equal(map.props.positions.length, 1);
+  assert.equal(map.props.positions[0], fresh);
   assert.equal(radar.timers.size, 0);
 });
 
