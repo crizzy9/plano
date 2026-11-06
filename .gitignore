@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+node_modules/
+.expo/
+*.p8
+*service-account*.json
+google-services.json

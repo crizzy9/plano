@@ -1,0 +1,52 @@
+services:
+  plano:
+    build:
+      context: .
+    environment:
+      PLANO_ADDR: ":8080"
+      PLANO_DB: /data/plano.db
+      PLANO_DEMO: "${PLANO_DEMO:-true}"
+      PLANO_PUBLIC_URL: "${PLANO_PUBLIC_URL:-http://localhost:8080}"
+      PLANO_REFRESH_INTERVAL: "${PLANO_REFRESH_INTERVAL:-60s}"
+      PLANO_ENROLLMENT_CODE: "${PLANO_ENROLLMENT_CODE:-}"
+      PLANO_ENROLLMENT_CODE_FILE: "${PLANO_ENROLLMENT_CODE_FILE:-}"
+      PLANO_AEROAPI_KEY: "${PLANO_AEROAPI_KEY:-}"
+      PLANO_AEROAPI_KEY_FILE: "${PLANO_AEROAPI_KEY_FILE:-}"
+      PLANO_FAA_NAS: "${PLANO_FAA_NAS:-true}"
+      PLANO_SWIM_URL: "${PLANO_SWIM_URL:-}"
+      PLANO_SWIM_TOKEN: "${PLANO_SWIM_TOKEN:-}"
+      PLANO_SWIM_TOKEN_FILE: "${PLANO_SWIM_TOKEN_FILE:-}"
+      PLANO_EUROCONTROL_URL: "${PLANO_EUROCONTROL_URL:-}"
+      PLANO_EUROCONTROL_TOKEN: "${PLANO_EUROCONTROL_TOKEN:-}"
+      PLANO_EUROCONTROL_TOKEN_FILE: "${PLANO_EUROCONTROL_TOKEN_FILE:-}"
+      PLANO_ADSB_URL: "${PLANO_ADSB_URL:-}"
+      PLANO_FAA_REGISTRY_FILE: "${PLANO_FAA_REGISTRY_FILE:-}"
+      PLANO_APNS_TEAM_ID: "${PLANO_APNS_TEAM_ID:-}"
+      PLANO_APNS_KEY_ID: "${PLANO_APNS_KEY_ID:-}"
+      PLANO_APNS_BUNDLE_ID: "${PLANO_APNS_BUNDLE_ID:-}"
+      PLANO_APNS_PRIVATE_KEY_FILE: "${PLANO_APNS_PRIVATE_KEY_FILE:-}"
+      PLANO_APNS_SANDBOX: "${PLANO_APNS_SANDBOX:-false}"
+      PLANO_FCM_PROJECT_ID: "${PLANO_FCM_PROJECT_ID:-}"
+      PLANO_FCM_SERVICE_ACCOUNT_FILE: "${PLANO_FCM_SERVICE_ACCOUNT_FILE:-}"
+      PLANO_FCM_BANDWIDTH_CONSTRAINED: "${PLANO_FCM_BANDWIDTH_CONSTRAINED:-false}"
+    ports:
+      - "${PLANO_BIND_IP:-127.0.0.1}:${PLANO_PORT:-8080}:8080"
+    volumes:
+      - plano_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  plano_data:

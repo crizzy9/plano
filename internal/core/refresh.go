@@ -1,0 +1,107 @@
+package core
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/crizzy9/plano/internal/feeds"
+)
+
+// Refresher polls only tracked flights in an active window. A feed outage keeps
+// previously observed data available with its original observation timestamp.
+type Refresher struct {
+	Store      *Store
+	Flights    feeds.FlightSource
+	Advisories []feeds.AdvisorySource
+	Receiver   *feeds.ADSBReceiver
+	Registry   *feeds.FAARegistry
+	Logger     *slog.Logger
+	Interval   time.Duration
+}
+
+func (r Refresher) Run(ctx context.Context) {
+	ticker := time.NewTicker(r.Interval)
+	defer ticker.Stop()
+	for {
+		if err := r.refresh(ctx); err != nil && ctx.Err() == nil {
+			r.Logger.Error("could not refresh tracked flights", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r Refresher) refresh(ctx context.Context) error {
+	now := time.Now()
+	active, err := r.Store.Active(ctx, now)
+	if err != nil {
+		return err
+	}
+	if len(active) == 0 {
+		return r.Store.Prune(ctx, now)
+	}
+	var advisories []feeds.Advisory
+	for _, source := range r.Advisories {
+		result, err := source.Advisories(ctx)
+		if err != nil {
+			r.Logger.Warn("advisory source unavailable", "error", err)
+			continue
+		}
+		if advisories == nil {
+			advisories = make([]feeds.Advisory, 0)
+		}
+		advisories = append(advisories, result...)
+	}
+	var adsb feeds.ADSBSnapshot
+	if r.Receiver != nil {
+		adsb, err = r.Receiver.Snapshot(ctx)
+		if err != nil {
+			r.Logger.Warn("ADS-B receiver unavailable", "error", err)
+		}
+	}
+	for _, prior := range active {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if finished(prior) && prior.ObservedAt.Add(5*time.Minute).After(now) {
+			continue
+		}
+		flight, err := r.Flights.Get(ctx, prior.ID)
+		if err != nil {
+			r.Logger.Warn("flight refresh failed", "id", prior.ID, "error", err)
+			continue
+		}
+		var positions []feeds.Position
+		if flight.ActualDeparture != nil && (!finished(prior) || prior.ActualArrival == nil) {
+			positions, err = r.Flights.Track(ctx, flight.ID)
+			if err != nil {
+				r.Logger.Warn("flight track refresh failed", "id", flight.ID, "error", err)
+			}
+		}
+		var modeS string
+		if r.Registry != nil && !finished(flight) {
+			flight.AircraftAge = r.Registry.Age(flight.TailNumber, now)
+			modeS = r.Registry.ModeSHex(flight.TailNumber)
+		}
+		if r.Receiver != nil && flight.ActualTakeoff != nil && !finished(flight) {
+			if position, ok := adsb.Match(flight, modeS); ok {
+				positions = append(positions, position)
+			}
+		}
+		var inbound []feeds.Flight
+		if flight.ActualDeparture == nil && !finished(flight) && (flight.InboundID != "" || flight.TailNumber != "") {
+			inbound, err = r.Flights.Rotation(ctx, flight)
+			if err != nil {
+				r.Logger.Warn("aircraft rotation refresh failed", "id", flight.ID, "error", err)
+			}
+		}
+		if err := r.Store.Observe(ctx, flight, positions, inbound, advisories); err != nil {
+			return err
+		}
+	}
+	return r.Store.Prune(ctx, now)
+}

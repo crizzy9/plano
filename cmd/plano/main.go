@@ -1,0 +1,239 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/crizzy9/plano/internal/api"
+	"github.com/crizzy9/plano/internal/core"
+	"github.com/crizzy9/plano/internal/demodata"
+	"github.com/crizzy9/plano/internal/feeds"
+	"github.com/crizzy9/plano/internal/push"
+)
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
+		port := env("PLANO_HEALTH_URL", "http://127.0.0.1:8080/healthz")
+		resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(port)
+		if err != nil {
+			os.Exit(1)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		return
+	}
+	if err := run(logger); err != nil {
+		logger.Error("plano stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(logger *slog.Logger) error {
+	demo, err := flag("PLANO_DEMO", false)
+	if err != nil {
+		return err
+	}
+	publicURL, err := api.PublicOrigin(env("PLANO_PUBLIC_URL", "http://localhost:8080"))
+	if err != nil {
+		return errors.New("PLANO_PUBLIC_URL must be an HTTP(S) origin")
+	}
+	enrollment, err := secret("PLANO_ENROLLMENT_CODE", "PLANO_ENROLLMENT_CODE_FILE")
+	if err != nil {
+		return err
+	}
+	if len(enrollment) != 0 && (len(enrollment) < 16 || len(enrollment) > 128) {
+		return errors.New("enrollment code must be 16 to 128 bytes")
+	}
+	if len(enrollment) == 0 && !demo {
+		logger.Warn("live enrollment is open; restrict network access or set an enrollment code")
+	}
+	var flights feeds.FlightSource
+	var advisories []feeds.AdvisorySource
+	var receiver *feeds.ADSBReceiver
+	var registry *feeds.FAARegistry
+	var sender push.Sender
+	if demo {
+		flights = demodata.Source{}
+	} else {
+		key, err := secret("PLANO_AEROAPI_KEY", "PLANO_AEROAPI_KEY_FILE")
+		if err != nil {
+			return err
+		}
+		if len(key) == 0 {
+			return errors.New("live mode requires PLANO_AEROAPI_KEY or PLANO_AEROAPI_KEY_FILE; enable PLANO_DEMO for synthetic data")
+		}
+		flights = feeds.NewAeroAPI(string(key), nil)
+		enableFAA, err := flag("PLANO_FAA_NAS", true)
+		if err != nil {
+			return err
+		}
+		if enableFAA {
+			advisories = append(advisories, feeds.NewFAANAS(nil))
+		}
+		for _, gateway := range []struct{ prefix, source string }{{"PLANO_SWIM", "faa_swim"}, {"PLANO_EUROCONTROL", "eurocontrol_nm"}} {
+			if endpoint := os.Getenv(gateway.prefix + "_URL"); endpoint != "" {
+				token, err := secret(gateway.prefix+"_TOKEN", gateway.prefix+"_TOKEN_FILE")
+				if err != nil {
+					return err
+				}
+				client, err := feeds.NewAdvisoryGateway(endpoint, string(token), gateway.source, nil)
+				if err != nil {
+					return fmt.Errorf("%s advisory gateway configuration: %w", gateway.source, err)
+				}
+				advisories = append(advisories, client)
+			}
+		}
+		if endpoint := os.Getenv("PLANO_ADSB_URL"); endpoint != "" {
+			receiver, err = feeds.NewADSBReceiver(endpoint, nil)
+			if err != nil {
+				return err
+			}
+		}
+		if path := os.Getenv("PLANO_FAA_REGISTRY_FILE"); path != "" {
+			file, err := os.Open(path)
+			if err != nil {
+				return errors.New("cannot open PLANO_FAA_REGISTRY_FILE")
+			}
+			registry, err = feeds.LoadFAARegistry(file)
+			_ = file.Close()
+			if err != nil {
+				return fmt.Errorf("load FAA registry: %w", err)
+			}
+		}
+		sender, err = pushConfig()
+		if err != nil {
+			return err
+		}
+	}
+	interval, err := time.ParseDuration(env("PLANO_REFRESH_INTERVAL", "60s"))
+	if err != nil || interval < 5*time.Second || interval > 30*time.Minute {
+		return errors.New("PLANO_REFRESH_INTERVAL must be between 5s and 30m")
+	}
+	store, err := core.Open(env("PLANO_DB", "plano.db"))
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer store.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	defer stop()
+	workers.Go(func() {
+		(core.Refresher{Store: store, Flights: flights, Advisories: advisories, Receiver: receiver, Registry: registry, Logger: logger, Interval: interval}).Run(ctx)
+	})
+	if sender.APNs != nil || sender.FCM != nil {
+		workers.Go(func() {
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := store.Dispatch(ctx, sender, logger); err != nil && ctx.Err() == nil {
+						logger.Error("push dispatcher failed", "error", err)
+					}
+				}
+			}
+		})
+	}
+	handler := api.Server{Store: store, Source: flights, PublicURL: publicURL, EnrollmentCode: string(enrollment), Demo: demo, Logger: logger}.Handler()
+	server := &http.Server{Addr: env("PLANO_ADDR", ":8080"), Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	done := make(chan error, 1)
+	go func() { done <- server.ListenAndServe() }()
+	logger.Info("plano starting", "addr", server.Addr, "demo", demo, "apns", sender.APNs != nil, "fcm", sender.FCM != nil)
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return server.Shutdown(shutdown)
+	}
+}
+
+func pushConfig() (push.Sender, error) {
+	var sender push.Sender
+	key, err := secret("", "PLANO_APNS_PRIVATE_KEY_FILE")
+	if err != nil {
+		return sender, err
+	}
+	if len(key) != 0 {
+		sandbox, err := flag("PLANO_APNS_SANDBOX", false)
+		if err != nil {
+			return sender, err
+		}
+		sender.APNs, err = push.NewAPNs(push.APNsConfig{TeamID: os.Getenv("PLANO_APNS_TEAM_ID"), KeyID: os.Getenv("PLANO_APNS_KEY_ID"), BundleID: os.Getenv("PLANO_APNS_BUNDLE_ID"), PrivateKeyPEM: key, Sandbox: sandbox})
+		if err != nil {
+			return sender, err
+		}
+	}
+	account, err := secret("", "PLANO_FCM_SERVICE_ACCOUNT_FILE")
+	if err != nil {
+		return sender, err
+	}
+	if len(account) != 0 {
+		constrained, err := flag("PLANO_FCM_BANDWIDTH_CONSTRAINED", false)
+		if err != nil {
+			return sender, err
+		}
+		sender.FCM, err = push.NewFCM(push.FCMConfig{ProjectID: os.Getenv("PLANO_FCM_PROJECT_ID"), ServiceAccountJSON: account, BandwidthConstrained: constrained})
+		if err != nil {
+			return sender, err
+		}
+	}
+	return sender, nil
+}
+
+func env(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func flag(name string, fallback bool) (bool, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	flag, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", name)
+	}
+	return flag, nil
+}
+
+func secret(name, fileName string) ([]byte, error) {
+	value, path := os.Getenv(name), os.Getenv(fileName)
+	if path == "" {
+		return []byte(strings.TrimSpace(value)), nil
+	}
+	if value != "" {
+		return nil, fmt.Errorf("set only one of %s and %s", name, fileName)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s", fileName)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, (64<<10)+1))
+	if err != nil || len(data) > 64<<10 {
+		return nil, fmt.Errorf("invalid secret file for %s", fileName)
+	}
+	return []byte(strings.TrimSpace(string(data))), nil
+}
