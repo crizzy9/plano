@@ -8,6 +8,7 @@ import {
   type PassportFlight, type PlanoAPI, type Position, type RadarCursor,
 } from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
+import { subscribeFlightRefresh, type FlightRefreshScope } from './flight-refresh';
 import { usePalette } from './theme';
 import { PickupLinks } from './pickup-links';
 import { changeFlightAlerts, flightAlertsEnabled, startIOSFlightActivity } from './alerts';
@@ -34,12 +35,16 @@ export type Routes = {
 export type Screen<K extends keyof Routes> = NativeStackScreenProps<Routes, K>;
 type APIProps<K extends keyof Routes> = Screen<K> & { api: PlanoAPI };
 
-export function useRemote<T>(fetch: (signal: AbortSignal) => Promise<T>, enabled = true, interval?: number) {
+const flightHintRefreshDelay = 250;
+
+export function useRemote<T>(fetch: (signal: AbortSignal) => Promise<T>, enabled = true, interval?: number,
+  refreshScope?: FlightRefreshScope) {
   const [value, setValue] = useState<T>();
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
   const [revision, setRevision] = useState(0);
   const requestVersion = useRef(0);
+  const { origin, flightId, relatedFlightId } = refreshScope ?? {};
   const refresh = useCallback(() => {
     requestVersion.current += 1;
     setRevision((previous) => previous + 1);
@@ -49,6 +54,7 @@ export function useRemote<T>(fetch: (signal: AbortSignal) => Promise<T>, enabled
     let active = true;
     let foreground = !interval || AppState.currentState == null || AppState.currentState === 'active';
     let request: AbortController | undefined;
+    let invalidated = false;
     const version = requestVersion.current;
     const current = () => active && foreground && requestVersion.current === version;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -56,7 +62,15 @@ export function useRemote<T>(fetch: (signal: AbortSignal) => Promise<T>, enabled
       clearTimeout(timer);
       request?.abort();
       request = undefined;
+      invalidated = false;
     };
+    function schedule(delay: number) {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        invalidated = false;
+        void load(true);
+      }, delay);
+    }
     async function load(quiet = false) {
       if (!current() || request) return;
       const controller = new AbortController();
@@ -75,7 +89,8 @@ export function useRemote<T>(fetch: (signal: AbortSignal) => Promise<T>, enabled
         if (accept()) {
           request = undefined;
           setPending(false);
-          if (interval) timer = setTimeout(() => { void load(true); }, interval);
+          if (invalidated) schedule(flightHintRefreshDelay);
+          else if (interval) schedule(interval);
         }
       }
     }
@@ -89,13 +104,19 @@ export function useRemote<T>(fetch: (signal: AbortSignal) => Promise<T>, enabled
         setPending(false);
       }
     }) : undefined;
+    const unsubscribe = origin ? subscribeFlightRefresh({ origin, flightId, relatedFlightId }, () => {
+      if (!current() || invalidated) return;
+      invalidated = true;
+      if (!request) schedule(flightHintRefreshDelay);
+    }) : undefined;
     void load();
     return () => {
       active = false;
       stop();
       subscription?.remove();
+      unsubscribe?.();
     };
-  }, [enabled, fetch, interval, revision]));
+  }, [enabled, fetch, interval, revision, origin, flightId, relatedFlightId]));
   return { value, setValue, error, pending, refresh };
 }
 
@@ -117,7 +138,7 @@ export function Page({ children, refreshing, refresh }: {
 
 export function Home({ api, navigation }: APIProps<'Home'>) {
   const load = useCallback((signal: AbortSignal) => api.flightOverview(signal), [api]);
-  const { value: overview, error, pending, refresh } = useRemote(load, !!api.server, 60_000);
+  const { value: overview, error, pending, refresh } = useRemote(load, !!api.server, 60_000, { origin: api.server });
   const value = overview?.savedAt && error ? undefined : overview?.flights;
   const savedAt = value && overview?.savedAt;
   const upcoming = nextFlight(value ?? []);
@@ -237,7 +258,8 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const { colors } = usePalette();
   const { id, initial, initialSavedAt, rotationOf } = route.params;
   const load = useCallback((signal: AbortSignal) => api.flightScreen(id, rotationOf, signal), [api, id, rotationOf]);
-  const { value: result, setValue, error, pending, refresh } = useRemote(load, true, 30_000);
+  const { value: result, setValue, error, pending, refresh } = useRemote(load, true, 30_000,
+    { origin: api.server, flightId: id, relatedFlightId: rotationOf });
   const value = result?.savedAt && error ? undefined : result;
   const savedAt = value?.savedAt ?? (!value && !error ? initialSavedAt : undefined);
   const [actionError, setActionError] = useState<string>();

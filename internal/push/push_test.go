@@ -34,7 +34,7 @@ func fixtureResponse(status int, body string, headers http.Header) (*http.Respon
 	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: headers}, nil
 }
 
-func fixtureAPNs(t *testing.T) *APNs {
+func fixtureAPNs(t *testing.T, refreshOrigin string) *APNs {
 	t.Helper()
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -46,7 +46,7 @@ func fixtureAPNs(t *testing.T) *APNs {
 	}
 	client, err := NewAPNs(APNsConfig{
 		TeamID: "A123456789", KeyID: "B123456789", BundleID: "com.example.plano", Sandbox: true,
-		PrivateKeyPEM: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: raw}),
+		RefreshOrigin: refreshOrigin, PrivateKeyPEM: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: raw}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,8 @@ func fixtureActivity(kind Kind, now time.Time) Message {
 }
 
 func TestAPNsWireRequests(t *testing.T) {
-	client := fixtureAPNs(t)
+	const refreshOrigin = "https://plano.example:8443"
+	client := fixtureAPNs(t, refreshOrigin)
 	transport := client.client.Transport.(*http.Transport)
 	if transport.Protocols.HTTP1() || !transport.Protocols.HTTP2() {
 		t.Fatal("APNs transport must use HTTP/2 only")
@@ -189,6 +190,7 @@ func TestAPNsWireRequests(t *testing.T) {
 					FlightID            string  `json:"flightId"`
 					ConnectionInboundID *string `json:"connectionInboundId"`
 					EventID             *string `json:"eventId"`
+					RefreshOrigin       *string `json:"refreshOrigin"`
 				}
 				if err := json.Unmarshal(body, &wire); err != nil {
 					t.Fatal(err)
@@ -210,6 +212,9 @@ func TestAPNsWireRequests(t *testing.T) {
 					t.Errorf("invalid APNs event identity: %s", body)
 				}
 				if test.message.Kind == Alert {
+					if wire.RefreshOrigin == nil || *wire.RefreshOrigin != refreshOrigin {
+						t.Errorf("invalid APNs alert refresh origin: %s", body)
+					}
 					if wire.FlightID != test.message.FlightID || aps.Alert["title"] != test.message.Title || aps.Alert["body"] != test.message.Body || aps.Event != "" {
 						t.Errorf("invalid APNs alert: %s", body)
 					}
@@ -218,6 +223,9 @@ func TestAPNsWireRequests(t *testing.T) {
 						t.Errorf("APNs alert contained Android delivery metadata: %s", body)
 					}
 					return fixtureResponse(200, "", nil)
+				}
+				if wire.RefreshOrigin != nil {
+					t.Errorf("APNs Live Activity included an alert refresh origin: %s", body)
 				}
 				if aps.State == nil || *aps.State != *test.message.State || aps.Event != string(test.message.Kind) || aps.Time != now.Unix() {
 					t.Errorf("invalid APNs activity: %s", body)
@@ -248,8 +256,39 @@ func TestAPNsWireRequests(t *testing.T) {
 	}
 }
 
+func TestAPNsOmitsRefreshOriginWhenItCannotFit(t *testing.T) {
+	original := fixtureAPNs(t, "")
+	alert := fixtureAlert(time.Now())
+	body, _, err := original.request(alert)
+	if err != nil || strings.Contains(string(body), `"refreshOrigin"`) {
+		t.Fatalf("unconfigured alert origin: bytes=%d, error=%v", len(body), err)
+	}
+
+	t.Run("origin exceeds its byte limit", func(t *testing.T) {
+		client := fixtureAPNs(t, "https://"+strings.Repeat("a", maxRefreshOriginBytes))
+		got, _, err := client.request(alert)
+		if err != nil || string(got) != string(body) {
+			t.Fatalf("oversized refresh origin changed alert: bytes=%d, error=%v", len(got), err)
+		}
+	})
+
+	t.Run("alert already fills the envelope", func(t *testing.T) {
+		fullAlert := alert
+		fullAlert.Body += strings.Repeat("a", maxPayloadBytes-len(body))
+		want, _, err := original.request(fullAlert)
+		if err != nil || len(want) != maxPayloadBytes {
+			t.Fatalf("full alert fixture: bytes=%d, error=%v", len(want), err)
+		}
+		client := fixtureAPNs(t, "https://plano.example")
+		got, _, err := client.request(fullAlert)
+		if err != nil || string(got) != string(want) {
+			t.Fatalf("optional refresh origin changed full alert: bytes=%d, error=%v", len(got), err)
+		}
+	})
+}
+
 func TestAPNsRefreshesRejectedCachedProviderTokenOnce(t *testing.T) {
-	client := fixtureAPNs(t)
+	client := fixtureAPNs(t, "")
 	now := time.Now()
 	old, err := client.providerToken(now.Add(-30 * time.Minute))
 	if err != nil {
@@ -660,7 +699,7 @@ func TestConnectionAlertRejectsInvalidRoute(t *testing.T) {
 }
 
 func TestOversizedPayloadsAreRejectedBeforeProviderCalls(t *testing.T) {
-	client := fixtureAPNs(t)
+	client := fixtureAPNs(t, "")
 	transport := &http.Client{Transport: fixtureTransport(func(*http.Request) (*http.Response, error) {
 		t.Error("oversized push attempted a provider request")
 		return nil, errors.New("unexpected provider request")

@@ -400,7 +400,7 @@ func run(logger *slog.Logger, checkOnly bool) error {
 			aeroAPI = aeroAPI.WithAircraftRegistry(registry)
 			flights = aeroAPI
 		}
-		sender, err = pushConfig()
+		sender, err = pushConfig(publicURL)
 		if err != nil {
 			return err
 		}

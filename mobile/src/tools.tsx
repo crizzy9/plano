@@ -460,7 +460,8 @@ function CheckedConnection({ api, inbound, outbound, monitorBusy, changeMonitori
   const inboundID = inbound.id;
   const outboundID = outbound.id;
   const load = useCallback((signal: AbortSignal) => api.connection(inboundID, outboundID, signal), [api, inboundID, outboundID]);
-  const { value, setValue: setResult, error, pending, refresh } = useRemote(load, true, 30_000);
+  const { value, setValue: setResult, error, pending, refresh } = useRemote(load, true, 30_000,
+    { origin: api.server, flightId: outboundID, relatedFlightId: inboundID });
   const result = error ? undefined : value;
   const [issue, setIssue] = useState<string>();
   const mounted = useRef(false);

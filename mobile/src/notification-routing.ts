@@ -3,6 +3,7 @@ import type { NavigationContainerRefWithCurrent } from '@react-navigation/native
 import type { NotificationResponse } from 'expo-notifications';
 import { Linking, Platform } from 'react-native';
 import { createAPI, loadServer, withActiveAndroidPushOrigin, type Flight } from './api';
+import { validFlightId } from './flight-refresh';
 import { resolveAndroidWidgetFlight } from './live';
 import type { Routes } from './screens';
 
@@ -15,18 +16,13 @@ type TapRoute = AlertRoute | { widgetKey: string };
 
 const notificationPrefix = 'plano://notification/';
 
-function validID(id: unknown): id is string {
-  return typeof id === 'string' && id.length > 0 && id.length <= 128 &&
-    id !== '.' && id !== '..' && !/[^A-Za-z0-9_.-]/.test(id);
-}
-
 export function notificationRouteFromURL(url: string | null): TapRoute | undefined {
   if (!url?.startsWith(notificationPrefix)) return;
   const segments = url.slice(notificationPrefix.length).split('/');
   const [kind, flightId, connectionInboundId] = segments;
-  if (!validID(flightId)) return;
+  if (!validFlightId(flightId)) return;
   if (kind === 'flight' && segments.length === 2) return { flightId };
-  if (kind === 'connection' && segments.length === 3 && validID(connectionInboundId) && connectionInboundId !== flightId) {
+  if (kind === 'connection' && segments.length === 3 && validFlightId(connectionInboundId) && connectionInboundId !== flightId) {
     return { flightId, connectionInboundId };
   }
   if (kind === 'widget' && segments.length === 2 && flightId.length === 64 && !/[^0-9a-f]/.test(flightId)) {
@@ -41,9 +37,9 @@ export function notificationRouteFromResponse(response: NotificationResponse, de
   // Direct APNs custom keys are in userInfo, exposed here by Expo.
   const flightId = trigger.payload?.flightId;
   const connectionInboundId = trigger.payload?.connectionInboundId;
-  if (!validID(flightId)) return;
+  if (!validFlightId(flightId)) return;
   if (connectionInboundId === undefined) return { flightId };
-  if (validID(connectionInboundId) && connectionInboundId !== flightId) return { flightId, connectionInboundId };
+  if (validFlightId(connectionInboundId) && connectionInboundId !== flightId) return { flightId, connectionInboundId };
 }
 
 export function notificationResponseIdentity({ notification }: NotificationResponse): string {
@@ -154,7 +150,7 @@ export function useNotificationRouting(
       if ('widgetKey' in tap.route) {
         widgetKey = tap.route.widgetKey;
         const flightId = await resolveAndroidWidgetFlight(serverAtTap, widgetKey);
-        if (!validID(flightId) || !currentTap()) return;
+        if (!validFlightId(flightId) || !currentTap()) return;
         route = { flightId };
       } else {
         route = tap.route;

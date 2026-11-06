@@ -2,10 +2,38 @@ package app.plano.live
 
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import java.util.concurrent.CopyOnWriteArraySet
+
+internal object FlightAlertEvents {
+  const val NAME = "onFlightAlert"
+  val listeners = CopyOnWriteArraySet<(Map<String, String>) -> Unit>()
+
+  fun emit(origin: String, flightId: String?, inboundId: String?) {
+    if (listeners.isEmpty() || origin.isEmpty()) return
+    val flight = flightId?.takeIf(::validNotificationFlightId) ?: return
+    if (inboundId != null && (!validNotificationFlightId(inboundId) || inboundId == flight)) return
+    val hint = buildMap {
+      put("origin", origin)
+      put("flightId", flight)
+      if (inboundId != null) put("connectionInboundId", inboundId)
+    }
+    // Expo schedules delivery on the JS runtime. A tearing-down runtime
+    // must not interrupt the service's notification handling.
+    listeners.forEach { listener -> runCatching { listener(hint) } }
+  }
+}
 
 class PlanoLiveModule : Module() {
+  private val flightAlertListener: (Map<String, String>) -> Unit = { hint ->
+    sendEvent(FlightAlertEvents.NAME, hint)
+  }
+
   override fun definition() = ModuleDefinition {
     Name("PlanoLive")
+    Events(FlightAlertEvents.NAME)
+    OnStartObserving(FlightAlertEvents.NAME) { FlightAlertEvents.listeners.add(flightAlertListener) }
+    OnStopObserving(FlightAlertEvents.NAME) { FlightAlertEvents.listeners.remove(flightAlertListener) }
+    OnDestroy { FlightAlertEvents.listeners.remove(flightAlertListener) }
 
     AsyncFunction("selectAndroidPushOrigin") { origin: String ->
       appContext.reactContext?.let { AndroidPushSession.selectOrigin(it, origin) }

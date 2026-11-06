@@ -182,10 +182,10 @@ internal object AndroidPushSession {
   // Hold the same lock as disable/switch through rendering. A message is either
   // rejected after revocation, or its already-rendered surfaces get cleared.
   @Synchronized
-  fun accept(context: Context, binding: String?, sentAt: Long, render: () -> Unit) {
+  fun accept(context: Context, binding: String?, sentAt: Long, render: (origin: String) -> Unit) {
     val current = state(context)
     val active = current.generation.takeIf { current.enabled }
-    if (acceptsPushBinding(active, binding, sentAt, System.currentTimeMillis())) render()
+    if (acceptsPushBinding(active, binding, sentAt, System.currentTimeMillis())) render(current.origin)
   }
 
   @Synchronized

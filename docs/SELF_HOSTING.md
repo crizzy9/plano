@@ -272,6 +272,8 @@ For an iOS push-capable build, set `PLANO_IOS_TEAM_ID` to the Apple signing
 team ID. Set `PLANO_IOS_BUNDLE_ID` for a custom bundle identifier and use the
 same identifier for `PLANO_APNS_BUNDLE_ID` on the server. The app and activity
 extension require signing and their matching entitlements.
+For iOS foreground refresh from alerts, use the same HTTPS origin in
+`PLANO_PUBLIC_URL` and in the app's server settings.
 
 For an Android push-capable build, set `PLANO_GOOGLE_SERVICES_FILE` to the
 Firebase `google-services.json` path. The Firebase Android application must

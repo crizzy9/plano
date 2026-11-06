@@ -39,24 +39,25 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
   override fun onMessageReceived(remoteMessage: RemoteMessage) {
     val data = remoteMessage.data
     val binding = data["binding"]
-    AndroidPushSession.accept(this, binding, remoteMessage.sentTime) {
+    AndroidPushSession.accept(this, binding, remoteMessage.sentTime) { origin ->
       when (data["type"]) {
-        "alert" -> showAlert(data, remoteMessage.messageId, remoteMessage.sentTime)
+        "alert" -> showAlert(origin, data, remoteMessage.messageId, remoteMessage.sentTime)
         "live" -> if (binding != null) showProgress(data, binding, remoteMessage.sentTime)
       }
     }
   }
 
-  private fun showAlert(data: Map<String, String>, messageId: String?, sentAt: Long) {
+  private fun showAlert(origin: String, data: Map<String, String>, messageId: String?, sentAt: Long) {
     val title = data["title"] ?: return
     val event = data["eventId"] ?: messageId ?: return
     val flightId = data["flightId"]
     val metadata = parseFlightAlertMetadata(data, sentAt, System.currentTimeMillis()) ?: return
     val decision = runCatching { AndroidPushSession.advanceAlert(this, flightId, metadata) }.getOrNull() ?: return
     decision.cancelTags.forEach { manager.cancel(it, 0) }
-    if (!manager.areNotificationsEnabled()) return
     val remaining = metadata.expiresAt?.minus(System.currentTimeMillis())
     if (remaining != null && remaining <= 0L) return
+    if (remaining != null) FlightAlertEvents.emit(origin, flightId, data["connectionInboundId"])
+    if (!manager.areNotificationsEnabled()) return
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       manager.createNotificationChannel(NotificationChannel(FLIGHT_ALERTS_CHANNEL, "Flight alerts", NotificationManager.IMPORTANCE_HIGH))
     }

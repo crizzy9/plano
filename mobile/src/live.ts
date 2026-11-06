@@ -12,6 +12,7 @@ export type AndroidPushGeneration = {
 export type RetiredAndroidPush = { origin: string; binding: string };
 
 type NativeLive = {
+  addListener?: (event: 'onFlightAlert', listener: (payload: unknown) => void) => { remove: () => void };
   configure?: (server: string, token: string) => Promise<void>;
   start?: (state: string) => Promise<void>;
   iosLiveActivityBinding?: (origin: string) => Promise<string | null>;
@@ -31,6 +32,10 @@ type NativeLive = {
 };
 
 const native = Platform.OS === 'web' ? null : requireOptionalNativeModule<NativeLive>('PlanoLive');
+
+export function addAndroidFlightAlertListener(listener: (payload: unknown) => void) {
+  if (Platform.OS === 'android') return native?.addListener?.('onFlightAlert', listener);
+}
 
 export const canStartLiveActivity = Boolean(native?.start);
 export const canCustomizeAndroidWidget = Platform.OS === 'android'

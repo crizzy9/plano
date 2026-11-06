@@ -37,7 +37,7 @@ func TestPushConfigRequiresCompleteCredentialGroups(t *testing.T) {
 			for name, value := range tt.set {
 				t.Setenv(name, value)
 			}
-			sender, err := pushConfig()
+			sender, err := pushConfig("https://plano.example")
 			if tt.want == "" {
 				if err != nil || sender.APNs != nil || sender.FCM != nil {
 					t.Fatal("expected both providers to stay disabled")
@@ -56,14 +56,14 @@ func TestPushConfigRejectsEmptyCredentialFiles(t *testing.T) {
 	path := writePushFixture(t, []byte(" \n"))
 	t.Run("APNs", func(t *testing.T) {
 		setAPNsFixture(t, path)
-		if _, err := pushConfig(); err == nil || strings.Contains(err.Error(), path) {
+		if _, err := pushConfig("https://plano.example"); err == nil || strings.Contains(err.Error(), path) {
 			t.Fatal("expected a redacted APNs error")
 		}
 	})
 	t.Run("FCM", func(t *testing.T) {
 		t.Setenv("PLANO_FCM_PROJECT_ID", "fixture-project")
 		t.Setenv("PLANO_FCM_SERVICE_ACCOUNT_FILE", path)
-		if _, err := pushConfig(); err == nil || strings.Contains(err.Error(), path) {
+		if _, err := pushConfig("https://plano.example"); err == nil || strings.Contains(err.Error(), path) {
 			t.Fatal("expected a redacted FCM error")
 		}
 	})
@@ -97,7 +97,7 @@ func TestPushConfigInitializesBothProvidersOffline(t *testing.T) {
 	t.Setenv("PLANO_FCM_SERVICE_ACCOUNT_FILE", writePushFixture(t, account))
 	t.Setenv("PLANO_FCM_BANDWIDTH_CONSTRAINED", "true")
 
-	sender, err := pushConfig()
+	sender, err := pushConfig("https://plano.example")
 	if err != nil {
 		t.Fatal(err)
 	}

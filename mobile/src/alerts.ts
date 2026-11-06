@@ -3,11 +3,13 @@ import * as SecureStore from 'expo-secure-store';
 import { AppState, Platform } from 'react-native';
 import {
   beginIOSPushIntent, deferAndroidPushRetirement, disableAndroidPushForOrigin, disableIOSPushForOrigin, initializeAndroidPushOrigin,
-  removeRetiredDevices, runAndroidDeviceRequest, serverStorageKey, withActiveAndroidPushOrigin, withActiveIOSPushOrigin,
+  loadServer, normalizeServer, removeRetiredDevices, runAndroidDeviceRequest, serverStorageKey,
+  withActiveAndroidPushOrigin, withActiveIOSPushOrigin,
   type Flight, type PlanoAPI,
 } from './api';
+import { publishFlightRefresh } from './flight-refresh';
 import {
-  androidPushStatus, canFenceIOSPush, clearLiveActivities, configureLiveActivities, disableAndroidPush, enableAndroidPush,
+  addAndroidFlightAlertListener, androidPushStatus, canFenceIOSPush, clearLiveActivities, configureLiveActivities, disableAndroidPush, enableAndroidPush,
   nextIOSPushRevision, startLiveActivity,
   type RetiredAndroidPush,
 } from './live';
@@ -142,6 +144,13 @@ export function useFlightAlerts(api: PlanoAPI) {
     if (!api.server || !platform) return;
     let active = true;
     let cleanup = () => {};
+    const inForeground = () => active && AppState.currentState === 'active';
+
+    async function refreshFromAlert(payload: unknown) {
+      if (!inForeground()) return;
+      if (platform === 'ios' && (!await wantsFlightAlerts(api) || !await api.hasSavedInstallationToken())) return;
+      if (await loadServer() === api.server && inForeground()) publishFlightRefresh(api.server, payload);
+    }
 
     void import('expo-notifications').then(async (notifications) => {
       if (platform === 'android') await initializeAndroidPushOrigin(api.server);
@@ -174,12 +183,35 @@ export function useFlightAlerts(api: PlanoAPI) {
       const state = AppState.addEventListener('change', (next) => {
         if (next === 'active') void refresh().catch(() => {});
       });
+      let receipt: { remove: () => void } | undefined;
       cleanup = () => {
         token.remove();
         state.remove();
         notifications.setNotificationHandler(null);
+        receipt?.remove();
       };
       void refresh().catch(() => {});
+      if (platform === 'ios') {
+        receipt = notifications.addNotificationReceivedListener((notification) => {
+          const trigger = notification?.request?.trigger;
+          if (!trigger || typeof trigger !== 'object' || !('type' in trigger) || trigger.type !== 'push') return;
+          const origin = trigger.payload?.refreshOrigin;
+          if (typeof origin !== 'string' || origin.length > 320) return;
+          try {
+            if (normalizeServer(origin) !== api.server) return;
+          } catch {
+            return;
+          }
+          // APNs custom data supplies only a hint for an already-focused screen.
+          void refreshFromAlert(trigger.payload).catch(() => {});
+        });
+      } else {
+        receipt = addAndroidFlightAlertListener((payload) => {
+          if (payload && typeof payload === 'object' && 'origin' in payload && payload.origin === api.server) {
+            void refreshFromAlert(payload).catch(() => {});
+          }
+        });
+      }
     }).catch(() => {});
 
     return () => {

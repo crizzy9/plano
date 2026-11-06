@@ -8,17 +8,18 @@ import (
 	"github.com/crizzy9/plano/internal/push"
 )
 
-func pushConfig() (push.Sender, error) {
+func pushConfig(publicURL string) (push.Sender, error) {
 	var sender push.Sender
 	sandbox, err := flag("PLANO_APNS_SANDBOX", false)
 	if err != nil {
 		return sender, err
 	}
 	apns := push.APNsConfig{
-		TeamID:   os.Getenv("PLANO_APNS_TEAM_ID"),
-		KeyID:    os.Getenv("PLANO_APNS_KEY_ID"),
-		BundleID: os.Getenv("PLANO_APNS_BUNDLE_ID"),
-		Sandbox:  sandbox,
+		TeamID:        os.Getenv("PLANO_APNS_TEAM_ID"),
+		KeyID:         os.Getenv("PLANO_APNS_KEY_ID"),
+		BundleID:      os.Getenv("PLANO_APNS_BUNDLE_ID"),
+		RefreshOrigin: publicURL,
+		Sandbox:       sandbox,
 	}
 	const apnsKeyFile = "PLANO_APNS_PRIVATE_KEY_FILE"
 	apnsHasKeyFile := os.Getenv(apnsKeyFile) != ""

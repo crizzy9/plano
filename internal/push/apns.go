@@ -22,17 +22,19 @@ type APNsConfig struct {
 	TeamID        string
 	KeyID         string
 	BundleID      string
+	RefreshOrigin string
 	PrivateKeyPEM []byte
 	Sandbox       bool
 }
 
 type APNs struct {
-	client   *http.Client
-	endpoint string
-	teamID   string
-	keyID    string
-	bundleID string
-	key      *ecdsa.PrivateKey
+	client        *http.Client
+	endpoint      string
+	teamID        string
+	keyID         string
+	bundleID      string
+	refreshOrigin string
+	key           *ecdsa.PrivateKey
 
 	mu     sync.Mutex
 	token  string
@@ -41,6 +43,8 @@ type APNs struct {
 
 var appleKeyIDPattern = regexp.MustCompile(`^[A-Z0-9]{10}$`)
 var bundleIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$`)
+
+const maxRefreshOriginBytes = 320
 
 func NewAPNs(config APNsConfig) (*APNs, error) {
 	if !appleKeyIDPattern.MatchString(config.TeamID) || !appleKeyIDPattern.MatchString(config.KeyID) || !bundleIDPattern.MatchString(config.BundleID) {
@@ -72,13 +76,18 @@ func NewAPNs(config APNsConfig) (*APNs, error) {
 	if config.Sandbox {
 		endpoint = "https://api.sandbox.push.apple.com"
 	}
+	refreshOrigin := config.RefreshOrigin
+	if len(refreshOrigin) > maxRefreshOriginBytes {
+		refreshOrigin = ""
+	}
 	return &APNs{
-		client:   makeClient(true),
-		endpoint: endpoint,
-		teamID:   config.TeamID,
-		keyID:    config.KeyID,
-		bundleID: config.BundleID,
-		key:      key,
+		client:        makeClient(true),
+		endpoint:      endpoint,
+		teamID:        config.TeamID,
+		keyID:         config.KeyID,
+		bundleID:      config.BundleID,
+		refreshOrigin: refreshOrigin,
+		key:           key,
 	}, nil
 }
 
@@ -161,6 +170,7 @@ func (a *APNs) request(m Message) ([]byte, http.Header, error) {
 		FlightID            string   `json:"flightId,omitempty"`
 		ConnectionInboundID string   `json:"connectionInboundId,omitempty"`
 		EventID             string   `json:"eventId,omitempty"`
+		RefreshOrigin       string   `json:"refreshOrigin,omitempty"`
 	}{APS: &aps}
 
 	if m.Kind == Alert {
@@ -170,6 +180,7 @@ func (a *APNs) request(m Message) ([]byte, http.Header, error) {
 		aps.Sound = "default"
 		payload.FlightID = m.FlightID
 		payload.ConnectionInboundID = m.ConnectionInboundID
+		payload.RefreshOrigin = a.refreshOrigin
 		if m.APNsCollapseID != "" {
 			payload.EventID = m.CollapseID
 		}
@@ -209,6 +220,11 @@ func (a *APNs) request(m Message) ([]byte, http.Header, error) {
 	}
 
 	body, err := encodePayload(payload)
+	if err != nil && payload.RefreshOrigin != "" {
+		// The optional foreground hint must fit alongside the original alert.
+		payload.RefreshOrigin = ""
+		body, err = encodePayload(payload)
+	}
 	return body, headers, err
 }
 
