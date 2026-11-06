@@ -39,9 +39,10 @@ type AeroSubscriptionProvider interface {
 }
 
 type AeroSubscriptionOptions struct {
-	CallbackURL string
-	MaxActive   int
-	Interval    time.Duration
+	CallbackURL    string
+	MaxActive      int
+	Interval       time.Duration
+	IncludeInbound bool
 }
 
 func (o AeroSubscriptionOptions) Validate() error {
@@ -97,10 +98,11 @@ func aeroTargetHash(raw string) string {
 }
 
 type wantedAeroSubscription struct {
-	key    string
-	scope  feeds.AeroAlertScope
-	starts time.Time
-	ends   time.Time
+	key        string
+	scope      feeds.AeroAlertScope
+	starts     time.Time
+	ends       time.Time
+	retainOnly bool
 }
 
 type managedAeroSubscription struct {
@@ -111,44 +113,91 @@ type managedAeroSubscription struct {
 	ends, inspectAfter      time.Time
 }
 
-func (s *Store) wantedAeroSubscriptions(ctx context.Context, now time.Time) ([]wantedAeroSubscription, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT snapshot FROM flights WHERE EXISTS(SELECT 1 FROM tracked WHERE tracked.flight_id=flights.id)
+func (s *Store) wantedAeroSubscriptions(ctx context.Context, now time.Time, includeInbound bool) ([]wantedAeroSubscription, bool, error) {
+	start, end := now.Add(-48*time.Hour), now.Add(48*time.Hour)
+	rows, err := s.db.QueryContext(ctx, `SELECT snapshot, CASE WHEN ? AND NOT EXISTS (
+  SELECT 1 FROM aero_instance_keys WHERE flight_id=flights.id AND provider_id=json_extract(snapshot,'$.inboundId')
+) THEN json_extract(inbound,'$[0]') END
+FROM flights WHERE EXISTS(SELECT 1 FROM tracked WHERE tracked.flight_id=flights.id)
 AND json_extract(snapshot,'$.source') IN ('flightaware_aeroapi','flightaware_schedule')
 AND julianday(json_extract(snapshot,'$.scheduledDeparture')) BETWEEN julianday(?) AND julianday(?)
 ORDER BY julianday(json_extract(snapshot,'$.scheduledDeparture')),id LIMIT ?`,
-		now.Add(-48*time.Hour).Format(time.RFC3339), now.Add(48*time.Hour).Format(time.RFC3339), aeroSubscriptionScanLimit+1)
+		includeInbound, start.Format(time.RFC3339), end.Format(time.RFC3339), aeroSubscriptionScanLimit+1)
 	if err != nil {
 		return nil, false, err
 	}
 	defer rows.Close()
 	wanted := make([]wantedAeroSubscription, 0)
-	seen := make(map[string]bool)
+	var inboundWanted []wantedAeroSubscription
+	activeSince := now.Add(-6 * time.Hour)
 	count := 0
 	for rows.Next() {
 		count++
-		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var raw, inboundRaw []byte
+		if err := rows.Scan(&raw, &inboundRaw); err != nil {
 			return nil, false, err
 		}
 		var flight feeds.Flight
 		if err := json.Unmarshal(raw, &flight); err != nil {
 			return nil, false, err
 		}
-		scope, starts, ok := flight.AeroAlertScope()
-		if !ok || finished(flight) {
+		if scope, ok := wantedAeroScope(flight, now); ok {
+			wanted = append(wanted, scope)
+		}
+		if len(inboundRaw) == 0 || flight.ScheduledDeparture == nil || flight.ScheduledDeparture.Before(activeSince) ||
+			!flightAlertRelevant("delay_prediction", flight) {
 			continue
 		}
-		// Local cleanup allows one extra calendar day for overnight or late
-		// arrivals. AeroAPI's registration itself never widens its dates.
-		ends := starts.AddDate(0, 0, 2)
-		key := hash(strings.Join([]string{scope.Ident, scope.Origin, scope.Destination, scope.Date}, "\x00"))
-		if !ends.After(now) || seen[key] {
+		var inbound feeds.Flight
+		if err := json.Unmarshal(inboundRaw, &inbound); err != nil {
+			return nil, false, err
+		}
+		if !isExactAeroInbound(flight, inbound) || !connectsAeroInbound(flight, inbound) ||
+			inbound.Status == "diverted" || inbound.Status == "unknown" || inbound.ActualArrival != nil ||
+			inbound.ScheduledDeparture == nil || inbound.ScheduledDeparture.Before(start) || !inbound.ScheduledDeparture.Before(*flight.ScheduledDeparture) {
 			continue
 		}
-		wanted = append(wanted, wantedAeroSubscription{key: key, scope: scope, starts: starts, ends: ends})
-		seen[key] = true
+		if arrival := inbound.ScheduledArrival; arrival != nil && (arrival.Before(*inbound.ScheduledDeparture) || arrival.After(*flight.ScheduledDeparture)) {
+			continue
+		}
+		// An old ETA can precede a late takeoff. Keep the route scope through
+		// the inbound's arrival unless its scheduled or confirmed times conflict.
+		if takeoff := firstTime(inbound.ActualTakeoff, inbound.ActualDeparture); takeoff != nil &&
+			inbound.ActualLanding != nil && inbound.ActualLanding.Before(*takeoff) {
+			continue
+		}
+		if scope, ok := wantedAeroScope(inbound, now); ok {
+			scope.retainOnly = !flightAlertRelevant("delay_prediction", inbound)
+			inboundWanted = append(inboundWanted, scope)
+		}
 	}
-	return wanted, count <= aeroSubscriptionScanLimit, rows.Err()
+	// A route-day scope can serve both a directly tracked flight and an inbound.
+	// Fill free capacity with directly tracked scopes before inbound-only scopes.
+	seen := make(map[string]int, len(wanted)+len(inboundWanted))
+	scopes := wanted[:0]
+	for _, row := range append(wanted, inboundWanted...) {
+		if index, duplicate := seen[row.key]; duplicate {
+			if scopes[index].retainOnly && !row.retainOnly {
+				scopes[index] = row
+			}
+			continue
+		}
+		seen[row.key] = len(scopes)
+		scopes = append(scopes, row)
+	}
+	return scopes, count <= aeroSubscriptionScanLimit, rows.Err()
+}
+
+func wantedAeroScope(flight feeds.Flight, now time.Time) (wantedAeroSubscription, bool) {
+	scope, starts, ok := flight.AeroAlertScope()
+	if !ok || finished(flight) {
+		return wantedAeroSubscription{}, false
+	}
+	// Local cleanup allows one extra calendar day for overnight or late
+	// arrivals. AeroAPI's registration itself never widens its dates.
+	ends := starts.AddDate(0, 0, 2)
+	key := hash(strings.Join([]string{scope.Ident, scope.Origin, scope.Destination, scope.Date}, "\x00"))
+	return wantedAeroSubscription{key: key, scope: scope, starts: starts, ends: ends}, ends.After(now)
 }
 
 func (s *Store) managedAeroSubscriptions(ctx context.Context) ([]managedAeroSubscription, error) {
@@ -247,7 +296,7 @@ func (s *Store) RunAeroSubscriptions(ctx context.Context, client AeroSubscriptio
 }
 
 func (s *Store) reconcileAeroSubscriptions(ctx context.Context, client AeroSubscriptionProvider, opts AeroSubscriptionOptions, now time.Time, logger *slog.Logger) error {
-	wanted, complete, err := s.wantedAeroSubscriptions(ctx, now)
+	wanted, complete, err := s.wantedAeroSubscriptions(ctx, now, opts.IncludeInbound)
 	if err != nil {
 		return err
 	}
@@ -330,11 +379,14 @@ func (s *Store) reconcileAeroSubscriptions(ctx context.Context, client AeroSubsc
 	}
 	creates := 0
 	checkedEndpoint := false
+	utcToday := now.UTC().Format(time.DateOnly)
 	for _, row := range wanted {
 		if active >= opts.MaxActive || requests < 1 || creates == aeroSubscriptionCreates {
 			break
 		}
-		if managedKeys[row.key] || !row.starts.After(now) {
+		// FlightAware rejects a start on the current UTC date even when the
+		// departure-local midnight has not occurred yet.
+		if managedKeys[row.key] || row.retainOnly || !row.starts.After(now) || row.scope.Date <= utcToday {
 			continue
 		}
 		if !checkedEndpoint {

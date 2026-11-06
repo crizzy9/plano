@@ -167,6 +167,13 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		if err != nil {
 			return err
 		}
+		includeInbound, err := flag("PLANO_AERO_SUBSCRIPTIONS_INBOUND", false)
+		if err != nil {
+			return err
+		}
+		if includeInbound && !enableSubscriptions {
+			return errors.New("PLANO_AERO_SUBSCRIPTIONS_INBOUND requires PLANO_AERO_SUBSCRIPTIONS=true")
+		}
 		if enableSubscriptions {
 			maxActive, err := strconv.Atoi(env("PLANO_AERO_SUBSCRIPTIONS_MAX", "10"))
 			if err != nil {
@@ -180,9 +187,10 @@ func run(logger *slog.Logger, checkOnly bool) error {
 				return errors.New("PLANO_AERO_SUBSCRIPTIONS requires PLANO_AEROALERTS_KEY_FILE and an HTTPS PLANO_PUBLIC_URL")
 			}
 			aeroSubscriptions = &core.AeroSubscriptionOptions{
-				CallbackURL: publicURL + "/v1/webhooks/aeroapi?token=" + url.QueryEscape(string(aeroCallbackKey)),
-				MaxActive:   maxActive,
-				Interval:    cadence,
+				CallbackURL:    publicURL + "/v1/webhooks/aeroapi?token=" + url.QueryEscape(string(aeroCallbackKey)),
+				MaxActive:      maxActive,
+				Interval:       cadence,
+				IncludeInbound: includeInbound,
 			}
 			if err := aeroSubscriptions.Validate(); err != nil {
 				return err

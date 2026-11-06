@@ -12,9 +12,12 @@ import (
 func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 	const enrollment = "fixture-enrollment-code"
 	const aeroKey = "fixture-aeroapi-key"
+	const aeroCallbackKey = "fixture-callback-key-not-production"
 	const invalidFlag = "fixture-invalid-flag"
 	for _, tc := range []struct {
 		name, demo, allowOpen, enrollment, aeroKey, addr, origin, wantError string
+		subscriptions, includeInbound                                       string
+		withAeroCallback                                                    bool
 	}{
 		{name: "demo without providers", demo: "true"},
 		{name: "live requires enrollment before provider configuration", wantError: "PLANO_ENROLLMENT_CODE"},
@@ -26,6 +29,15 @@ func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 		{name: "short enrollment code", enrollment: "fixture-short", aeroKey: aeroKey, wantError: "16 to 128 bytes"},
 		{name: "invalid listen address", demo: "true", addr: "invalid listen address", wantError: "PLANO_ADDR"},
 		{name: "public origin with empty query", demo: "true", origin: "https://plano.example?", wantError: "PLANO_PUBLIC_URL"},
+		{name: "invalid inbound subscription flag", enrollment: enrollment, aeroKey: aeroKey, includeInbound: invalidFlag,
+			wantError: "PLANO_AERO_SUBSCRIPTIONS_INBOUND"},
+		{name: "inbound subscriptions require managed subscriptions", enrollment: enrollment, aeroKey: aeroKey, includeInbound: "true",
+			wantError: "PLANO_AERO_SUBSCRIPTIONS_INBOUND requires PLANO_AERO_SUBSCRIPTIONS=true"},
+		{name: "inbound subscriptions require a callback key", enrollment: enrollment, aeroKey: aeroKey, subscriptions: "true", includeInbound: "true",
+			origin: "https://plano.example", wantError: "PLANO_AEROALERTS_KEY_FILE"},
+		{name: "live with inbound subscriptions", enrollment: enrollment, aeroKey: aeroKey, subscriptions: "true", includeInbound: "true",
+			origin: "https://plano.example", withAeroCallback: true},
+		{name: "demo skips inbound subscription settings", demo: "true", includeInbound: invalidFlag},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateStartupEnvironment(t)
@@ -34,6 +46,15 @@ func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 			t.Setenv("PLANO_ENROLLMENT_CODE", tc.enrollment)
 			t.Setenv("PLANO_AEROAPI_KEY", tc.aeroKey)
 			t.Setenv("PLANO_PUBLIC_URL", tc.origin)
+			t.Setenv("PLANO_AERO_SUBSCRIPTIONS", tc.subscriptions)
+			t.Setenv("PLANO_AERO_SUBSCRIPTIONS_INBOUND", tc.includeInbound)
+			if tc.withAeroCallback {
+				path := filepath.Join(t.TempDir(), "callback-key")
+				if err := os.WriteFile(path, []byte(aeroCallbackKey), 0600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PLANO_AEROALERTS_KEY_FILE", path)
+			}
 			dbDir := filepath.Join(t.TempDir(), "absent")
 			t.Setenv("PLANO_DB", filepath.Join(dbDir, "plano.db"))
 			addr := tc.addr
@@ -48,7 +69,7 @@ func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 			if err != nil {
 				diagnostic += err.Error()
 			}
-			for _, value := range []string{tc.enrollment, tc.aeroKey, invalidFlag} {
+			for _, value := range []string{tc.enrollment, tc.aeroKey, aeroCallbackKey, invalidFlag} {
 				if value != "" && strings.Contains(diagnostic, value) {
 					t.Fatal("configuration diagnostic exposed a fixture value")
 				}
@@ -73,7 +94,8 @@ func isolateStartupEnvironment(t *testing.T) {
 	for _, name := range []string{
 		"PLANO_PUBLIC_URL", "PLANO_ENROLLMENT_CODE_FILE", "PLANO_BOOKING_KEY_FILE", "PLANO_AIRPORT_TRANSFERS_FILE",
 		"PLANO_AEROALERTS_KEY_FILE", "PLANO_ADVISORY_INGRESS_KEY_FILE", "PLANO_AEROAPI_KEY_FILE",
-		"PLANO_METAR", "PLANO_AERO_SUBSCRIPTIONS", "PLANO_TRIPIT_SYNC_KEY_FILE", "PLANO_RESERVATION_GATEWAY_URL",
+		"PLANO_METAR", "PLANO_AERO_SUBSCRIPTIONS", "PLANO_AERO_SUBSCRIPTIONS_INBOUND", "PLANO_AERO_SUBSCRIPTIONS_MAX", "PLANO_AERO_SUBSCRIPTIONS_INTERVAL",
+		"PLANO_TRIPIT_SYNC_KEY_FILE", "PLANO_RESERVATION_GATEWAY_URL",
 		"PLANO_FAA_NAS", "PLANO_SWIM_URL", "PLANO_EUROCONTROL_URL", "PLANO_ADSB_URL", "PLANO_FAA_REGISTRY_FILE",
 		"PLANO_APNS_TEAM_ID", "PLANO_APNS_KEY_ID", "PLANO_APNS_BUNDLE_ID", "PLANO_APNS_PRIVATE_KEY_FILE", "PLANO_APNS_SANDBOX",
 		"PLANO_FCM_PROJECT_ID", "PLANO_FCM_SERVICE_ACCOUNT_FILE", "PLANO_FCM_BANDWIDTH_CONSTRAINED",

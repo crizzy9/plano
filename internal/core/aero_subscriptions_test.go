@@ -94,6 +94,207 @@ func fixtureSubscriptionOptions() AeroSubscriptionOptions {
 	return AeroSubscriptionOptions{CallbackURL: "https://plano.example.com/v1/webhooks/aeroapi?token=" + strings.Repeat("T", 40), MaxActive: 3, Interval: time.Minute}
 }
 
+func TestAeroSubscriptionPlannerSelectsEligibleDirectInbound(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(filepath.Join(t.TempDir(), "subscriptions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	now := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)
+	onward := fixtureAeroSubscriptionFlight(t, s, now, 30*time.Hour, "UAL7-onward", "UAL7")
+	inbound := feeds.Flight{ID: "UAL6-inbound", ICAONumber: "UAL6", Source: onward.Source, Status: "scheduled", TailNumber: "N123AA",
+		Origin: "LAX", OriginICAO: "KLAX", OriginTimeZone: onward.OriginTimeZone, Destination: "SFO", DestinationICAO: "KSFO",
+		ScheduledDeparture: new(now.Add(24 * time.Hour)), ScheduledArrival: new(now.Add(26 * time.Hour)), ObservedAt: now}
+	onward.InboundID, onward.TailNumber = inbound.ID, inbound.TailNumber
+	if err := s.Track(ctx, friendInstallation(t, s), onward.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		mutate func(*feeds.Flight, *feeds.Flight)
+		want   bool
+	}{
+		{name: "scheduled", want: true},
+		{name: "airborne inbound remains wanted with an elapsed ETA", want: true, mutate: func(parent, leg *feeds.Flight) {
+			parent.ScheduledDeparture = new(now.Add(2 * time.Hour))
+			leg.Status = "airborne"
+			leg.ScheduledDeparture, leg.ActualTakeoff = new(now.Add(-2*time.Hour)), new(now.Add(-90*time.Minute))
+			leg.ScheduledArrival = new(now.Add(time.Hour))
+			leg.EstimatedArrival = new(now.Add(-95 * time.Minute))
+		}},
+		{name: "landed inbound remains wanted", want: true, mutate: func(parent, leg *feeds.Flight) {
+			parent.ScheduledDeparture = new(now.Add(2 * time.Hour))
+			leg.Status = "landed"
+			leg.ScheduledDeparture, leg.ScheduledArrival = new(now.Add(-3*time.Hour)), new(now.Add(-time.Hour))
+			leg.ActualLanding = new(now.Add(-time.Minute))
+		}},
+		{name: "different first leg", mutate: func(_, leg *feeds.Flight) { leg.ID = "different" }},
+		{name: "no explicit link", mutate: func(parent, _ *feeds.Flight) { parent.InboundID = "" }},
+		{name: "different airport", mutate: func(_, leg *feeds.Flight) { leg.Destination, leg.DestinationICAO = "BOS", "KBOS" }},
+		{name: "different aircraft", mutate: func(_, leg *feeds.Flight) { leg.TailNumber = "N456BB" }},
+		{name: "cancelled", mutate: func(_, leg *feeds.Flight) { leg.Status = "cancelled" }},
+		{name: "diverted", mutate: func(_, leg *feeds.Flight) { leg.Status = "diverted" }},
+		{name: "unknown", mutate: func(_, leg *feeds.Flight) { leg.Status = "unknown" }},
+		{name: "recorded gate arrival", mutate: func(_, leg *feeds.Flight) { leg.ActualArrival = new(now) }},
+		{name: "invalid route scope", mutate: func(_, leg *feeds.Flight) { leg.OriginTimeZone = "" }},
+		{name: "inconsistent schedule", mutate: func(parent, leg *feeds.Flight) { leg.ScheduledDeparture = parent.ScheduledDeparture }},
+		{name: "scheduled arrival before departure", mutate: func(_, leg *feeds.Flight) {
+			leg.ScheduledArrival = new(leg.ScheduledDeparture.Add(-time.Minute))
+		}},
+		{name: "confirmed landing before takeoff", mutate: func(_, leg *feeds.Flight) {
+			leg.ActualTakeoff, leg.ActualLanding = new(now.Add(-time.Minute)), new(now.Add(-time.Hour))
+		}},
+		{name: "onward departed", mutate: func(parent, _ *feeds.Flight) { parent.ActualDeparture = new(now) }},
+		{name: "onward outside active window", mutate: func(parent, _ *feeds.Flight) { parent.ScheduledDeparture = new(now.Add(-7 * time.Hour)) }},
+		{name: "parent aliases its own inbound"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, leg := onward, inbound
+			parent.ObservedAt = now.Add(time.Duration(i+1) * time.Millisecond)
+			if tc.mutate != nil {
+				tc.mutate(&parent, &leg)
+			}
+			if err := s.Observe(ctx, parent, nil, []feeds.Flight{leg, inbound}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "parent aliases its own inbound" {
+				if _, err := s.db.ExecContext(ctx, `UPDATE aero_instance_keys SET provider_id=? WHERE flight_id=?`, inbound.ID, parent.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, include := range []bool{false, true} {
+				wanted, complete, err := s.wantedAeroSubscriptions(ctx, now, include)
+				wantCount := 1
+				if include && tc.want {
+					wantCount++
+				}
+				if err != nil || !complete || len(wanted) != wantCount || wanted[0].scope.Ident != onward.ICAONumber ||
+					wantCount == 2 && wanted[1].scope.Ident != inbound.ICAONumber {
+					t.Fatalf("include inbound %t yielded %+v, complete=%t, err=%v", include, wanted, complete, err)
+				}
+			}
+		})
+	}
+}
+
+func TestAeroInboundSubscriptionsShareQuotaAndOwnership(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(filepath.Join(t.TempDir(), "subscriptions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	owner := friendInstallation(t, s)
+	now := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)
+	inbound := fixtureAeroSubscriptionFlight(t, s, now, 24*time.Hour, "UAL6-inbound", "UAL6")
+	inbound.Origin, inbound.OriginICAO, inbound.Destination, inbound.DestinationICAO = "LAX", "KLAX", "SFO", "KSFO"
+	setInbound := func(onward *feeds.Flight, leg feeds.Flight) {
+		t.Helper()
+		onward.InboundID, onward.ObservedAt = leg.ID, onward.ObservedAt.Add(time.Millisecond)
+		if err := s.Observe(ctx, *onward, nil, []feeds.Flight{leg}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parents := []feeds.Flight{
+		fixtureAeroSubscriptionFlight(t, s, now, 31*time.Hour, "UAL7-onward", "UAL7"),
+		fixtureAeroSubscriptionFlight(t, s, now, 31*time.Hour, "UAL7-alias", "UAL7"),
+	}
+	for i := range parents {
+		setInbound(&parents[i], inbound)
+		if err := s.Track(ctx, owner, parents[i].ID, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture := &aeroSubscriptionFixture{configured: true, alerts: map[int64]feeds.AeroSubscription{9: {
+		ID: 9, Ident: "UAL6", Origin: "KLAX", Destination: "KSFO", Start: "2026-11-06", End: "2026-11-06", TargetURL: "https://existing.example.com/alerts",
+	}}}
+	opts := fixtureSubscriptionOptions()
+	opts.IncludeInbound, opts.MaxActive = true, 1
+	logger := slog.New(slog.DiscardHandler)
+	reconcile := func(at time.Time) {
+		t.Helper()
+		if err := s.reconcileAeroSubscriptions(ctx, fixture, opts, at, logger); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reconcile(now)
+	if fixture.creates != 1 || fixture.alerts[101].Ident != "UAL7" {
+		t.Fatalf("direct tracking did not get first capacity: creates=%d ident=%q", fixture.creates, fixture.alerts[101].Ident)
+	}
+	opts.MaxActive = 2
+	moving := inbound
+	moving.Status, moving.ActualTakeoff = "airborne", new(now)
+	for i := range parents {
+		setInbound(&parents[i], moving)
+	}
+	reconcile(now.Add(time.Minute))
+	if fixture.creates != 1 {
+		t.Fatalf("moving inbound created a scope for its original future date: creates=%d", fixture.creates)
+	}
+	other := inbound
+	other.ID = "UAL6-second-instance"
+	setInbound(&parents[0], other)
+	reconcile(now.Add(2 * time.Minute))
+	if fixture.creates != 2 || fixture.alerts[102].Ident != "UAL6" || fixture.alerts[102].Origin != "KLAX" || fixture.alerts[102].Destination != "KSFO" {
+		t.Fatalf("inbound did not share capacity or deduplicate: creates=%d ident=%q", fixture.creates, fixture.alerts[102].Ident)
+	}
+	other.Status, other.ActualTakeoff = "airborne", new(now.Add(time.Minute))
+	setInbound(&parents[0], other)
+	reconcile(now.Add(3 * time.Minute))
+	if fixture.creates != 2 || len(fixture.deletes) != 0 {
+		t.Fatalf("movement retired an existing scope: creates=%d deletes=%v", fixture.creates, fixture.deletes)
+	}
+	inbound.ObservedAt = now.Add(time.Millisecond)
+	if err := s.Observe(ctx, inbound, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Track(ctx, owner, inbound.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	opts.IncludeInbound = false
+	reconcile(now.Add(4 * time.Minute))
+	if len(fixture.deletes) != 0 || fixture.creates != 2 {
+		t.Fatalf("shared scope was replaced or retired: creates=%d deletes=%v", fixture.creates, fixture.deletes)
+	}
+	if err := s.Untrack(ctx, owner, inbound.ID); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(now.Add(5 * time.Minute))
+	if len(fixture.deletes) != 1 || fixture.deletes[0] != 102 || len(fixture.inspects) != 1 || fixture.inspects[0] != 102 || fixture.alerts[9].ID != 9 {
+		t.Fatalf("inbound-only retirement inspected %v and deleted %v", fixture.inspects, fixture.deletes)
+	}
+}
+
+func TestAeroSubscriptionRejectsCurrentUTCDateBeforeLocalMidnight(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(filepath.Join(t.TempDir(), "subscriptions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	owner := friendInstallation(t, s)
+	now := time.Date(2026, time.November, 6, 2, 0, 0, 0, time.UTC)
+	blocked := fixtureAeroSubscriptionFlight(t, s, now, 12*time.Hour, "UAL6-current-utc", "UAL6")
+	eligible := fixtureAeroSubscriptionFlight(t, s, now, 36*time.Hour, "UAL7-future-utc", "UAL7")
+	if scope, start, ok := blocked.AeroAlertScope(); !ok || !start.After(now) || scope.Date != now.Format(time.DateOnly) {
+		t.Fatalf("fixture requires local midnight after now on the same UTC date: %v, %v", scope, start)
+	}
+	for _, flight := range []feeds.Flight{blocked, eligible} {
+		if err := s.Track(ctx, owner, flight.ID, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture := &aeroSubscriptionFixture{configured: true, alerts: make(map[int64]feeds.AeroSubscription)}
+	if err := s.reconcileAeroSubscriptions(ctx, fixture, fixtureSubscriptionOptions(), now, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.creates != 1 || fixture.alerts[101].Ident != eligible.ICAONumber {
+		t.Fatalf("current-UTC-date scope was posted: creates=%d ident=%q", fixture.creates, fixture.alerts[101].Ident)
+	}
+}
+
 func TestAeroSubscriptionReconcileScopesAndRetiresOnlyOwnedAlerts(t *testing.T) {
 	ctx := t.Context()
 	s, err := Open(filepath.Join(t.TempDir(), "subscriptions.db"))
