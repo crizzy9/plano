@@ -22,6 +22,7 @@ import (
 	"github.com/crizzy9/plano/internal/core"
 	"github.com/crizzy9/plano/internal/demodata"
 	"github.com/crizzy9/plano/internal/feeds"
+	"github.com/crizzy9/plano/internal/historicalrisk"
 	"github.com/crizzy9/plano/internal/predict"
 	"github.com/crizzy9/plano/internal/push"
 )
@@ -339,6 +340,18 @@ func run(logger *slog.Logger, checkOnly bool) error {
 			return fmt.Errorf("load delay model: %w", err)
 		}
 	}
+	var historicalRisk *historicalrisk.Model
+	if path := os.Getenv("PLANO_HISTORICAL_RISK_FILE"); path != "" {
+		historicalRisk, err = loadHistoricalRiskFile(path)
+		if err != nil {
+			return err
+		}
+	} else if !demo {
+		historicalRisk, err = historicalrisk.Bundled()
+		if err != nil {
+			return fmt.Errorf("load bundled historical risk model: %w", err)
+		}
+	}
 	collectSamples, err := flag("PLANO_COLLECT_DELAY_SAMPLES", false)
 	if err != nil {
 		return err
@@ -359,6 +372,7 @@ func run(logger *slog.Logger, checkOnly bool) error {
 	service := api.Server{
 		Store: store, Source: flights, PublicURL: publicURL, EnrollmentCode: string(enrollment),
 		BookingKey: bookingKey, ReservationSource: reservationSource, TripItSync: tripItSync, ConnectionRules: connections, Weather: weather,
+		HistoricalRisk:  historicalRisk,
 		AeroCallbackKey: aeroCallbackKey, AdvisoryIngressKey: advisoryIngressKey, Demo: demo, Logger: logger,
 	}
 	server := &http.Server{Addr: net.JoinHostPort(host, port), Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
@@ -404,6 +418,23 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		defer cancel()
 		return server.Shutdown(shutdown)
 	}
+}
+
+func loadHistoricalRiskFile(path string) (*historicalrisk.Model, error) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("PLANO_HISTORICAL_RISK_FILE must refer to a readable regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("cannot open PLANO_HISTORICAL_RISK_FILE")
+	}
+	defer file.Close()
+	model, err := historicalrisk.Load(file)
+	if err != nil {
+		return nil, errors.New("invalid historical risk model in PLANO_HISTORICAL_RISK_FILE")
+	}
+	return model, nil
 }
 
 func loadFAARegistryFile(path string) (*feeds.FAARegistry, error) {

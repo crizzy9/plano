@@ -155,8 +155,23 @@ func isolateStartupEnvironment(t *testing.T) {
 		"PLANO_FAA_NAS", "PLANO_SWIM_URL", "PLANO_EUROCONTROL_URL", "PLANO_ADSB_URL", "PLANO_FAA_REGISTRY_FILE",
 		"PLANO_APNS_TEAM_ID", "PLANO_APNS_KEY_ID", "PLANO_APNS_BUNDLE_ID", "PLANO_APNS_PRIVATE_KEY_FILE", "PLANO_APNS_SANDBOX",
 		"PLANO_FCM_PROJECT_ID", "PLANO_FCM_SERVICE_ACCOUNT_FILE", "PLANO_FCM_BANDWIDTH_CONSTRAINED",
-		"PLANO_REFRESH_INTERVAL", "PLANO_DELAY_MODEL_FILE", "PLANO_COLLECT_DELAY_SAMPLES",
+		"PLANO_REFRESH_INTERVAL", "PLANO_DELAY_MODEL_FILE", "PLANO_HISTORICAL_RISK_FILE", "PLANO_COLLECT_DELAY_SAMPLES",
 	} {
 		t.Setenv(name, "")
+	}
+}
+
+func TestCheckConfigRejectsInvalidHistoricalRisk(t *testing.T) {
+	isolateStartupEnvironment(t)
+	t.Setenv("PLANO_DEMO", "true")
+	t.Setenv("PLANO_ENROLLMENT_CODE", "")
+	t.Setenv("PLANO_ADDR", "127.0.0.1:0")
+	path := filepath.Join(t.TempDir(), "historical-risk.json")
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":0}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PLANO_HISTORICAL_RISK_FILE", path)
+	if err := run(slog.New(slog.DiscardHandler), true); err == nil || !strings.Contains(err.Error(), "PLANO_HISTORICAL_RISK_FILE") {
+		t.Fatalf("check-config accepted invalid historical risk artifact: %v", err)
 	}
 }

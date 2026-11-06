@@ -3,7 +3,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { AppState, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { saveServer, type Flight, type FlightNotice, type PlanoAPI, type Position } from './api';
+import { saveServer, type Flight, type FlightNotice, type HistoricalDepartureRisk, type PlanoAPI, type Position } from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
 import { usePalette } from './theme';
 import { PickupLinks } from './pickup-links';
@@ -219,10 +219,17 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const noticeRows = useMemo(() => notices?.slice(0, 8).map((notice) => ({ notice, expires: Date.parse(notice.validUntil) })) ?? [], [notices]);
   const predictionExpiry = detail?.prediction?.validUntil;
   const predictionExpiresAt = predictionExpiry === undefined ? Infinity : Date.parse(predictionExpiry);
-  const expiries = useMemo(() => [predictionExpiresAt, ...noticeRows.map(({ expires }) => expires)].filter(Number.isFinite),
-    [predictionExpiresAt, noticeRows]);
+  const historicalRisk = !savedAt && !error && !rotationOf && !rotationSnapshot && detail?.flight.id === id
+    ? detail.historicalDepartureRisk : undefined;
+  const historicalRiskExpiresAt = validHistoricalDepartureRisk(historicalRisk) && flight &&
+    (flight.status === 'scheduled' || flight.status === 'boarding') &&
+    !flight.actualDeparture && !flight.actualTakeoff && !flight.actualLanding && !flight.actualArrival
+    ? Date.parse(flight.scheduledDeparture ?? '') : NaN;
+  const expiries = useMemo(() => [predictionExpiresAt, historicalRiskExpiresAt, ...noticeRows.map(({ expires }) => expires)]
+    .filter(Number.isFinite), [predictionExpiresAt, historicalRiskExpiresAt, noticeRows]);
   const now = useExpiryClock(expiries);
   const prediction = predictionExpiresAt > now ? detail?.prediction : undefined;
+  const currentHistoricalRisk = historicalRiskExpiresAt > now ? historicalRisk : undefined;
   const currentNotices = noticeRows.filter(({ expires }) => expires > now).map(({ notice }) => notice);
 
   async function toggleTrack() {
@@ -307,7 +314,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
               </View>
             </View>
           )}
-          {(prediction || weather.length > 0) && (
+          {(prediction || currentHistoricalRisk || weather.length > 0) && (
             <View style={layout.section}>
               <Heading>Delay outlook</Heading>
               {prediction && (
@@ -317,6 +324,13 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
                   {prediction.reasons?.map((reason, index) => <Body key={index}>{reason}</Body>)}
                   <Body>Plano estimate. Check your airline for official times.</Body>
                 </>
+              )}
+              {currentHistoricalRisk && (
+                <View style={styles.historicalRisk}>
+                  <Text accessibilityRole="header" style={[styles.strong, { color: colors.text }]}>Historical departure risk</Text>
+                  <Body>{riskPercent.format(currentHistoricalRisk.probability)} estimated chance of departing at least 15 min late for flights that operate.</Body>
+                  <Body>Based on {riskSampleCount.format(currentHistoricalRisk.sampleSize)} past departures from {flight.origin} in this scheduled time window. Records through {riskTrainingDay.format(new Date(currentHistoricalRisk.trainingThrough))}.</Body>
+                </View>
               )}
               {weather.length > 0 && <Heading>Observed airport weather</Heading>}
               {weather.map((report) => {
@@ -359,6 +373,17 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
       )}
     </Page>
   );
+}
+
+const riskPercent = new Intl.NumberFormat(undefined, { style: 'percent' });
+const riskSampleCount = new Intl.NumberFormat();
+const riskTrainingDay = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+
+function validHistoricalDepartureRisk(risk: HistoricalDepartureRisk | undefined): boolean {
+  return !!risk && Number.isFinite(risk.probability) && risk.probability >= 0 && risk.probability <= 1 &&
+    Number.isSafeInteger(risk.sampleSize) && risk.sampleSize > 0 &&
+    typeof risk.trainingThrough === 'string' && validDate(risk.trainingThrough) &&
+    typeof risk.modelVersion === 'string' && risk.modelVersion.trim().length > 0;
 }
 
 function savedFlightMessage(savedAt: string) {
@@ -819,4 +844,5 @@ const styles = StyleSheet.create({
   radarValue: { fontSize: 18, fontWeight: '600', fontVariant: ['tabular-nums'] },
   rotationSummary: { gap: 4 },
   strong: { fontSize: 16, fontWeight: '600' },
+  historicalRisk: { gap: 4 },
 });

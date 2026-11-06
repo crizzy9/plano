@@ -82,7 +82,7 @@ AeroAPI search / polling / callbacks     FAA NAS / signed advisory bridges
 | Flighty internals | Lawfully available native package or runtime capture, with REA target identity and artifact or trace evidence for each claimed subsystem. |
 | Push and native activities | Signed iOS and Android builds, both live provider credentials, platform-version and lifecycle tests, device receipt timestamps, and tests on constrained onboard Wi-Fi. |
 | Aviation ingestion | Approved live source accounts and observed coverage for AeroAPI callbacks, terminal, baggage, boarding, historical tracks, raw SWIM and EUROCONTROL data and aircraft registry enrichment. |
-| Prediction | Versioned training observations, holdout/backtest metrics, and validation of turnaround, weather, ATC and NOTAM attribution. A live fitted artifact and production holdout are still required. |
+| Prediction | The bundled BTS schedule risk has a retrospective holdout. The live departure-time model still requires timestamped training observations and validation of turnaround, weather, ATC and NOTAM attribution. |
 | Connections and sync | Verified airport route data and gate accuracy, calendar scheduling on devices, a live inbound mail transport and TripIt feed, and authorized airline-side PNR lookup. |
 | Passport and Friends | Live coordinate coverage and signed-device verification of Passport, sharing, and the Friends workflow. |
 | Self-host deployment | Phone-to-server TLS, live credential mounts, restore testing and operation under expected load. |

@@ -352,6 +352,23 @@ docker compose exec -T plano plano-train \
   -evaluate-model /path/to/mounted-delay-model.json -input - < later-examples.jsonl
 ```
 
+Live Plano includes a [BTS departure-risk model](../internal/historicalrisk/bts-departure-risk-2026-06.json).
+To replace it with a later fit, mount the new file read-only and set
+`PLANO_HISTORICAL_RISK_FILE` to its container path. For example, set the
+variable to `/models/departure-risk.json` and add this mount to the `plano`
+service in your Compose override.
+
+```yaml
+services:
+  plano:
+    volumes:
+      - ./historical-departure-risk.json:/models/departure-risk.json:ro
+```
+
+Plano displays the historical probability in **Delay outlook** for supported
+upcoming U.S. domestic flights. It appears separately from live forecasts and
+expires one year after the training data becomes available. [Train and evaluate a BTS model](../cmd/plano-train/README.md#fit-a-historical-departure-risk-model-from-bts)
+
 Evaluation prints JSON metrics, excludes forecasts at or before the last
 fitted label, and leaves the artifact intact.
 

@@ -19,6 +19,9 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(args) > 0 && args[0] == "bts-risk" {
+		return runBTSRisk(args[1:], stdout, stderr)
+	}
 	flags := flag.NewFlagSet("plano-train", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	inputPath := flags.String("input", "-", "Historical examples as JSON Lines. Use - for stdin.")
@@ -95,16 +98,20 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		report.LearnedOrFallback.MeanAbsoluteMinutes >= report.Published.MeanAbsoluteMinutes) {
 		return errors.New("backtest failed the deployment gate: need at least 50% learned coverage and lower holdout MAE than both baselines")
 	}
-	if *outputPath == "-" {
-		return model.Save(stdout)
+	return writeArtifact(*outputPath, stdout, model.Save)
+}
+
+func writeArtifact(path string, stdout io.Writer, save func(io.Writer) error) error {
+	if path == "-" {
+		return save(stdout)
 	}
-	file, err := os.OpenFile(*outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	writeErr := model.Save(file)
+	writeErr := save(file)
 	if err := errors.Join(writeErr, file.Close()); err != nil {
-		_ = os.Remove(*outputPath)
+		_ = os.Remove(path)
 		return err
 	}
 	return nil

@@ -83,6 +83,13 @@ export interface Prediction {
   validUntil?: string;
 }
 
+export interface HistoricalDepartureRisk {
+  probability: number;
+  sampleSize: number;
+  trainingThrough: string;
+  modelVersion: string;
+}
+
 export interface AirportWeather {
   airport: string;
   operation: 'departure' | 'arrival';
@@ -112,6 +119,7 @@ export interface FlightDetail {
   receiverRevision?: string;
   inbound?: Flight[];
   prediction?: Prediction | null;
+  historicalDepartureRisk?: HistoricalDepartureRisk;
   weather?: AirportWeather[];
   notices?: FlightNotice[];
 }

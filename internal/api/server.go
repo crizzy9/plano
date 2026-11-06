@@ -16,6 +16,7 @@ import (
 
 	"github.com/crizzy9/plano/internal/core"
 	"github.com/crizzy9/plano/internal/feeds"
+	"github.com/crizzy9/plano/internal/historicalrisk"
 )
 
 type Server struct {
@@ -28,6 +29,7 @@ type Server struct {
 	TripItSync         *TripItSync
 	Weather            *core.WeatherCache
 	ConnectionRules    *ConnectionRules
+	HistoricalRisk     *historicalrisk.Model
 	Demo               bool
 	Logger             *slog.Logger
 	AeroCallbackKey    []byte
@@ -41,6 +43,7 @@ var (
 	flightNumber  = regexp.MustCompile(`^[A-Z0-9]{2,3}[0-9]{1,5}[A-Z]?$`)
 	seatPattern   = regexp.MustCompile(`^[0-9]{1,3}[A-Z]{1,2}$`)
 	deviceBinding = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	ianaZoneName  = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$`)
 	errInvalid    = errors.New("invalid request")
 )
 
@@ -231,8 +234,8 @@ func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) er
 	}
 	var weather []core.AirportWeather
 	var notices []core.FlightNotice
+	now := time.Now()
 	if d.Tracked {
-		now := time.Now()
 		weather = s.Weather.ForFlight(d.Flight, now)
 		notices, err = s.Store.FlightNotices(r.Context(), d.Flight, now)
 		if err != nil {
@@ -242,13 +245,41 @@ func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) er
 			}
 		}
 	}
+	var historicalRisk *historicalrisk.Estimate
+	if !rotationSnapshot {
+		historicalRisk = s.historicalDepartureRisk(d.Flight, now)
+	}
 	respond(w, 200, struct {
 		core.Details
-		Weather          []core.AirportWeather `json:"weather,omitempty"`
-		Notices          []core.FlightNotice   `json:"notices,omitempty"`
-		RotationSnapshot bool                  `json:"rotationSnapshot,omitempty"`
-	}{d, weather, notices, rotationSnapshot})
+		Weather                 []core.AirportWeather    `json:"weather,omitempty"`
+		Notices                 []core.FlightNotice      `json:"notices,omitempty"`
+		RotationSnapshot        bool                     `json:"rotationSnapshot,omitempty"`
+		HistoricalDepartureRisk *historicalrisk.Estimate `json:"historicalDepartureRisk,omitempty"`
+	}{d, weather, notices, rotationSnapshot, historicalRisk})
 	return nil
+}
+
+func (s Server) historicalDepartureRisk(flight feeds.Flight, now time.Time) *historicalrisk.Estimate {
+	if s.HistoricalRisk == nil || s.Demo || flight.ScheduledDeparture == nil ||
+		(flight.Status != "scheduled" && flight.Status != "boarding") ||
+		first(flight.ActualDeparture, flight.ActualTakeoff, flight.ActualLanding, flight.ActualArrival) != nil ||
+		!flight.ScheduledDeparture.After(now) {
+		return nil
+	}
+	zone := flight.OriginTimeZone
+	if len(zone) > 128 || !ianaZoneName.MatchString(zone) || zone == "Local" || zone == "localtime" || zone == "posixrules" ||
+		strings.HasPrefix(zone, "posix/") || strings.HasPrefix(zone, "right/") {
+		return nil
+	}
+	location, err := time.LoadLocation(zone)
+	if err != nil {
+		return nil
+	}
+	estimate, ok := s.HistoricalRisk.Estimate(flight.Origin, flight.Destination, flight.ScheduledDeparture.In(location), now)
+	if !ok {
+		return nil
+	}
+	return &estimate
 }
 
 func (s Server) tracked(w http.ResponseWriter, r *http.Request, owner string) error {
