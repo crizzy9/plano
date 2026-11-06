@@ -88,6 +88,7 @@ published port if both projects run on the same host.
 | --- | --- |
 | FlightAware AeroAPI | Set `PLANO_AEROAPI_KEY_FILE` to a mounted key file, or supply `PLANO_AEROAPI_KEY` through the service environment. |
 | FAA NAS Status | Public aviation advisories are enabled in live mode by default. Set `PLANO_FAA_NAS=false` to disable this feed. |
+| NOAA Aviation Weather Center | Set `PLANO_METAR=true` in live mode to show recent adverse airport observations in the delay outlook. No account key is needed. |
 | FAA SWIM | Set `PLANO_SWIM_URL` to your advisory bridge. If it requires authentication, set either `PLANO_SWIM_TOKEN_FILE` or `PLANO_SWIM_TOKEN`. |
 | EUROCONTROL Network Manager | Set `PLANO_EUROCONTROL_URL` to your advisory bridge. If it requires authentication, set either `PLANO_EUROCONTROL_TOKEN_FILE` or `PLANO_EUROCONTROL_TOKEN`. |
 | readsb ADS-B | Set `PLANO_ADSB_URL` to an operator receiver's `aircraft.json` endpoint. Coverage depends on the receiver. |
@@ -99,6 +100,12 @@ published port if both projects run on the same host.
 `30m`. Shorter polling intervals can consume provider quotas faster. Set
 `PLANO_FCM_BANDWIDTH_CONSTRAINED=true` only after validating delivery with the
 Android build on a supported constrained network.
+
+The optional weather worker requests at most 24 ICAO station codes every five
+minutes, rotating across airports with imminent tracked arrivals or departures.
+Requests contain station codes. The delay view for a tracked flight shows report time and observed
+conditions separately from operational reasons and model estimates. Reports
+expire 90 minutes after observation. [Aviation Weather Center data API](https://aviationweather.gov/data/api/)
 
 The FAA SWIM and EUROCONTROL options consume an operator-managed bridge with
 authorized upstream access. Each bridge serves an HTTPS endpoint whose `GET`
@@ -156,9 +163,16 @@ as `/data-import/MASTER.txt` and set `PLANO_FAA_REGISTRY_FILE` to that path.
 docker compose -f compose.yaml -f compose.credentials.yaml up --build --wait
 ```
 
-Push-capable builds also need Apple signing and push entitlements on iOS or
-matching Firebase app configuration on Android. Test tokens from the exact
-build and environment you deploy.
+For an iOS push-capable build, set `PLANO_IOS_TEAM_ID` to the Apple signing
+team ID. Set `PLANO_IOS_BUNDLE_ID` for a custom bundle identifier and use the
+same identifier for `PLANO_APNS_BUNDLE_ID` on the server. The app and activity
+extension require signing and their matching entitlements.
+
+For an Android push-capable build, set `PLANO_GOOGLE_SERVICES_FILE` to the
+Firebase `google-services.json` path. The Firebase Android application must
+match the build's package identifier, which `PLANO_ANDROID_PACKAGE` can set.
+Use the same Firebase project for the server's FCM credentials. Test tokens
+from the exact build and environment you deploy.
 
 ## Maintain and back up
 

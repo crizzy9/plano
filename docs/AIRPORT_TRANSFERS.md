@@ -78,3 +78,27 @@ endpoints reduce to the same terminal checkpoint. An airport map link can
 still be shown when a map URL is configured. Transfer routes depend on
 operator data and reported gate or terminal assignments. Airline and
 airport instructions remain the source for current operational guidance.
+
+## How Plano estimates connection risk
+
+When using a general transfer estimate, Plano allows an estimated 15 minutes
+before the onward departure for boarding. Configured paths already include
+the operator's buffer. Use the airline's published gate-close time for the
+actual deadline. An upcoming connection is **Risky** when the available time
+falls short of the transfer and boarding estimates or the departure estimate
+has passed without an onward departure report. It is **Tight** when it meets
+the estimates with less than 25 minutes to spare, and **Relaxed** otherwise.
+If the estimated arrival time has passed without a recorded gate arrival,
+the upcoming estimate starts from the current time.
+
+Once the onward flight has departed, Plano can still estimate whether the
+connection was feasible using the available flight times. It reports
+**Missed** if the inbound gate arrival was unrecorded or the elapsed time fell
+short of the estimates. A cancellation, inbound diversion, or an elapsed
+connection window also results in **Missed**.
+
+When comparable flights suggest a gate and that gate identifies a more
+precise airport path, Plano can show its duration including the configured
+buffer. The risk score uses the longer of that duration and the main
+estimate with its boarding allowance. Directions use reported gates and
+terminals.

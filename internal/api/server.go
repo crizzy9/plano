@@ -26,6 +26,7 @@ type Server struct {
 	BookingKey         []byte
 	ReservationSource  feeds.ReservationSource
 	TripItSync         *TripItSync
+	Weather            *core.WeatherCache
 	ConnectionRules    *ConnectionRules
 	Demo               bool
 	Logger             *slog.Logger
@@ -210,7 +211,14 @@ func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) er
 	if err != nil {
 		return err
 	}
-	respond(w, 200, d)
+	var weather []core.AirportWeather
+	if d.Tracked {
+		weather = s.Weather.ForFlight(d.Flight, time.Now())
+	}
+	respond(w, 200, struct {
+		core.Details
+		Weather []core.AirportWeather `json:"weather,omitempty"`
+	}{d, weather})
 	return nil
 }
 

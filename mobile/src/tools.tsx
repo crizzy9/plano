@@ -273,7 +273,11 @@ export function ConnectionScreen({ api }: { api: PlanoAPI }) {
     }
   }
 
-  const candidates = value?.filter((flight) => flight.id !== inbound?.id && flight.origin === inbound?.destination);
+  const candidates = inbound && value?.filter((flight) => {
+    if (flight.id === inbound.id) return false;
+    if (inbound.destinationICAO && flight.originICAO) return inbound.destinationICAO === flight.originICAO;
+    return !!inbound.destination && flight.origin === inbound.destination;
+  });
   const airportMap = configuredAirportMap(result?.mapUrl);
   return (
     <Page>
@@ -306,10 +310,12 @@ export function ConnectionScreen({ api }: { api: PlanoAPI }) {
       {result && (
         <View style={layout.section}>
           <Heading>{result.risk} connection at {result.airport}</Heading>
-          <Text style={[styles.detail, { color: colors.text }]}>{result.availableMinutes} min between flights · {result.transferMinutes} min estimated transfer</Text>
+          <Text style={[styles.detail, { color: colors.text }]}>{Math.max(0, result.availableMinutes)} min connection window · {result.transferMinutes} min estimated transfer</Text>
+          {(result.boardingReserveMinutes ?? 0) > 0 && <Body>Timing includes an estimated {result.boardingReserveMinutes} min boarding reserve.</Body>}
           {result.precision && transferDetail[result.precision] && <Body>{transferDetail[result.precision]}</Body>}
-          <ConnectionGate direction="arrival" reported={inbound?.arrivalGate} prediction={result.arrivalGatePrediction} />
-          <ConnectionGate direction="departure" reported={outbound?.departureGate} prediction={result.departureGatePrediction} />
+          {result.forecastTransferMinutes !== undefined && <Body>Historical gates suggest a {result.forecastTransferMinutes} min airport route. The risk estimate allows for whichever route requires more time, including boarding.</Body>}
+          <ConnectionGate direction="arrival" reported={result.arrivalGate ?? inbound?.arrivalGate} prediction={result.arrivalGatePrediction} />
+          <ConnectionGate direction="departure" reported={result.departureGate ?? outbound?.departureGate} prediction={result.departureGatePrediction} />
           {result.instructions?.map((instruction, index) => <Body key={index}>{instruction}</Body>)}
           <Action secondary label={airportMap ? `Open ${result.airport} terminal map` : `Open ${result.airport} in maps`} onPress={() => {
             const place = encodeURIComponent(`${result.airport} airport`);

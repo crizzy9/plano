@@ -10,6 +10,8 @@ export interface Flight {
   number: string;
   origin: string;
   destination: string;
+  originICAO?: string;
+  destinationICAO?: string;
   scheduledDeparture?: string;
   scheduledArrival?: string;
   originTimeZone?: string;
@@ -65,12 +67,21 @@ export interface Prediction {
   method?: string;
 }
 
+export interface AirportWeather {
+  airport: string;
+  operation: 'departure' | 'arrival';
+  conditions: string;
+  observedAt: string;
+  validUntil: string;
+}
+
 export interface FlightDetail {
   flight: Flight;
   events?: FlightEvent[];
   telemetry?: Position[];
   inbound?: Flight[];
   prediction?: Prediction | null;
+  weather?: AirportWeather[];
 }
 
 export interface Friend {
@@ -124,10 +135,14 @@ export interface Connection {
   risk: string;
   availableMinutes: number;
   transferMinutes: number;
+  boardingReserveMinutes?: number;
+  forecastTransferMinutes?: number;
   airport: string;
   instructions: string[];
   precision?: string;
   mapUrl?: string;
+  arrivalGate?: string;
+  departureGate?: string;
   arrivalGatePrediction?: GatePrediction;
   departureGatePrediction?: GatePrediction;
 }

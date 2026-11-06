@@ -206,6 +206,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const flight = value?.detail.flight ?? initial;
   const detail = value?.detail;
   const prediction = detail?.prediction;
+  const weather = detail?.weather?.filter((report) => Date.parse(report.validUntil) > Date.now()) ?? [];
 
   async function toggleTrack() {
     if (!value || operation) return;
@@ -215,7 +216,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
       if (value.tracked) {
         await api.untrack(id);
         refresh();
-        setValue((old) => old && ({ ...old, tracked: false, detail: { ...old.detail, telemetry: undefined } }));
+        setValue((old) => old && ({ ...old, tracked: false, detail: { ...old.detail, telemetry: undefined, weather: undefined } }));
         await stopLiveActivity(id);
       } else {
         await api.track(id, seat.trim().toUpperCase() || undefined);
@@ -284,13 +285,28 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
               </View>
             </View>
           )}
-          {prediction && (
+          {(prediction || weather.length > 0) && (
             <View style={layout.section}>
               <Heading>Delay outlook</Heading>
-              {!!prediction.delayMinutes && <Body>Estimated departure delay of {prediction.delayMinutes} min.</Body>}
-              {prediction.departure && <Body>Predicted departure at {formatTime(prediction.departure, flight.originTimeZone)}.</Body>}
-              {prediction.reasons?.map((reason, index) => <Body key={index}>{reason}</Body>)}
-              <Body>Plano estimate. Check your airline for official times.</Body>
+              {prediction && (
+                <>
+                  {!!prediction.delayMinutes && <Body>Estimated departure delay of {prediction.delayMinutes} min.</Body>}
+                  {prediction.departure && <Body>Predicted departure at {formatTime(prediction.departure, flight.originTimeZone)}.</Body>}
+                  {prediction.reasons?.map((reason, index) => <Body key={index}>{reason}</Body>)}
+                  <Body>Plano estimate. Check your airline for official times.</Body>
+                </>
+              )}
+              {weather.length > 0 && <Heading>Observed airport weather</Heading>}
+              {weather.map((report) => {
+                const timeZone = report.operation === 'departure' ? flight.originTimeZone : flight.destinationTimeZone;
+                return (
+                  <View key={`${report.airport}:${report.operation}`}>
+                    <Body>{report.airport} · {report.operation === 'departure' ? 'Departure' : 'Arrival'}</Body>
+                    <Body>{report.conditions}</Body>
+                    <Body>NOAA report at {formatTime(report.observedAt, timeZone)}</Body>
+                  </View>
+                );
+              })}
             </View>
           )}
           {!!detail?.inbound?.length && (

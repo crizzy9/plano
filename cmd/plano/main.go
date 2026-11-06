@@ -121,6 +121,7 @@ func run(logger *slog.Logger) error {
 	var sender push.Sender
 	var reservationSource feeds.ReservationSource
 	var tripItSync *api.TripItSync
+	var weather *core.WeatherCache
 	if demo {
 		flights = demodata.Source{}
 	} else {
@@ -133,6 +134,13 @@ func run(logger *slog.Logger) error {
 		}
 		aeroAPI = feeds.NewAeroAPI(string(key), nil)
 		flights = aeroAPI
+		enableMETAR, err := flag("PLANO_METAR", false)
+		if err != nil {
+			return err
+		}
+		if enableMETAR {
+			weather = core.NewWeatherCache(feeds.NewMETAR(nil))
+		}
 		enableSubscriptions, err := flag("PLANO_AERO_SUBSCRIPTIONS", false)
 		if err != nil {
 			return err
@@ -258,7 +266,7 @@ func run(logger *slog.Logger) error {
 	defer store.Close()
 	service := api.Server{
 		Store: store, Source: flights, PublicURL: publicURL, EnrollmentCode: string(enrollment),
-		BookingKey: bookingKey, ReservationSource: reservationSource, TripItSync: tripItSync, ConnectionRules: connections,
+		BookingKey: bookingKey, ReservationSource: reservationSource, TripItSync: tripItSync, ConnectionRules: connections, Weather: weather,
 		AeroCallbackKey: aeroCallbackKey, AdvisoryIngressKey: advisoryIngressKey, Demo: demo, Logger: logger,
 	}
 	server := &http.Server{Addr: env("PLANO_ADDR", ":8080"), Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
@@ -288,6 +296,9 @@ func run(logger *slog.Logger) error {
 	}
 	if tripItSync != nil {
 		workers.Go(func() { service.RunTripItSync(ctx) })
+	}
+	if weather != nil {
+		workers.Go(func() { weather.Run(ctx, store, logger) })
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()

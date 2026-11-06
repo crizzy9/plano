@@ -38,6 +38,7 @@ type Details struct {
 	Telemetry  []feeds.Position `json:"telemetry"`
 	Inbound    []feeds.Flight   `json:"inbound"`
 	Prediction *Prediction      `json:"prediction"`
+	Tracked    bool             `json:"-"`
 }
 
 type Device struct {
@@ -300,9 +301,8 @@ func (s *Store) Details(ctx context.Context, id string) (Details, error) {
 func (s *Store) DetailsForInstallation(ctx context.Context, owner, id string) (Details, error) {
 	d := Details{Events: make([]Event, 0)}
 	var snapshot, telemetry, inbound, prediction []byte
-	var tracked bool
 	err := s.db.QueryRowContext(ctx, `SELECT snapshot,telemetry,inbound,prediction,
-EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flights WHERE id=?`, owner, id).Scan(&snapshot, &telemetry, &inbound, &prediction, &tracked)
+EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flights WHERE id=?`, owner, id).Scan(&snapshot, &telemetry, &inbound, &prediction, &d.Tracked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return d, ErrNotFound
 	}
@@ -339,7 +339,7 @@ EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flight
 	if err := rows.Close(); err != nil {
 		return d, err
 	}
-	if tracked {
+	if d.Tracked {
 		local, err := s.radarPositions(ctx, owner, id, nil, 2000)
 		if err != nil {
 			return d, err
