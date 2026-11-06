@@ -19,6 +19,7 @@ export interface Flight {
   estimatedDeparture?: string;
   estimatedArrival?: string;
   actualDeparture?: string;
+  actualTakeoff?: string;
   actualLanding?: string;
   actualArrival?: string;
   departureGate?: string;
@@ -50,6 +51,9 @@ export interface Position {
   longitude: number;
   altitudeFeet?: number;
   groundSpeedKnots?: number;
+  heading?: number;
+  verticalRateFpm?: number;
+  verticalTrend?: 'climbing' | 'descending' | 'level';
   at: string;
   source?: string;
 }
@@ -57,6 +61,9 @@ export interface Position {
 export interface RadarBatch {
   positions: Position[];
   cursor?: string;
+  providerPositions?: Position[];
+  providerCursor?: string;
+  providerRevision?: string;
 }
 
 export interface Prediction {
@@ -666,10 +673,12 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
       const query = rotationOf ? `?${new URLSearchParams({ rotationOf })}` : '';
       return authenticated<FlightDetail>(`${flightPath(id)}${query}`);
     },
-    async radar(id: string, after?: string) {
-      const query = after ? `?${new URLSearchParams({ after })}` : '';
+    async radar(id: string, after?: string, providerRevision?: string) {
+      const query = new URLSearchParams({ provider: '1' });
+      if (after) query.set('after', after);
+      if (providerRevision) query.set('providerRevision', providerRevision);
       try {
-        return await authenticated<RadarBatch>(`${flightPath(id)}/radar${query}`);
+        return await authenticated<RadarBatch>(`${flightPath(id)}/radar?${query}`);
       } catch (error) {
         if (error instanceof APIError && [404, 405, 501].includes(error.status)) return undefined;
         throw error;

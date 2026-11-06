@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View, type TextInputProps,
 } from 'react-native';
-import Svg, { Circle, Path, Polyline } from 'react-native-svg';
+import Svg, { Path } from 'react-native-svg';
 import type { Flight } from './api';
 import {
   arrival, arrivalNote, departure, departureNote, flightStatus, formatDay, formatTime, progress,
@@ -170,50 +170,6 @@ export function FlightStrip({ flight }: { flight: Flight }) {
   );
 }
 
-export function Chart({ values, label }: { values: number[]; label: string }) {
-  const { colors } = usePalette();
-  if (values.length < 2) return null;
-  const low = Math.min(...values);
-  const high = Math.max(...values);
-  const points = values.map((value, index) =>
-    `${4 + index * 192 / (values.length - 1)},${50 - (value - low) * 44 / (high - low || 1)}`).join(' ');
-  return (
-    <View style={styles.inputGroup}>
-      <Text style={[styles.label, { color: colors.text }]}>{label}</Text>
-      <Svg height={66} width="100%" viewBox="0 0 200 54" preserveAspectRatio="none" accessible={false}>
-        <Polyline points="4,50 196,50" stroke={colors.divider} fill="none" />
-        <Polyline points={points} stroke={colors.tint} strokeWidth={2} fill="none" />
-      </Svg>
-      <Body>{low.toLocaleString()}–{high.toLocaleString()}</Body>
-    </View>
-  );
-}
-
-export function RoutePlot({ points, label }: { points: [number, number][]; label: string }) {
-  const { colors } = usePalette();
-  if (points.length < 2) return null;
-  const lats = points.map(([lat]) => lat);
-  const reference = points[0]?.[1] ?? 0;
-  const lons = points.map(([, lon]) => reference + ((lon - reference + 540) % 360 - 180));
-  const minLat = Math.min(...lats), minLon = Math.min(...lons);
-  const spanLat = Math.max(...lats) - minLat || 1;
-  const spanLon = Math.max(...lons) - minLon || 1;
-  const projected = lats.map((lat, i): [number, number] =>
-    [12 + ((lons[i] ?? minLon) - minLon) / spanLon * 276, 122 - (lat - minLat) / spanLat * 104]);
-  const final = projected.at(-1);
-  return (
-    <View accessible accessibilityRole="image" accessibilityLabel={label}
-      style={[styles.plot, { backgroundColor: colors.tintSoft }]}>
-      <Svg height={140} width="100%" viewBox="0 0 300 140" accessible={false}>
-        <Path d="M12 18H288M12 44H288M12 70H288M12 96H288M12 122H288" stroke={colors.divider} />
-        <Polyline points={projected.map(([x, y]) => `${x},${y}`).join(' ')}
-          stroke={colors.tint} strokeWidth={2.5} fill="none" strokeLinejoin="round" />
-        {final && <Circle cx={final[0]} cy={final[1]} r={4} fill={colors.tint} />}
-      </Svg>
-    </View>
-  );
-}
-
 export const layout = StyleSheet.create({
   screen: { flex: 1 },
   content: { alignSelf: 'center', width: '100%', maxWidth: 720, padding: 20, paddingBottom: 32, gap: 16 },
@@ -248,5 +204,4 @@ const styles = StyleSheet.create({
   meta: { fontSize: 12, lineHeight: 17, flexShrink: 1 },
   progress: { height: 4, borderRadius: 2, overflow: 'hidden' },
   progressFill: { height: 4 },
-  plot: { borderRadius: 12, overflow: 'hidden' },
 });

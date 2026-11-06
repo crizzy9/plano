@@ -12,7 +12,8 @@ import {
   androidWidgetDetailsEnabled, canCustomizeAndroidWidget, canStartLiveActivity,
   setAndroidWidgetDetailsEnabled, stopLiveActivity,
 } from './live';
-import { Action, Body, Chart, ErrorMessage, FlightRow, FlightStrip, Heading, Input, Loading, RoutePlot, layout } from './ui';
+import { Action, Body, ErrorMessage, FlightRow, FlightStrip, Heading, Input, Loading, layout } from './ui';
+import { RadarMetricChart, RadarRouteMap } from './radar-visuals';
 
 export type Routes = {
   Home: undefined;
@@ -332,7 +333,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
             <AircraftRotation flight={flight} legs={detail.inbound ?? []} open={(leg) =>
               navigation.push('Flight', { id: leg.id, number: leg.number, initial: leg, rotationOf: value?.tracked ? flight.id : undefined })} />
           )}
-          <FlightRadar key={`${id}:${flight.tailNumber ?? ''}:${!!value?.tracked}`}
+          <FlightRadar key={`${api.server}:${id}:${flight.tailNumber ?? ''}:${flight.actualTakeoff ?? ''}:${!!value?.tracked}`}
             api={api} flight={flight} tracked={value?.tracked === true} history={detail?.telemetry} />
           {detail && (!rotationSnapshot || !!detail.events?.length) && (
             <View style={layout.section}>
@@ -485,6 +486,13 @@ function AirportNotices({ flight, notices }: { flight: Flight; notices: FlightNo
 
 const radarInterval = 8_000;
 const radarMaxPoints = 512;
+const radarPageSize = 256;
+
+const radarSources: Record<string, string> = {
+  flightaware_aeroapi: 'FlightAware',
+  operator_readsb: 'Local ADS-B receiver',
+  plano_demo: 'Demo data',
+};
 
 function radarInstant(value: string) {
   const fraction = /\.(\d{1,9})(?=Z$|[+-]\d{2}:\d{2}$)/.exec(value);
@@ -494,24 +502,69 @@ function radarInstant(value: string) {
   return { millis: Date.parse(isoMillis), nanos: Number(digits.slice(3)) };
 }
 
+function radarAfter(next: string, previous: string) {
+  const a = radarInstant(next), b = radarInstant(previous);
+  return a.millis > b.millis || a.millis === b.millis && a.nanos > b.nanos;
+}
+
 export function mergeRadarPositions(...groups: (readonly Position[] | undefined)[]) {
   const byTime = new Map<string, { millis: number; nanos: number; point: Position }>();
+  const latestAllowed = Date.now() + 30_000;
   for (const group of groups) {
     for (const point of group ?? []) {
       const { millis, nanos } = radarInstant(point.at);
-      if (!Number.isFinite(millis) || !Number.isFinite(point.latitude) || !Number.isFinite(point.longitude)
+      if (!Number.isFinite(millis) || millis > latestAllowed || !Number.isFinite(point.latitude) || !Number.isFinite(point.longitude)
         || Math.abs(point.latitude) > 90 || Math.abs(point.longitude) > 180) continue;
       const key = `${millis}:${nanos}`;
       const previous = byTime.get(key)?.point;
-      byTime.set(key, { millis, nanos, point: previous ? {
+      const sameFix = previous && previous.source === point.source && previous.latitude === point.latitude && previous.longitude === point.longitude;
+      byTime.set(key, { millis, nanos, point: sameFix ? {
         ...point,
         altitudeFeet: point.altitudeFeet ?? previous.altitudeFeet,
         groundSpeedKnots: point.groundSpeedKnots ?? previous.groundSpeedKnots,
+        heading: point.heading ?? previous.heading,
+        verticalRateFpm: point.verticalRateFpm ?? previous.verticalRateFpm,
+        verticalTrend: point.verticalTrend ?? previous.verticalTrend,
       } : point });
     }
   }
   return [...byTime.values()].sort((a, b) => a.millis - b.millis || a.nanos - b.nanos)
     .slice(-radarMaxPoints).map(({ point }) => point);
+}
+
+function radarValue(value: number | undefined, unit: string) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${Math.round(value).toLocaleString()} ${unit}` : undefined;
+}
+
+function RadarReadout({ position }: { position: Position }) {
+  const { colors } = usePalette();
+  const rate = position.verticalRateFpm;
+  const hasRate = typeof rate === 'number' && Number.isFinite(rate);
+  const trend = hasRate ? (rate > 0 ? 'climbing' : rate < 0 ? 'descending' : 'level') : position.verticalTrend;
+  const motion = trend === 'climbing' ? 'Climbing' : trend === 'descending' ? 'Descending' : trend === 'level' ? 'Level' : undefined;
+  const metrics = [
+    { label: 'Altitude', value: radarValue(position.altitudeFeet, 'ft') },
+    { label: 'Ground speed', value: radarValue(position.groundSpeedKnots, 'kt') },
+    { label: 'Vertical motion', value: hasRate ? `${motion} · ${radarValue(Math.abs(rate), 'ft/min')}` : motion },
+  ];
+  const latitude = `${Math.abs(position.latitude).toFixed(2)}° ${position.latitude < 0 ? 'S' : 'N'}`;
+  const longitude = `${Math.abs(position.longitude).toFixed(2)}° ${position.longitude < 0 ? 'W' : 'E'}`;
+  const source = (position.source && radarSources[position.source]) || 'Position report';
+  return (
+    <View style={[styles.radarReadout, { borderColor: colors.divider }]}>
+      <View style={styles.radarMetrics}>
+        {metrics.map(({ label, value }) => value && (
+          <View key={label} style={styles.radarMetric}>
+            <Text style={{ color: colors.muted }}>{label}</Text>
+            <Text style={[styles.radarValue, { color: colors.text }]}>{value}</Text>
+          </View>
+        ))}
+      </View>
+      <Body>{latitude} · {longitude}</Body>
+      <Body>{source} · Observed {formatTime(position.at, 'UTC')} UTC</Body>
+    </View>
+  );
 }
 
 function FlightRadar({ api, flight, tracked, history }: {
@@ -521,12 +574,20 @@ function FlightRadar({ api, flight, tracked, history }: {
   history?: Position[];
 }) {
   const id = flight.id;
-  const inFlight = tracked && (flight.status === 'airborne' || flight.status === 'diverted') && !flight.actualArrival;
+  const inFlight = tracked && (flight.status === 'airborne' || flight.status === 'diverted') && !flight.actualLanding && !flight.actualArrival;
   const cursor = useRef<string>(undefined);
+  const providerRevision = useRef<string>(undefined);
   const [radar, setRadar] = useState<Position[]>([]);
+  const [provider, setProvider] = useState<{ revision: string; positions: Position[] }>();
   const [stream, setStream] = useState<'ready' | 'unavailable' | 'interrupted'>();
   const [checkedAt, setCheckedAt] = useState(0);
-  const points = useMemo(() => mergeRadarPositions(history, radar), [history, radar]);
+  const points = useMemo(() => {
+    if (provider && radarAfter(provider.revision, flight.observedAt)) {
+      // A newer provider snapshot can correct or remove an earlier fix.
+      return mergeRadarPositions(provider.positions, history?.filter((point) => point.source === 'operator_readsb'), radar);
+    }
+    return mergeRadarPositions(history, radar);
+  }, [provider, flight.observedAt, history, radar]);
 
   useFocusEffect(useCallback(() => {
     if (!inFlight) return;
@@ -540,7 +601,9 @@ function FlightRadar({ api, flight, tracked, history }: {
       inProgress = true;
       let delay = radarInterval;
       try {
-        const result = await api.radar(id, cursor.current);
+        const knownRevision = providerRevision.current;
+        const revision = knownRevision && radarAfter(knownRevision, flight.observedAt) ? knownRevision : flight.observedAt;
+        const result = await api.radar(id, cursor.current, revision);
         if (!focused || !foreground) return;
         setCheckedAt(Date.now());
         if (!result) {
@@ -549,9 +612,15 @@ function FlightRadar({ api, flight, tracked, history }: {
           return;
         }
         setStream('ready');
+        const nextRevision = result.providerRevision;
+        if (nextRevision && nextRevision !== providerRevision.current) {
+          providerRevision.current = nextRevision;
+          setProvider({ revision: nextRevision, positions: result.providerPositions ?? [] });
+        }
         if (result.positions.length) {
-          const latest = result.cursor ?? mergeRadarPositions(result.positions).at(-1)?.at;
-          if (latest) cursor.current = latest;
+          const nextCursor = result.cursor ?? mergeRadarPositions(result.positions).at(-1)?.at;
+          if (result.positions.length === radarPageSize && nextCursor && nextCursor !== cursor.current) delay = 1_000;
+          if (nextCursor) cursor.current = nextCursor;
           setRadar((previous) => mergeRadarPositions(previous, result.positions));
         }
       } catch {
@@ -576,12 +645,11 @@ function FlightRadar({ api, flight, tracked, history }: {
       clearTimeout(timer);
       subscription.remove();
     };
-  }, [api, id, inFlight]));
+  }, [api, id, inFlight, flight.observedAt]));
 
   const latest = points.at(-1);
   if (!inFlight && !latest) return null;
-  const latestStreamed = radar.at(-1);
-  const age = latestStreamed ? checkedAt - radarInstant(latestStreamed.at).millis : Number.POSITIVE_INFINITY;
+  const age = latest ? checkedAt - radarInstant(latest.at).millis : Number.POSITIVE_INFINITY;
   const fresh = inFlight && stream === 'ready' && age >= -30_000 && age <= 120_000;
   const note = stream === 'interrupted' ? 'Live updates are temporarily unavailable.'
     : stream === 'unavailable' ? 'Live positions are unavailable on this server.'
@@ -591,16 +659,13 @@ function FlightRadar({ api, flight, tracked, history }: {
       <Heading>{fresh ? 'Live radar' : latest ? 'Recorded flight path' : 'Flight radar'}</Heading>
       {latest && (
         <>
-          <RoutePlot label={`Flight path from ${flight.origin} to ${flight.destination}`}
-            points={points.map(({ latitude, longitude }) => [latitude, longitude])} />
-          <Body>Last position at {formatTime(latest.at)}{latest.source && ` · ${latest.source}`}</Body>
+          <RadarRouteMap label={`Flight path from ${flight.origin} to ${flight.destination}`} positions={points} />
+          <RadarReadout position={latest} />
         </>
       )}
       {inFlight && !fresh && <Body>{note}</Body>}
-      <Chart label="Altitude (ft)" values={points.flatMap((point) =>
-        typeof point.altitudeFeet === 'number' && Number.isFinite(point.altitudeFeet) ? [point.altitudeFeet] : [])} />
-      <Chart label="Ground speed (kt)" values={points.flatMap((point) =>
-        typeof point.groundSpeedKnots === 'number' && Number.isFinite(point.groundSpeedKnots) ? [point.groundSpeedKnots] : [])} />
+      <RadarMetricChart label="Altitude (ft)" positions={points} metric="altitudeFeet" />
+      <RadarMetricChart label="Ground speed (kt)" positions={points} metric="groundSpeedKnots" />
     </View>
   );
 }
@@ -725,6 +790,10 @@ function AlertsSettings({ api }: { api: PlanoAPI }) {
 const styles = StyleSheet.create({
   event: { borderBottomWidth: StyleSheet.hairlineWidth, paddingBottom: 12, gap: 5 },
   eventTitle: { flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 },
+  radarReadout: { borderBottomWidth: StyleSheet.hairlineWidth, paddingBottom: 12, gap: 6 },
+  radarMetrics: { flexDirection: 'row', flexWrap: 'wrap', columnGap: 20, rowGap: 8 },
+  radarMetric: { gap: 2 },
+  radarValue: { fontSize: 18, fontWeight: '600', fontVariant: ['tabular-nums'] },
   rotationSummary: { gap: 4 },
   strong: { fontSize: 16, fontWeight: '600' },
 });

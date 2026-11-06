@@ -66,6 +66,8 @@ type Position struct {
 	Longitude        float64   `json:"longitude"`
 	AltitudeFeet     *float64  `json:"altitudeFeet,omitempty"`
 	GroundSpeedKnots *float64  `json:"groundSpeedKnots,omitempty"`
+	VerticalRateFPM  *float64  `json:"verticalRateFpm,omitempty"`
+	VerticalTrend    string    `json:"verticalTrend,omitempty"`
 	Heading          *float64  `json:"heading,omitempty"`
 	At               time.Time `json:"at"`
 	Source           string    `json:"source"`

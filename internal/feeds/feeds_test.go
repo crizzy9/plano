@@ -56,15 +56,25 @@ func TestAeroTrackKeepsMeasuredPositionsAndUnits(t *testing.T) {
 			t.Errorf("unexpected track request: %s", r.URL)
 		}
 		return response(200, `{"positions":[
-			{"timestamp":"2026-11-06T06:31:00Z","latitude":1,"longitude":2,"altitude":330,"groundspeed":445,"heading":50,"update_type":"A"},
+			{"timestamp":"2026-11-06T06:31:00Z","latitude":1,"longitude":2,"altitude":330,"altitude_change":"D","groundspeed":445,"heading":50,"update_type":"A"},
 			{"timestamp":"2026-11-06T06:30:00Z","latitude":3,"longitude":4,"update_type":"Z"},
 			{"timestamp":"2026-11-06T06:31:00Z","latitude":1,"longitude":2,"update_type":"A"},
-			{"timestamp":"2026-11-06T06:29:00Z","latitude":0,"longitude":0,"update_type":"P"},
+			{"timestamp":"2026-11-06T06:32:00Z","latitude":5,"longitude":6,"altitude_change":"-"},
+			{"timestamp":"2026-11-06T06:33:00Z","latitude":7,"longitude":8,"altitude_change":"C"},
+			{"timestamp":"2026-11-06T06:29:00Z","latitude":0,"longitude":0,"altitude_change":"C","update_type":"P"},
+			{"timestamp":"2026-11-06T07:00:00Z","latitude":7,"longitude":9,"update_type":"A"},
 			{"timestamp":"2026-11-06T06:29:00Z","latitude":400,"longitude":0},null]}`)
 	})}
-	got, err := NewAeroAPI("fixture-key", client).Track(t.Context(), "UAL7-1")
-	if err != nil || len(got) != 2 || got[0].Kind != "radar" || got[1].Kind != "ads_b" || got[1].AltitudeFeet == nil || *got[1].AltitudeFeet != 33000 || got[0].AltitudeFeet != nil {
+	aero := NewAeroAPI("fixture-key", client)
+	aero.now = func() time.Time { return instant(t, "2026-11-06T06:32:30Z") }
+	got, err := aero.Track(t.Context(), "UAL7-1")
+	if err != nil || len(got) != 4 || got[0].Kind != "radar" || got[1].Kind != "ads_b" || got[1].AltitudeFeet == nil || *got[1].AltitudeFeet != 33000 || got[0].AltitudeFeet != nil {
 		t.Fatalf("track = %+v, %v", got, err)
+	}
+	for index, want := range []string{"", "descending", "level", "climbing"} {
+		if got[index].VerticalTrend != want || got[index].VerticalRateFPM != nil {
+			t.Errorf("position %d vertical motion = %+v, want %q with no rate", index, got[index], want)
+		}
 	}
 }
 
@@ -281,6 +291,35 @@ func TestReadsbRejectsStalePrivateAndConflictingAircraft(t *testing.T) {
 	now = now.Add(61 * time.Second)
 	if _, err := receiver.Snapshot(t.Context()); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("stale snapshot error = %v", err)
+	}
+}
+
+func TestReadsbUsesReportedVerticalRate(t *testing.T) {
+	now := time.Unix(1800000000, 0).UTC()
+	snapshot, err := parseReadsb([]byte(`{"now":1800000000,"aircraft":[
+		{"hex":"a00001","type":"adsb_icao","r":"N12AA","lat":0,"lon":1,"seen_pos":0,"baro_rate":0,"geom_rate":384,"track":20},
+		{"hex":"a00002","type":"adsb_icao","r":"N13AA","lat":0,"lon":2,"seen_pos":0,"geom_rate":-512,"true_heading":0},
+		{"hex":"a00003","type":"adsb_icao","r":"N14AA","lat":0,"lon":3,"seen_pos":0}]}`), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		tail string
+		rate *float64
+	}{
+		{"N12AA", new(0.0)},
+		{"N13AA", new(-512.0)},
+		{"N14AA", nil},
+	} {
+		flight := Flight{Status: "airborne", TailNumber: test.tail, ActualTakeoff: new(now.Add(-time.Minute))}
+		position, ok := snapshot.Match(flight, "")
+		if !ok || position.VerticalTrend != "" || (position.VerticalRateFPM == nil) != (test.rate == nil) ||
+			test.rate != nil && *position.VerticalRateFPM != *test.rate {
+			t.Errorf("%s position = %+v, matched = %t", test.tail, position, ok)
+		}
+		if test.tail == "N12AA" && position.Heading != nil || test.tail == "N13AA" && (position.Heading == nil || *position.Heading != 0) {
+			t.Errorf("%s heading = %v", test.tail, position.Heading)
+		}
 	}
 }
 

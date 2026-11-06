@@ -69,6 +69,8 @@ func parseReadsb(body []byte, now time.Time) (ADSBSnapshot, error) {
 			Altitude     json.RawMessage `json:"alt_baro"`
 			AltitudeGNSS *float64        `json:"alt_geom"`
 			GroundSpeed  *float64        `json:"gs"`
+			BaroRate     *float64        `json:"baro_rate"`
+			GeomRate     *float64        `json:"geom_rate"`
 			Heading      *float64        `json:"true_heading"`
 		} `json:"aircraft"`
 	}
@@ -100,10 +102,14 @@ func parseReadsb(body []byte, now time.Time) (ADSBSnapshot, error) {
 				altitude = baro
 			}
 		}
+		verticalRate := row.BaroRate
+		if verticalRate == nil {
+			verticalRate = row.GeomRate
+		}
 		observation := adsbObservation{
 			hex: hex, registration: normalizeRegistration(row.Registration), callSign: strings.ToUpper(strings.TrimSpace(row.CallSign)),
 			position: Position{At: at, Latitude: *row.Latitude, Longitude: *row.Longitude, AltitudeFeet: altitude,
-				GroundSpeedKnots: row.GroundSpeed, Heading: row.Heading, Source: readsbSource, Kind: "ads_b"},
+				GroundSpeedKnots: row.GroundSpeed, VerticalRateFPM: verticalRate, Heading: row.Heading, Source: readsbSource, Kind: "ads_b"},
 		}
 		storeObservation(result.byAddress, hex, observation)
 		if observation.registration != "" {

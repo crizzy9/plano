@@ -322,8 +322,17 @@ With `PLANO_ADSB_URL` configured, the receiver worker samples matching
 tracked airborne legs every five seconds by default. Set
 `PLANO_ADSB_REFRESH_INTERVAL` between `3s` and `60s` to suit the receiver.
 Plano stops sampling stale flight lifecycle records and retains local points
-for seven days. Flight detail can still show provider track history. Local
-receiver points appear only to the installation tracking the flight.
+for seven days. The flight screen reads cached provider positions and receiver
+positions on independent cursors while a tracked flight is airborne. Provider
+positions refresh on the main `PLANO_REFRESH_INTERVAL`. The mobile app replaces
+its provider snapshot when the revision changes. Local receiver points appear
+only to an installation tracking the flight.
+
+The map uses bundled Natural Earth coastlines. The latest position identifies
+its source and UTC observation time. Altitude, ground speed and vertical motion
+appear when the source reports them. Altitude and speed graphs use elapsed time
+between reports. Tracking an airborne demo flight shows simulated positions
+after the next refresh.
 
 Friends and pickup links use separate permissions on the same instance.
 [Flight sharing](FLIGHT_SHARING.md)

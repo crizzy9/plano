@@ -80,8 +80,13 @@ func (r Refresher) refresh(ctx context.Context) error {
 			continue
 		}
 		var positions []feeds.Position
-		if flight.ActualDeparture != nil && (!finished(prior) || prior.ActualArrival == nil) {
-			positions, err = r.Flights.Track(ctx, flight.ID)
+		if (flight.ActualDeparture != nil || flight.ActualTakeoff != nil || flight.Status == "airborne") &&
+			(!finished(prior) || prior.ActualArrival == nil) {
+			trackID := flight.AeroProviderID()
+			if trackID == "" {
+				trackID = flight.ID
+			}
+			positions, err = r.Flights.Track(ctx, trackID)
 			if err != nil {
 				r.Logger.Warn("flight track refresh failed", "id", flight.ID, "error", err)
 			}

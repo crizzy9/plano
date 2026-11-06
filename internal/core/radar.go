@@ -155,6 +155,66 @@ func (s *Store) radarPositions(ctx context.Context, owner, id string, after *tim
 	return positions, rows.Err()
 }
 
+// RadarProviderPositions pages cached provider positions independently of the
+// local receiver. A known revision turns the read into a snapshot refresh.
+func (s *Store) RadarProviderPositions(ctx context.Context, owner, id string, after, knownRevision *time.Time, limit int) ([]feeds.Position, *time.Time, error) {
+	if limit < 1 || limit > 2000 {
+		return nil, nil, errors.New("invalid radar page size")
+	}
+	var knownNS any
+	if knownRevision != nil {
+		knownNS = knownRevision.UnixNano()
+	}
+	var telemetry []byte
+	var revision sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT
+  CASE WHEN t.owner IS NOT NULL THEN f.observed_ns END,
+  CASE WHEN t.owner IS NOT NULL AND f.observed_ns IS NOT ? THEN f.telemetry END
+FROM flights f LEFT JOIN tracked t ON t.owner=? AND t.flight_id=f.id
+WHERE f.id=?`, knownNS, owner, id).Scan(&revision, &telemetry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if !revision.Valid {
+		return []feeds.Position{}, nil, nil
+	}
+	currentRevision := time.Unix(0, revision.Int64).UTC()
+	if len(telemetry) == 0 {
+		return []feeds.Position{}, &currentRevision, nil
+	}
+	if knownRevision != nil {
+		// A replacement snapshot can revise fixes behind the previous cursor.
+		after = nil
+	}
+	var positions []feeds.Position
+	if err := json.Unmarshal(telemetry, &positions); err != nil {
+		return nil, nil, err
+	}
+	latest := time.Now().Add(30 * time.Second)
+	positions = slices.DeleteFunc(positions, func(p feeds.Position) bool {
+		year := p.At.UTC().Year()
+		return p.Source == "operator_readsb" || year < 2000 || year > 2100 || p.At.After(latest) || after != nil && !p.At.After(*after)
+	})
+	if len(positions) == 0 {
+		return []feeds.Position{}, &currentRevision, nil
+	}
+	// Keep the first cached fix per instant so a timestamp-only cursor never
+	// splits simultaneous positions between pages.
+	slices.SortStableFunc(positions, func(a, b feeds.Position) int { return a.At.Compare(b.At) })
+	positions = slices.CompactFunc(positions, func(a, b feeds.Position) bool { return a.At.Equal(b.At) })
+	if len(positions) > limit {
+		if after == nil {
+			positions = positions[len(positions)-limit:]
+		} else {
+			positions = positions[:limit]
+		}
+	}
+	return positions, &currentRevision, nil
+}
+
 func mergeFlightPositions(provider, local []feeds.Position) []feeds.Position {
 	if len(local) == 0 {
 		return provider

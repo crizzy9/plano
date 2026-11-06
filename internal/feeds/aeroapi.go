@@ -179,9 +179,10 @@ func (a *AeroAPI) Track(ctx context.Context, id string) ([]Position, error) {
 	if response.Positions == nil {
 		return nil, fmt.Errorf("%w: %s response omitted positions", ErrUnavailable, aeroSource)
 	}
+	latest := a.now().Add(30 * time.Second)
 	positions := make([]Position, 0, len(response.Positions))
 	for _, row := range response.Positions {
-		if position, ok := row.normalize(); ok {
+		if position, ok := row.normalize(); ok && !position.At.After(latest) {
 			positions = append(positions, position)
 		}
 	}
@@ -329,13 +330,14 @@ func first(values ...string) string {
 }
 
 type aeroPosition struct {
-	Latitude    *float64  `json:"latitude"`
-	Longitude   *float64  `json:"longitude"`
-	Altitude    *float64  `json:"altitude"`
-	GroundSpeed *float64  `json:"groundspeed"`
-	Heading     *float64  `json:"heading"`
-	Timestamp   time.Time `json:"timestamp"`
-	UpdateType  string    `json:"update_type"`
+	Latitude       *float64  `json:"latitude"`
+	Longitude      *float64  `json:"longitude"`
+	Altitude       *float64  `json:"altitude"`
+	AltitudeChange string    `json:"altitude_change"`
+	GroundSpeed    *float64  `json:"groundspeed"`
+	Heading        *float64  `json:"heading"`
+	Timestamp      time.Time `json:"timestamp"`
+	UpdateType     string    `json:"update_type"`
 }
 
 func (p aeroPosition) normalize() (Position, bool) {
@@ -347,13 +349,22 @@ func (p aeroPosition) normalize() (Position, bool) {
 	if p.Altitude != nil {
 		altitudeFeet = new(*p.Altitude * 100)
 	}
+	var verticalTrend string
+	switch p.AltitudeChange {
+	case "C":
+		verticalTrend = "climbing"
+	case "D":
+		verticalTrend = "descending"
+	case "-":
+		verticalTrend = "level"
+	}
 	kind := map[string]string{
 		"A": "ads_b", "O": "oceanic", "Z": "radar", "M": "multilateration",
 		"D": "datalink", "X": "surface", "S": "space_based",
 	}[p.UpdateType]
 	return Position{
 		Latitude: *p.Latitude, Longitude: *p.Longitude, AltitudeFeet: altitudeFeet,
-		GroundSpeedKnots: p.GroundSpeed, Heading: p.Heading, At: p.Timestamp.UTC(),
+		GroundSpeedKnots: p.GroundSpeed, VerticalTrend: verticalTrend, Heading: p.Heading, At: p.Timestamp.UTC(),
 		Source: aeroSource, Kind: kind,
 	}, true
 }
