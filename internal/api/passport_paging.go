@@ -62,7 +62,7 @@ func parsePassportPage(query url.Values) (int, *core.CompletedFlightCursor, erro
 	if err := json.Unmarshal(raw, &cursor); err != nil || cursor.Arrival == nil || *cursor.Arrival < 0 || *cursor.Arrival >= maxPassportJulianDay || len(cursor.ID) < 3 {
 		return 0, nil, errInvalid
 	}
-	if prefix := cursor.ID[:2]; (prefix != "l." && prefix != "p.") || !flightID.MatchString(cursor.ID[2:]) {
+	if prefix := cursor.ID[:2]; (prefix != "l." && prefix != "p." && prefix != "a.") || !flightID.MatchString(cursor.ID[2:]) {
 		return 0, nil, errInvalid
 	}
 	return limit, &core.CompletedFlightCursor{Arrival: *cursor.Arrival, ID: cursor.ID}, nil
@@ -125,7 +125,14 @@ func (s Server) passportPage(ctx context.Context, w http.ResponseWriter, owner s
 			routeIndexes[key] = index
 			routes = append(routes, passportRouteTotals{key: key})
 			airportFlights = append(airportFlights, feeds.Flight{Origin: flight.Origin, OriginICAO: flight.OriginICAO,
-				Destination: flight.Destination, DestinationICAO: flight.DestinationICAO})
+				Destination: flight.Destination, DestinationICAO: flight.DestinationICAO, HistoryDate: flight.HistoryDate, Source: flight.Source})
+		} else {
+			if flight.HistoryDate != "" {
+				airportFlights[index].HistoryDate = flight.HistoryDate
+			}
+			if flight.Source != "flighty_csv" {
+				airportFlights[index].Source = flight.Source
+			}
 		}
 		route := &routes[index]
 		route.flights++

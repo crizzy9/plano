@@ -95,6 +95,8 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/shares/{id}", s.auth(s.revokePickupLink))
 	mux.HandleFunc("GET /share/{token}", s.shared)
 	mux.HandleFunc("GET /v1/passport", s.auth(s.passport))
+	mux.HandleFunc("POST /v1/passport/import", s.auth(s.importPassportArchive))
+	mux.HandleFunc("DELETE /v1/passport/archive/{id}", s.auth(s.deletePassportArchive))
 	mux.HandleFunc("GET /v1/connections", s.auth(s.connection))
 	mux.HandleFunc("GET /v1/connection-suggestions", s.auth(s.connectionSuggestions))
 	mux.HandleFunc("GET /v1/connection-monitors", s.auth(s.connectionMonitors))

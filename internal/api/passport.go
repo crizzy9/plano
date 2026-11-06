@@ -174,10 +174,25 @@ func (s Server) passportCoordinates(ctx context.Context, flights []feeds.Flight)
 		for code, point := range demoAirportCoordinates {
 			points[code] = &point
 		}
+		for _, flight := range flights {
+			if flight.HistoryDate == "" {
+				continue
+			}
+			for _, airport := range []passportAirport{
+				passportAirportKey(flight.Origin, flight.OriginICAO),
+				passportAirportKey(flight.Destination, flight.DestinationICAO),
+			} {
+				if points[airport.primary] == nil {
+					points[airport.primary] = passportArchiveCoordinates(airport)
+				}
+			}
+		}
 		return points, 0, nil
 	}
 
 	airports := make(map[string]passportAirport)
+	type coordinateUse struct{ archive, live bool }
+	uses := make(map[string]coordinateUse)
 	var codes []string
 	seen := make(map[string]bool)
 	for _, flight := range flights {
@@ -191,6 +206,10 @@ func (s Server) passportCoordinates(ctx context.Context, flights []feeds.Flight)
 			if current, ok := airports[airport.primary]; !ok || current.alternate == "" {
 				airports[airport.primary] = airport
 			}
+			use := uses[airport.primary]
+			use.archive = use.archive || flight.HistoryDate != ""
+			use.live = use.live || flight.Source != "flighty_csv"
+			uses[airport.primary] = use
 			for _, code := range []string{airport.primary, airport.alternate} {
 				if code != "" && !seen[code] {
 					codes = append(codes, code)
@@ -210,9 +229,12 @@ func (s Server) passportCoordinates(ctx context.Context, flights []feeds.Flight)
 		if point == nil {
 			point = cached[airport.alternate].Coordinates
 		}
+		if point == nil && uses[code].archive {
+			point = passportArchiveCoordinates(airport)
+		}
 		if point != nil {
 			points[code] = point
-		} else if !cached[code].RetryAfter.After(now) {
+		} else if uses[code].live && !cached[code].RetryAfter.After(now) {
 			candidates = append(candidates, airport)
 		}
 	}

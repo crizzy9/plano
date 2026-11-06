@@ -37,6 +37,7 @@ type Flight struct {
 	DestinationICAO     string     `json:"destinationICAO,omitempty"`
 	OriginTimeZone      string     `json:"originTimeZone,omitempty"`
 	DestinationTimeZone string     `json:"destinationTimeZone,omitempty"`
+	HistoryDate         string     `json:"historyDate,omitempty"`
 	Status              string     `json:"status"`
 	ProviderStatus      string     `json:"providerStatus,omitempty"`
 	ScheduledDeparture  *time.Time `json:"scheduledDeparture,omitempty"`

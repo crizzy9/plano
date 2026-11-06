@@ -12,6 +12,37 @@ UA456 | Departure: 7 January 2027 5:00 PM | Arrival: 8 January 2027 5:00 AM
 
 A labeled departure can also include a timestamp with a numeric UTC offset, such as `2027-01-07T17:00:00-05:00`. [RFC 3339 timestamp format](https://www.rfc-editor.org/rfc/rfc3339.html#section-5.6)
 
+## Import Passport history from Flighty
+
+Save your Flighty export as a CSV file. Open **Plano Passport** on iOS or
+Android, choose **Import Flighty CSV**, and select the file. Plano reports how
+many flights it added, recognized as duplicates, or skipped. Files can be up
+to 512 KiB and 1,000 rows. Each installation can store up to 10,000 imported
+flights. [Public Flighty export format example](https://github.com/SSARCandy/flighty-web-viewer)
+
+The file goes to your selected Plano server. The importer retains the flight
+date, route, recognized designator, aircraft details, and usable times. It
+discards the CSV and ignores booking codes, seats, and notes. It skips current
+or future departures, cancellations, diversions, and unrecognized rows. Imported
+flights appear only in your installation's Passport. Remove an imported record
+from its history row. The import creates no tracked flight or notification.
+
+Flighty exports may contain local times without a UTC offset. Plano uses those
+records for route and aircraft statistics. Elapsed flight hours and arrival
+delay require usable timestamps with offsets. When a completed tracked flight
+matches the route, flight number, and scheduled-departure instant, Passport
+shows the tracked record. The imported copy becomes visible and removable if
+you untrack that flight. If the export supplies only a date or local clock,
+both entries can appear and you can remove the imported copy in Passport.
+
+Plano maps imported routes using cached or bundled airport coordinates. The
+bundled catalog includes 8,154 unambiguous IATA and ICAO codes for airports
+with scheduled service. Unknown airports remain in history with missing map
+coverage. The catalog was derived from the public-domain OurAirports CSV
+downloaded on November 6, 2026, with SHA-256
+`e2e65a3ddaf76170c0e2c373cb8b68597bdf3b59d243c4d6db454d48498ba6d7`.
+[OurAirports data](https://ourairports.com/data/)
+
 ## Forward confirmation emails
 
 In the import screen, generate an email relay token. Each installation has one relay credential. Generating a replacement invalidates the previous token. A relay token can submit email for import. Installation credentials are required to view tracked flights or bookings.

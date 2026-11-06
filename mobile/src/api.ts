@@ -37,6 +37,8 @@ export interface Flight {
   aircraftAge?: number;
   status: FlightStatus;
   baggage?: string;
+  source?: string;
+  historyDate?: string;
   observedAt: string;
 }
 
@@ -179,6 +181,12 @@ export interface PassportFlight extends Flight {
 export interface PassportHistory {
   flights: PassportFlight[];
   nextCursor?: string;
+}
+
+interface PassportImportResult {
+  added: number;
+  duplicates: number;
+  skipped: number;
 }
 
 export interface Passport extends PassportHistory {
@@ -715,7 +723,7 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
     if (options.access && await loadServer({ savedOnly: background }) !== server) {
       throw new Error('Access for this server ended.');
     }
-    return request<T>(server, path, { ...init, headers: { Authorization: `Bearer ${token}` } }, timeoutMs);
+    return request<T>(server, path, { ...init, headers: { ...init.headers, Authorization: `Bearer ${token}` } }, timeoutMs);
   }
 
   async function withFlightCache<T>(token: string, revision: number | undefined, use: (scope: string) => T): Promise<T | undefined> {
@@ -843,6 +851,23 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
     revokePickupLink: (id: string) => authenticated<void>(`/v1/shares/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     passport: () => authenticated<Passport>(passportPath),
     passportHistory: (cursor: string) => authenticated<PassportHistory>(`${passportPath}&${new URLSearchParams({ cursor })}`),
+    async importPassportCSV(csv: string) {
+      try {
+        return await authenticated<PassportImportResult>('/v1/passport/import', {
+          method: 'POST', body: csv, headers: { 'Content-Type': 'text/csv' },
+        });
+      } catch (error) {
+        if (error instanceof APIError) {
+          if ([404, 405, 501].includes(error.status)) throw new Error('This Plano server does not support Flighty CSV imports.');
+          if (error.status === 409) throw new Error('Passport can store up to 10,000 imported flights.');
+          if (error.status === 413) throw new Error('The CSV must be 512 KiB or smaller.');
+          if ([400, 415, 422].includes(error.status)) throw new Error('Choose a valid Flighty CSV export with up to 1,000 rows.');
+        }
+        throw error;
+      }
+    },
+    removePassportArchive: (id: string) =>
+      authenticated<void>(`/v1/passport/archive/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     friends: () => authenticated<Friends>('/v1/friends'),
     createFriendInvite: (alias: string) => authenticated<FriendInvite>('/v1/friends/invites', {
       method: 'POST', body: JSON.stringify({ alias }),

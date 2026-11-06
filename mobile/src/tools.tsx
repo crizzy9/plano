@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
+import { File } from 'expo-file-system';
 import { Linking, Platform, StyleSheet, Text, View } from 'react-native';
 import type { Connection, ConnectionSuggestion, Flight, ImportResult, ImportSource, PartnerBooking, Passport, PassportFlight, PassportHistory, PlanoAPI } from './api';
 import { errorText, formatDay, validDate } from './flight';
@@ -528,11 +529,22 @@ function passportFlightKey(flight: PassportFlight) {
   return flight.historyKey ?? flight.id;
 }
 
+const passportCSVLimit = 512 * 1024;
+const passportDate = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC',
+});
+
 export function PassportScreen({ api, navigation }: Screen<'Passport'> & { api: PlanoAPI }) {
+  const { colors } = usePalette();
   const [older, setOlder] = useState<{ summary: Passport; page: PassportHistory }>();
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyError, setHistoryError] = useState<string>();
+  const [archiveBusy, setArchiveBusy] = useState<'import' | 'remove'>();
+  const [archiveIssue, setArchiveIssue] = useState<{ action: 'import' | 'remove'; message: string }>();
+  const [archiveNotice, setArchiveNotice] = useState<string>();
+  const [removeArchive, setRemoveArchive] = useState<string>();
   const historyRequest = useRef<symbol | undefined>(undefined);
+  const archiveRequest = useRef<symbol | undefined>(undefined);
   const resetHistoryRequest = useCallback(() => {
     historyRequest.current = undefined;
     setHistoryBusy(false);
@@ -547,13 +559,68 @@ export function PassportScreen({ api, navigation }: Screen<'Passport'> & { api: 
   useEffect(() => {
     setOlder((previous) => previous?.summary === value ? previous : undefined);
   }, [value]);
-  useFocusEffect(useCallback(() => () => {
-    historyRequest.current = undefined;
+  useFocusEffect(useCallback(() => {
+    setArchiveBusy(undefined);
+    setArchiveIssue(undefined);
+    setArchiveNotice(undefined);
+    setRemoveArchive(undefined);
+    return () => {
+      historyRequest.current = undefined;
+      archiveRequest.current = undefined;
+    };
   }, [api]));
 
   function reload() {
     resetHistoryRequest();
     refresh();
+  }
+
+  async function runArchiveAction(action: 'import' | 'remove', perform: (current: () => boolean) => Promise<string | undefined>) {
+    if (archiveRequest.current) return;
+    const request = Symbol();
+    archiveRequest.current = request;
+    const current = () => archiveRequest.current === request;
+    setArchiveBusy(action);
+    setArchiveIssue(undefined);
+    setArchiveNotice(undefined);
+    if (action === 'import') setRemoveArchive(undefined);
+    try {
+      const notice = await perform(current);
+      if (current() && notice) {
+        setArchiveNotice(notice);
+        setRemoveArchive(undefined);
+        reload();
+      }
+    } catch (cause) {
+      if (current()) setArchiveIssue({ action, message: errorText(cause) });
+    } finally {
+      if (current()) {
+        archiveRequest.current = undefined;
+        setArchiveBusy(undefined);
+      }
+    }
+  }
+
+  async function importFlighty(current: () => boolean) {
+    let csv: string;
+    try {
+      const selection = await File.pickFileAsync({ mimeTypes: ['text/csv', 'text/plain', 'application/vnd.ms-excel'] });
+      if (!current() || selection.canceled) return;
+      const file = selection.result;
+      const size = file.size;
+      if (size > passportCSVLimit) {
+        setArchiveIssue({ action: 'import', message: 'Choose a Flighty CSV that is 512 KiB or smaller.' });
+        return;
+      }
+      if (!Number.isFinite(size) || size <= 0) throw new Error();
+      csv = await file.text();
+      if (!csv.trim()) throw new Error();
+    } catch {
+      throw new Error('Choose a readable Flighty CSV export.');
+    }
+    if (!current()) return;
+    const result = await api.importPassportCSV(csv);
+    return `${result.added} added, ${result.duplicates} already in Passport, ${result.skipped} skipped.`;
   }
 
   async function loadOlder() {
@@ -587,6 +654,16 @@ export function PassportScreen({ api, navigation }: Screen<'Passport'> & { api: 
       <Heading>Flight history</Heading>
       <ErrorMessage message={error} />
       {error && <Action secondary label="Reload Passport" onPress={reload} />}
+      {(Platform.OS === 'ios' || Platform.OS === 'android') && (
+        <View style={layout.section}>
+          <Body>Import a Flighty CSV up to 512 KiB. Your selected Plano server receives the file and saves only flight history details.</Body>
+          <Action secondary icon="download" label="Import Flighty CSV" busy={archiveBusy === 'import'}
+            disabled={!!archiveBusy} onPress={() => void runArchiveAction('import', importFlighty)} />
+          <ErrorMessage message={archiveIssue?.action === 'import' ? archiveIssue.message : undefined} />
+        </View>
+      )}
+      {archiveNotice && <Text role="status" accessibilityLiveRegion="polite"
+        style={[styles.detail, { color: colors.text }]}>{archiveNotice}</Text>}
       {pending && !value && <Loading />}
       {value && value.flights.length === 0 && <Body>Completed flights will appear here.</Body>}
       {value && history && history.flights.length > 0 && (
@@ -596,11 +673,41 @@ export function PassportScreen({ api, navigation }: Screen<'Passport'> & { api: 
           <PassportCard stats={value.stats} />
           <View style={layout.section}>
             <Heading>Completed flights</Heading>
-            {history.flights.map((flight) => <FlightRow key={passportFlightKey(flight)} flight={flight}
+            {history.flights.map((flight) => flight.source === 'flighty_csv' && flight.id.startsWith('archive-') ? (
+              <View key={passportFlightKey(flight)} style={[styles.archiveRow, { backgroundColor: colors.surface, borderColor: colors.divider }]}>
+                <Text style={[styles.archiveRoute, { color: colors.text }]}>{flight.origin} to {flight.destination}</Text>
+                <Body>{flight.number} · {flight.historyDate && validDate(flight.historyDate)
+                  ? passportDate.format(new Date(`${flight.historyDate}T00:00:00Z`)) : 'Date unavailable'} · Flighty archive</Body>
+                {removeArchive === flight.id ? (
+                  <>
+                    <Body>Remove this flight from Passport?</Body>
+                    <ErrorMessage message={archiveIssue?.action === 'remove' ? archiveIssue.message : undefined} />
+                    <View style={layout.actions}>
+                      <Action secondary label="Keep flight" disabled={!!archiveBusy} onPress={() => {
+                        setRemoveArchive(undefined);
+                        setArchiveIssue(undefined);
+                      }} />
+                      <Action label="Remove flight" busy={archiveBusy === 'remove'}
+                        disabled={pending} onPress={() => void runArchiveAction('remove', async () => {
+                          await api.removePassportArchive(flight.id);
+                          return 'Archived flight removed.';
+                        })} />
+                    </View>
+                  </>
+                ) : (
+                  <View style={layout.actions}>
+                    <Action secondary label="Remove archived flight" disabled={!!archiveBusy || pending} onPress={() => {
+                      setArchiveIssue(undefined);
+                      setRemoveArchive(flight.id);
+                    }} />
+                  </View>
+                )}
+              </View>
+            ) : <FlightRow key={passportFlightKey(flight)} flight={flight}
               onPress={() => navigation.navigate('Flight', { id: flight.id, number: flight.number, initial: flight })} />)}
             <ErrorMessage message={historyError} />
             {history.nextCursor && <Action secondary label={historyError ? 'Retry loading older flights' : 'Load older flights'}
-              onPress={loadOlder} busy={historyBusy} disabled={pending} />}
+              onPress={loadOlder} busy={historyBusy} disabled={pending || !!archiveBusy} />}
           </View>
         </>
       )}
@@ -641,4 +748,6 @@ function PassportCoverage({ coverage, refresh, pending }: {
 const styles = StyleSheet.create({
   multiline: { minHeight: 120, textAlignVertical: 'top' },
   detail: { fontSize: 16, lineHeight: 22 },
+  archiveRow: { borderWidth: 1, borderRadius: 14, padding: 14, gap: 6 },
+  archiveRoute: { fontSize: 17, fontWeight: '700' },
 });

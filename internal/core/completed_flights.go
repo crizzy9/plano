@@ -36,7 +36,7 @@ const completedFlightsSQL = `WITH owned AS MATERIALIZED (
       AND EXISTS(SELECT 1 FROM aero_instance_keys known WHERE known.provider_id=f.id) THEN f.id END) AS provider_id
   FROM tracked t JOIN flights f ON f.id=t.flight_id
   LEFT JOIN aero_instance_keys k ON k.flight_id=f.id
-  WHERE t.owner=?
+  WHERE t.owner=?1
 ), ranked AS (
   SELECT owned.*,
     CASE WHEN provider_id IS NULL THEN 'l.'||id ELSE 'p.'||provider_id END AS cursor_id,
@@ -81,11 +81,48 @@ const completedFlightsSQL = `WITH owned AS MATERIALIZED (
       AND older_actual>=max(COALESCE(actual_takeoff,0),COALESCE(actual_landing,0)) THEN older_actual END AS fallback_actual,
     CASE WHEN older_scheduled>COALESCE(scheduled_departure,0) THEN older_scheduled END AS fallback_scheduled
   FROM timing
-), completed AS (
+), tracked_completed AS MATERIALIZED (
   SELECT id,observed_ns,cursor_id,snapshot,older,
     COALESCE(actual_arrival,fallback_actual,scheduled_arrival,fallback_scheduled,0) AS arrival,
     fallback_actual IS NOT NULL AS copy_actual,fallback_scheduled IS NOT NULL AS copy_scheduled
   FROM compatible
+), tracked_departures AS MATERIALIZED (
+  SELECT upper(trim(json_extract(snapshot,'$.number'))) AS number,
+    upper(trim(json_extract(snapshot,'$.origin'))) AS origin,
+    upper(trim(json_extract(snapshot,'$.originICAO'))) AS origin_icao,
+    upper(trim(json_extract(snapshot,'$.destination'))) AS destination,
+    upper(trim(json_extract(snapshot,'$.destinationICAO'))) AS destination_icao,
+    json_extract(snapshot,'$.scheduledDeparture') AS departure
+  FROM tracked_completed
+  WHERE cursor_id GLOB 'p.*' AND json_extract(snapshot,'$.source')='flightaware_aeroapi'
+    AND json_extract(snapshot,'$.scheduledDeparture') IS NOT NULL
+), archive AS (
+  SELECT id,snapshot,
+    COALESCE(julianday(json_extract(snapshot,'$.actualArrival')),
+             julianday(json_extract(snapshot,'$.scheduledArrival')),julianday(flight_date)) AS arrival,
+    upper(trim(json_extract(snapshot,'$.number'))) AS number,
+    upper(trim(COALESCE(NULLIF(json_extract(snapshot,'$.origin'),''),json_extract(snapshot,'$.originICAO')))) AS origin,
+    upper(trim(COALESCE(NULLIF(json_extract(snapshot,'$.destination'),''),json_extract(snapshot,'$.destinationICAO')))) AS destination,
+    json_extract(snapshot,'$.scheduledDeparture') AS departure
+  FROM passport_archive WHERE owner=?1
+), completed AS (
+  SELECT * FROM tracked_completed
+  UNION ALL
+  SELECT a.id,0,'a.'||a.id,a.snapshot,NULL,a.arrival,0,0 FROM archive a
+  -- Offset-free CSV times carry no comparable departure instant. Keep those
+  -- rows, even when the flight number and route match a tracked flight.
+  WHERE a.departure IS NULL OR a.number='' OR NOT EXISTS (
+    SELECT 1 FROM tracked_departures t
+    WHERE t.number=a.number AND a.origin IN (t.origin,t.origin_icao)
+      AND a.destination IN (t.destination,t.destination_icao)
+      AND (substr(t.departure,-1)='Z' OR (
+        substr(t.departure,-6,1) IN ('+','-') AND substr(t.departure,-3,1)=':'
+      ))
+      AND (t.departure=a.departure OR (
+        instr(t.departure,'.')=0 AND instr(a.departure,'.')=0
+        AND unixepoch(t.departure)=unixepoch(a.departure)
+      ))
+  )
 )
 `
 
