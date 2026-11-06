@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -151,6 +152,48 @@ func TestForwardATFMSlotToTrackedFlight(t *testing.T) {
 	postADEXP("-TITLE SLC "+identity+" -REASON OUTREG", now.Add(-2*time.Second).Format(time.RFC3339))
 	postADEXP(sam, "-")
 	get(ownerToken, nil)
+
+	igtd := scheduled.Truncate(time.Minute)
+	path := filepath.Join(t.TempDir(), "binding.json")
+	binding, err := json.Marshal(feeds.TFMSATFMSlotBinding{
+		Version: 1, ProviderFlightID: flight.ID, OriginICAO: "KSFO", DestinationICAO: "KEWR",
+		FlightRef: "1234567", AircraftID: "UAL88", SourceOrigin: "SFO", SourceDestination: "EWR",
+		ScheduledDeparture: scheduled, IGTD: igtd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, binding, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"tfms-flight-control", path}
+	postTFMS := func(message string) {
+		t.Helper()
+		input, status, err := atfmSlotRelayInput(strings.NewReader(message), args, time.Now().UTC())
+		if err != nil || status != 0 || input == nil {
+			t.Fatalf("FlightControl conversion exit %d: %v", status, err)
+		}
+		postInput(input, key, 0)
+	}
+	faa := feeds.ATFMSlot{Source: feeds.FAASWIM, TakeoffAt: &takeoff, ObservedAt: now.Add(-4 * time.Second), Reason: "Ground delay program"}
+	active := tfmsRelayFixture(igtd, faa.ObservedAt, takeoff, "A", "CONTROL_ACTIVE")
+	postTFMS(active)
+	get(ownerToken, &faa)
+	get(otherToken, nil)
+	takeoff = takeoff.Add(15 * time.Minute)
+	faa.ObservedAt = now.Add(-3 * time.Second)
+	postTFMS(tfmsRelayFixture(igtd, faa.ObservedAt, takeoff, "A", "CONTROL_ACTIVE"))
+	get(ownerToken, &faa)
+	postTFMS(tfmsRelayFixture(igtd, now.Add(-time.Second), takeoff, "A", "CONTROL_CANCELED"))
+	postTFMS(active)
+	get(ownerToken, nil)
+	t.Setenv(advisoryIngressKeyFile, "")
+	status, err := runATFMSlotRelay(ctx, strings.NewReader(tfmsRelayFixture(igtd, now, takeoff, "R", "CONTROL_ACTIVE")), args)
+	if err != nil || status != 0 {
+		t.Fatalf("restricted FlightControl tried to forward: %d (%v)", status, err)
+	}
+	get(ownerToken, nil)
+
 	for _, disabled := range []api.Server{{}, {Demo: true, AdvisoryIngressKey: key}} {
 		w := httptest.NewRecorder()
 		disabled.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, endpoint, nil))
@@ -158,4 +201,22 @@ func TestForwardATFMSlotToTrackedFlight(t *testing.T) {
 			t.Fatalf("disabled slot callback returned %d", w.Code)
 		}
 	}
+}
+
+func tfmsRelayFixture(igtd, observed, takeoff time.Time, sensitivity, indicator string) string {
+	return fmt.Sprintf(`<ds:tfmDataService xmlns:ds="urn:us:gov:dot:faa:atm:tfm:tfmdataservice"
+ xmlns:fd="urn:us:gov:dot:faa:atm:tfm:flightdata" xmlns:cm="urn:us:gov:dot:faa:atm:tfm:flightdatacommonmessages"
+ xmlns:ce="urn:us:gov:dot:faa:atm:tfm:tfmdatacoreelements">
+ <ds:fltdOutput><fd:fltdMessage msgType="FlightControl" fdTrigger="TMI_UPDATE" sourceFacility="TFMS"
+   flightRef="1234567" acid="UAL88" depArpt="SFO" arrArpt="EWR" sensitivity="%s" sourceTimeStamp="%s">
+   <fd:ncsmFlightControl>
+     <cm:qualifiedAircraftId><ce:aircraftId>UAL88</ce:aircraftId><ce:igtd>%s</ce:igtd>
+       <ce:departurePoint><ce:airport>KSFO</ce:airport></ce:departurePoint>
+       <ce:arrivalPoint><ce:airport>KEWR</ce:airport></ce:arrivalPoint>
+     </cm:qualifiedAircraftId>
+     <cm:controlIndicator>%s</cm:controlIndicator>
+     <cm:ncsmControlData><cm:ctd>%s</cm:ctd><cm:controlProgramType>GDP</cm:controlProgramType></cm:ncsmControlData>
+   </fd:ncsmFlightControl>
+ </fd:fltdMessage></ds:fltdOutput>
+</ds:tfmDataService>`, sensitivity, observed.Format(time.RFC3339), igtd.Format(time.RFC3339), indicator, takeoff.Format(time.RFC3339))
 }

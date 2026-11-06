@@ -187,7 +187,8 @@ subscriber. It accepts normalized JSON or supported AIXM Digital NOTAM XML.
 An authorized bridge can also forward flight-specific FAA EDCT and EUROCONTROL
 CTOT assignments with `plano forward-atfm-slot`. It uses the same advisory
 key and requires a verified flight instance match. The relay accepts normalized
-JSON and supported EUROCONTROL ADEXP slot messages. [Takeoff slot relay](AVIATION_CALLBACKS.md#flight-specific-takeoff-slots)
+JSON, supported FAA TFMData FlightControl XML, and EUROCONTROL ADEXP slot
+messages. [Takeoff slot relay](AVIATION_CALLBACKS.md#flight-specific-takeoff-slots)
 
 Keep credential files outside the checkout. Compose reads the `*_FILE`
 values as paths **inside** the container. For each credential with both

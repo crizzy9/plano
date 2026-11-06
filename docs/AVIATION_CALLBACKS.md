@@ -152,6 +152,51 @@ window, whichever is earlier. It also disappears after takeoff or a withdrawal.
 The slot describes wheels-off timing. Airline gate times and Plano's delay
 estimates remain separate.
 
+#### FAA TFMData FlightControl XML
+
+An authorized subscriber can relay one supported legacy TFMData
+`FlightControl` XML message of up to 64 KiB. The adapter reads the controlled
+departure time `ctd` for GDP, AFP, and CTOP assignments. An explicit
+cancellation of the flight's control assignment withdraws its runway time.
+The relay uses the original
+`sourceTimeStamp` to order revisions. [FAA SWIFT field mapping, p. 82](https://www.faa.gov/sites/faa.gov/files/2018-May-22-SWIFT-6-Meeting-Presentation.pdf.pdf) · [NASA ATD-2 glossary, p. 67](https://aviationsystems.arc.nasa.gov/publications/atd2/tech-transfers/1_High-Level_and_Project_Documents/1.2-01%20ATD2_Glossary_v4.0_20210519.pdf) · [FIXM US dictionary §3.34](https://fixm.aero/releases/US_Ext-3.1/FIXM_US_Extension_v3_1_Data_Dictionary.pdf)
+
+```sh
+plano forward-atfm-slot tfms-flight-control flight-binding.json < flight-control.xml
+```
+
+The binding is a JSON file of up to 4 KiB. Match the FAA flight reference,
+operating aircraft identification, FAA airport codes, and initial gate
+departure time (`igtd`) independently to the AeroAPI flight. Supply the
+tracked flight's scheduled departure as a separate RFC 3339 instant. Supply
+the raw FAA airport identifiers in `sourceOrigin` and `sourceDestination`
+even when they equal the ICAO codes. The relay compares the message header and
+qualified flight identity with the binding. The server also checks the exact
+tracked flight, ICAO route, and scheduled departure. [FAA flight matching](https://cdm.fly.faa.gov/faq/required-elements-tfmdata-flight-request) · [FAA Flight Data envelope examples](https://cdm.fly.faa.gov/faq/submitting-terminal-flight-data-tfms)
+
+```json
+{
+  "version": 1,
+  "providerFlightId": "example-UAL88-provider-id",
+  "flightRef": "1234567",
+  "aircraftId": "UAL88",
+  "igtd": "2026-11-06T18:00:00Z",
+  "sourceOrigin": "SFO",
+  "sourceDestination": "EWR",
+  "originIcao": "KSFO",
+  "destinationIcao": "KEWR",
+  "scheduledDeparture": "2026-11-06T18:00:00Z"
+}
+```
+
+Extract a single `tfmDataService` / `fltdOutput` / `fltdMessage` from the
+subscriber stream. The supported message declares `FlightControl`,
+`TMI_UPDATE`, and `TFMS` as its type, trigger, and source. Restricted records
+produce no signed message. The subscriber supplies approved data and applies
+the feed's distribution and LADD restrictions. Validate the payload against
+the schema for your subscription. Current TFMData v4 wire compatibility
+requires provider fixtures. [FAA SWIM access](https://www.faa.gov/air_traffic/technology/swim/products/get_connected) · [FAA LADD](https://www.faa.gov/pilots/ladd)
+
 #### EUROCONTROL ADEXP messages
 
 An authorized subscriber can pass one ADEXP slot message, up to 16 KiB, to

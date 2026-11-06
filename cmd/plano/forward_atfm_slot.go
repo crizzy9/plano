@@ -15,7 +15,7 @@ import (
 
 func runATFMSlotRelay(ctx context.Context, input io.Reader, args []string) (int, error) {
 	input, status, err := atfmSlotRelayInput(input, args, time.Now().UTC())
-	if err != nil {
+	if err != nil || input == nil {
 		return status, err
 	}
 	key, err := readAdvisoryRelayKey()
@@ -29,8 +29,11 @@ func atfmSlotRelayInput(input io.Reader, args []string, now time.Time) (io.Reade
 	if len(args) == 0 {
 		return input, 0, nil
 	}
+	if len(args) == 2 && args[0] == "tfms-flight-control" {
+		return tfmsATFMSlotRelayInput(input, args[1], now)
+	}
 	if (len(args) != 5 && len(args) != 6) || args[0] != "eurocontrol-adexp" {
-		return nil, relayConfigError, errors.New("usage: plano forward-atfm-slot [eurocontrol-adexp <fa-flight-id> <ifplid> <scheduled-departure> <observed-at|-> [takeoff-date]]")
+		return nil, relayConfigError, errors.New("usage: plano forward-atfm-slot [tfms-flight-control <binding-file> | eurocontrol-adexp <fa-flight-id> <ifplid> <scheduled-departure> <observed-at|-> [takeoff-date]]")
 	}
 	scheduled, err := time.Parse(time.RFC3339Nano, args[3])
 	if err != nil || scheduled.IsZero() {
