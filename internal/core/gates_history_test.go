@@ -113,6 +113,56 @@ func TestGateHistoryUsesTerminalOfLatestQualifiedAlias(t *testing.T) {
 	}
 }
 
+func TestGateHistoryUsesOperatingDesignatorForCodeshares(t *testing.T) {
+	store := openGateHistoryStore(t)
+	now := time.Date(2026, 11, 12, 19, 30, 0, 0, time.UTC)
+	actual := now.Add(-24 * time.Hour)
+	flight := feeds.Flight{
+		ID: "AC9000-target", Number: "AC9000", ICAONumber: "UAL88", Source: "flightaware_schedule",
+		Origin: "SFO", OriginICAO: "KSFO", Destination: "EWR", DestinationICAO: "KEWR",
+		Status: "scheduled", ArrivalTerminal: "C",
+	}
+	for _, tc := range []struct {
+		id, provider, number, operating, gate, change string
+	}{
+		{"UAL88-past1", "", "UA88", "UAL88", "C12", ""},
+		{"scheduled_LH9000-alias", "UAL88-past1", "LH9000", "UAL88", "C12", "later"},
+		{"UAL88-past2", "", "UA88", "UAL88", "C12", ""},
+		{"AC9000-legacy", "", "AC9000", "", "C15", ""},
+		{"ACA88-other-operator", "", "AC9000", "ACA88", "C18", ""},
+		{"UAL88-other-airport", "", "UA88", "UAL88", "C18", "wrong airport"},
+		{"UAL88-other-terminal", "", "UA88", "UAL88", "B18", "wrong terminal"},
+		{"scheduled_UAL88-corrected-alias", "UAL88-corrected", "UA88", "UAL88", "C18", ""},
+		{"UAL88-corrected", "", "AC9001", "ACA88", "", "correction"},
+		{"UAL88-other-source", "", "UA88", "UAL88", "C18", "unverified source"},
+	} {
+		past := flight
+		past.ID, past.Number, past.ICAONumber, past.ArrivalGate = tc.id, tc.number, tc.operating, tc.gate
+		past.Source, past.Status, past.ObservedAt, past.ActualArrival = "flightaware_aeroapi", "arrived", actual, &actual
+		switch tc.change {
+		case "later":
+			past.ObservedAt = actual.Add(time.Minute)
+		case "wrong airport":
+			past.DestinationICAO = "KJFK"
+		case "wrong terminal":
+			past.ArrivalTerminal = "B"
+		case "correction":
+			past.ObservedAt, past.ActualArrival = actual.Add(time.Minute), nil
+		case "unverified source":
+			past.Source = "fixture"
+		}
+		observeGateHistory(t, store, past, tc.provider)
+	}
+	got, err := store.PredictGate(t.Context(), flight, true, now)
+	if err != nil || got == nil || got.Gate != "C12" || got.Samples != 3 || got.Share != 2.0/3 {
+		t.Fatalf("codeshare prediction = %+v, error = %v", got, err)
+	}
+	flight.Source = "fixture"
+	if got, err := store.PredictGate(t.Context(), flight, true, now); err != nil || got != nil {
+		t.Fatalf("unverified operating designator gave a prediction: %+v, error = %v", got, err)
+	}
+}
+
 func openGateHistoryStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := Open(filepath.Join(t.TempDir(), "gates.db"))

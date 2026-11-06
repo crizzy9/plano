@@ -29,6 +29,8 @@ func TestBuiltInConnectionMapsUseReportedAirportCodes(t *testing.T) {
 		{"DEN", "KDEN", "https://maps.flydenver.com/"},
 		{"AMS", "EHAM", "https://www.schiphol.nl/en/airport-maps/"},
 		{"CDG", "LFPG", "https://www.parisaeroport.fr/en/passengers/at-the-airport/terminals-map/cdg"},
+		{"FRA", "EDDF", "https://www.frankfurt-airport.com/en/at-the-airport/orientation/airport-map.html"},
+		{"SIN", "WSSS", "https://www.changiairport.com/en/at-changi/map.html"},
 	} {
 		t.Run(tc.iata, func(t *testing.T) {
 			for _, codes := range []struct{ primary, icao string }{{primary: strings.ToLower(tc.iata)}, {icao: tc.icao}} {
@@ -59,6 +61,7 @@ func TestBuiltInSchengenTransferPlanning(t *testing.T) {
 		{"Schiphol Pier D border", "AMS", "EHAM", "1", "D65", "1", "D26", "BOS", 60, 80, "passport control"},
 		{"CDG border and renamed gates", "CDG", "LFPG", "2F", "F26", "2E", "K35", "BOS", 85, 90, "Terminal 5, Gates D"},
 		{"CDG remote terminal", "CDG", "LFPG", "2F", "F26", "7", "N31", "NTE", 105, 120, "secure Orange shuttle"},
+		{"Frankfurt cross-terminal border", "FRA", "EDDF", "1", "A15", "3", "J12", "BOS", 79, 80, "passport control"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			departure := arrival.Add(time.Duration(tc.available) * time.Minute)
@@ -151,7 +154,7 @@ func TestBuiltInConnectionDirectionsFallBackWithoutUsableEndpoints(t *testing.T)
 	}
 }
 
-func TestBuiltInPublicConnectionRoutesUseGenericRescreeningEstimate(t *testing.T) {
+func TestBuiltInConnectionRoutesUseGenericScreeningEstimate(t *testing.T) {
 	now := time.Now()
 	arrival := now.Add(time.Hour)
 	departure := arrival.Add(64 * time.Minute)
@@ -161,6 +164,7 @@ func TestBuiltInPublicConnectionRoutesUseGenericRescreeningEstimate(t *testing.T
 		{"EWR", "", "", "A16", "C71", "AirTrain"},
 		{"EWR", "B", "B", "B42", "B55", "checkpoint"},
 		{"JFK", "T4", "5", "A9", "508", "AirTrain"},
+		{"SIN", "2", "4", "E12", "G15", "transit shuttle"},
 	} {
 		t.Run(tc.airport+"/"+tc.fromGate, func(t *testing.T) {
 			in := feeds.Flight{Destination: tc.airport, ArrivalTerminal: tc.fromTerminal, ArrivalGate: tc.fromGate, ScheduledArrival: &arrival}

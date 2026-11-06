@@ -66,6 +66,16 @@ directions. Secure routes apply when the traveler can stay past security.
   signs for eligible airside transfers, allow time for passport control
   when changing Schengen areas, and check with airport staff about shuttle
   service between the two Schengen terminals. [Air France connection guide](https://wwws.airfrance.us/information/aeroport/conseils-correspondances-paris-cdg-ory) · [Terminal renaming](https://presse.groupeadp.fr/groupe-adp-simplifies-the-passenger-experience-at-paris-charles-de-gaulle-airport-renaming-of-all-terminals-in-march-2027/?lang=en) · [Shuttles](https://www.bonjour-ratp.fr/en/aeroports/roissy-charles-de-gaulle/acces/navette/)
+- FRA uses the SkyLine for Terminal 1–3 transfers. Follow terminal signs
+  for passport control when crossing Schengen areas. The A15–B19 tunnel is
+  on the Schengen side. If SkyLine service is unavailable, ask transfer staff
+  before leaving the secure area. The replacement bus boards outside Arrivals.
+  Terminal 2 is closed for refurbishment. [Frankfurt transfer guide](https://www.frankfurt-airport.com/en/flights-and-transfer/transferring-at-fra.html) · [Terminal transport](https://www.frankfurt-airport.com/en/at-the-airport/orientation.html) · [Terminal 2 closure](https://www.fraport.com/en/newsroom/press-releases/2026/q2/terminal-2-closed-for-refurbishment-starting-today.html)
+- SIN connects Terminals 1–3 with transit Skytrain connections and walkways.
+  For a through-checked transfer involving Terminal 4, use the transit shuttle
+  from the designated boarding point. Allow for security at your departure
+  gate in Terminals 1–3 or central screening in Terminal 4. Check the transfer
+  with your airline on separate tickets. [Changi transit guide](https://www.changiairport.com/en/fly/transit-guide.html) · [Terminal transport](https://www.changiairport.com/en/at-changi/transport-and-directions/transferring-between-terminals-jewel.html)
 
 These directions use general estimates for risk scoring. The default for
 routes that plan for screening or passport control is 65 minutes plus the
@@ -177,7 +187,8 @@ When comparable flights suggest a gate and that gate identifies a more
 precise airport path, Plano can show its duration including the configured
 buffer. The risk score uses the longer of that duration and the main
 estimate with its boarding allowance. Gate history counts each verified
-flight instance once and uses the reported terminal when available.
+flight instance once and uses the reported terminal when available. A verified
+operating designator can match past flights on the same route across codeshares.
 Directions use reported gates and terminals.
 
 ## Monitor a connection

@@ -99,6 +99,9 @@ WHERE json_extract(snapshot,'$.inboundId') IS NOT NULL;
 CREATE INDEX IF NOT EXISTS flights_gate_history_route ON flights(
   json_extract(snapshot,'$.number'),json_extract(snapshot,'$.origin'),json_extract(snapshot,'$.destination')
 );
+CREATE INDEX IF NOT EXISTS flights_gate_history_operating_route ON flights(
+  json_extract(snapshot,'$.icaoNumber'),json_extract(snapshot,'$.origin'),json_extract(snapshot,'$.destination')
+) WHERE json_extract(snapshot,'$.source')='flightaware_aeroapi' AND json_extract(snapshot,'$.icaoNumber') IS NOT NULL;
 CREATE TABLE IF NOT EXISTS flight_estimate_anchors (
   flight_id TEXT PRIMARY KEY REFERENCES flights(id) ON DELETE CASCADE,
   departure DATETIME, arrival DATETIME
