@@ -37,6 +37,7 @@ type connectionResult struct {
 	Airport                 string               `json:"airport"`
 	Instructions            []string             `json:"instructions"`
 	MapURL                  string               `json:"mapUrl,omitempty"`
+	GuideURL                string               `json:"guideUrl,omitempty"`
 	Precision               string               `json:"precision"`
 	ArrivalGate             string               `json:"arrivalGate"`
 	DepartureGate           string               `json:"departureGate"`
@@ -89,7 +90,7 @@ func (s Server) assessConnection(ctx context.Context, in, out feeds.Flight, now 
 	if arrive == nil || depart == nil || !connectionAirportsMatch(in, out) {
 		return connectionResult{}, assessment, errInvalid
 	}
-	route, configured := s.ConnectionRules.Route(in.Destination, in.DestinationICAO, in.ArrivalTerminal, in.ArrivalGate, out.DepartureTerminal, out.DepartureGate)
+	route, configured := s.ConnectionRules.routeForConnection(in, out)
 	result := estimateConnectionRoute(in, out, route, configured)
 	result.ArrivalGate, result.DepartureGate = in.ArrivalGate, out.DepartureGate
 	if !configured {
@@ -200,12 +201,18 @@ func estimateConnectionRoute(in, out feeds.Flight, route ConnectionRoute, config
 		airport = in.DestinationICAO
 	}
 	transfer := 50
-	instructions := []string{"Follow connections signage at " + airport + ".", "Check the gate and boarding deadline with the airline."}
+	instructions := append([]string{}, route.Instructions...)
+	if len(instructions) == 0 {
+		instructions = append(instructions, "Follow connections signage at "+airport+".")
+	}
+	instructions = append(instructions, "Check the gate and boarding deadline with the airline.")
 	if in.ArrivalTerminal != "" && out.DepartureTerminal != "" {
 		transfer = 35
 		if in.ArrivalTerminal != out.DepartureTerminal {
 			transfer = 65
-			instructions = append(instructions, fmt.Sprintf("Transfer from terminal %s to terminal %s.", in.ArrivalTerminal, out.DepartureTerminal))
+			if len(route.Instructions) == 0 {
+				instructions = append(instructions, fmt.Sprintf("Transfer from terminal %s to terminal %s.", in.ArrivalTerminal, out.DepartureTerminal))
+			}
 		}
 	}
 	instructions = append(instructions, "Allow extra time if your itinerary requires security, passport control or baggage recheck.")
@@ -217,7 +224,8 @@ func estimateConnectionRoute(in, out feeds.Flight, route ConnectionRoute, config
 		transfer, precision = route.TransferMinutes, route.Precision
 		instructions = append(append([]string{}, route.Instructions...), "Check the gate and boarding deadline with the airline.")
 	}
-	return connectionResult{TransferMinutes: transfer, Airport: airport, Instructions: instructions, MapURL: route.MapURL, Precision: precision}
+	return connectionResult{TransferMinutes: transfer, Airport: airport, Instructions: instructions,
+		MapURL: route.MapURL, GuideURL: route.GuideURL, Precision: precision}
 }
 
 func (rules *ConnectionRules) forecastTransfer(in, out feeds.Flight, precision string, arrival, departure *core.GatePrediction) *int {

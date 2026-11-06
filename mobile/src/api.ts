@@ -166,6 +166,7 @@ export interface Connection {
   instructions: string[];
   precision?: string;
   mapUrl?: string;
+  guideUrl?: string;
   arrivalGate?: string;
   departureGate?: string;
   arrivalGatePrediction?: GatePrediction;

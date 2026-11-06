@@ -223,11 +223,11 @@ const transferDetail: Record<string, string> = {
   generic: 'General transfer estimate.',
 };
 
-function configuredAirportMap(value?: string) {
-  if (!value || /[\\\s]/.test(value)) return undefined;
+function safeAirportLink(value?: string) {
+	if (typeof value !== 'string' || !value || /[\\\s]/.test(value)) return undefined;
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' && url.hostname && !url.username && !url.password ? value : undefined;
+    return url.protocol === 'https:' && url.hostname && !url.username && !url.password ? url.href : undefined;
   } catch {
     return undefined;
   }
@@ -481,7 +481,8 @@ function CheckedConnection({ api, inbound, outbound, monitorBusy, changeMonitori
     }
   }
 
-  const airportMap = configuredAirportMap(result?.mapUrl);
+  const airportMap = safeAirportLink(result?.mapUrl);
+  const airportGuide = safeAirportLink(result?.guideUrl);
   return (
     <View style={layout.section}>
       <ErrorMessage message={error} />
@@ -503,6 +504,9 @@ function CheckedConnection({ api, inbound, outbound, monitorBusy, changeMonitori
               : `https://www.google.com/maps/search/?api=1&query=${place}`;
             Linking.openURL(airportMap ?? fallback).catch((cause: unknown) => setIssue(errorText(cause)));
           }} />
+          {airportGuide && <Action secondary label={`Open ${result.airport} transfer guide`} onPress={() => {
+            Linking.openURL(airportGuide).catch((cause: unknown) => setIssue(errorText(cause)));
+          }} />}
           {(result.monitoring || result.monitorEligible) && (
             <>
               <Heading>Connection alerts</Heading>

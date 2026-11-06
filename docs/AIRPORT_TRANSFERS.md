@@ -6,6 +6,31 @@ checkpoints it covers. Plano selects the shortest configured path in the
 direction of travel, adds the airport's buffer, and uses that estimate in
 the connection risk score.
 
+## Official maps and connection directions
+
+Plano links to official terminal maps by default at SEA, DFW, ATL, SFO, EWR,
+JFK, LAX, and ORD. The map opens on the airport's website. When reported gates
+or terminals identify a supported path, Plano also shows directions for
+travelers who can stay past security.
+
+- SEA directions use walkways and the Blue, Green, and Yellow train lines.
+  Follow airport staff and signs for shuttle buses during train interruptions.
+  Travelers who need U.S. entry processing should follow International
+  Arrivals and use the terminal map after screening. [SEA Underground](https://www.portseattle.org/blog/all-aboard-sea-underground) · [International connections](https://www.portseattle.org/page/international-connections) · [Construction impacts](https://www.portseattle.org/page/construction-impacts)
+- DFW directions use Skylink between terminals A through E. Check platform
+  signs for the train serving your departure terminal. [DFW transfer guide](https://www.dfwairport.com/explore/plan/connect/)
+- ATL directions use Plane Train or the pedestrian walkway between concourses
+  T and A through F. [ATL concourse connections](https://www.atl.com/maps-3/)
+
+These directions use the general transfer estimate and boarding reserve for
+risk scoring. The official map remains available when gate information is
+missing or a connection is disrupted. Airport signs and staff can account for
+current closures, screening requirements, and changes to gate assignments.
+
+Operator maps take precedence over the default map. An operator graph with
+checkpoints also takes precedence over built-in directions, including when
+its checkpoints have no path for the reported gates.
+
 ## Configure an airport
 
 Set `PLANO_AIRPORT_TRANSFERS_FILE` to a version 1 JSON file and restart

@@ -31,6 +31,7 @@ type ConnectionRoute struct {
 	TransferMinutes int
 	Instructions    []string
 	MapURL          string
+	GuideURL        string
 	Precision       string
 }
 
@@ -214,27 +215,35 @@ func (g *connectionGraph) endpoint(terminal, gate string) (node int, isGate, fou
 // Route uses the most precise identifiable checkpoints. Even if no configured
 // path exists, MapURL may identify the airport's own map.
 func (r *ConnectionRules) Route(airport, alternateAirport, arrivalTerminal, arrivalGate, departureTerminal, departureGate string) (ConnectionRoute, bool) {
+	return r.graphForAirport(airport, alternateAirport).route(arrivalTerminal, arrivalGate, departureTerminal, departureGate)
+}
+
+func (r *ConnectionRules) graphForAirport(airport, alternateAirport string) *connectionGraph {
 	if r == nil {
-		return ConnectionRoute{}, false
+		return nil
 	}
 	graph := r.byCode[connectionCode(airport)]
 	if graph == nil {
 		graph = r.byCode[connectionCode(alternateAirport)]
 	}
-	if graph == nil {
+	return graph
+}
+
+func (g *connectionGraph) route(arrivalTerminal, arrivalGate, departureTerminal, departureGate string) (ConnectionRoute, bool) {
+	if g == nil {
 		return ConnectionRoute{}, false
 	}
-	result := ConnectionRoute{MapURL: graph.mapURL}
-	from, fromGate, fromOK := graph.endpoint(arrivalTerminal, arrivalGate)
-	to, toGate, toOK := graph.endpoint(departureTerminal, departureGate)
+	result := ConnectionRoute{MapURL: g.mapURL}
+	from, fromGate, fromOK := g.endpoint(arrivalTerminal, arrivalGate)
+	to, toGate, toOK := g.endpoint(departureTerminal, departureGate)
 	if !fromOK || !toOK || (from == to && !fromGate) {
 		return result, false
 	}
-	minutes, directions, ok := graph.shortestPath(from, to)
+	minutes, directions, ok := g.shortestPath(from, to)
 	if !ok {
 		return result, false
 	}
-	result.TransferMinutes = minutes + graph.bufferMinutes
+	result.TransferMinutes = minutes + g.bufferMinutes
 	result.Instructions = directions
 	switch {
 	case fromGate && toGate:
