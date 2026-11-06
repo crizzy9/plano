@@ -350,7 +350,7 @@ EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flight
 			return d, err
 		}
 	}
-	if d.Prediction != nil && d.Prediction.ValidUntil != nil && !d.Prediction.ValidUntil.After(time.Now()) {
+	if d.Prediction != nil && !predictionCurrent(d.Prediction, d.Flight, d.Inbound, time.Now()) {
 		d.Prediction = nil
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT data FROM events WHERE flight_id=? ORDER BY at_ns DESC,id LIMIT 200`, id)
@@ -473,11 +473,11 @@ COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id)
 	if trackedRefresh || prior.ID == "" {
 		predictionValue = PredictWithModel(s.delayModel, flight, inbound, advisories, decisionAt)
 	}
-	if (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flight.ActualDeparture == nil && flight.ActualTakeoff == nil && flight.Status != "taxi_out" && flight.Status != "airborne" && flight.Status != "landed" && !finished(flight) {
+	if (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flightBeforeDeparture(flight) {
 		if err := json.Unmarshal(oldPrediction, &predictionValue); err != nil {
 			return err
 		}
-		if predictionValue != nil && predictionValue.ValidUntil != nil && !predictionValue.ValidUntil.After(decisionAt) {
+		if predictionValue != nil && (trackedRefresh && usesInboundTiming(predictionValue) || !predictionCurrent(predictionValue, flight, inbound, decisionAt)) {
 			predictionValue = nil
 		}
 	}

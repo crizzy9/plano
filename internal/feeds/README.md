@@ -4,7 +4,14 @@ Plano's adapters record provenance on flight snapshots, observed positions, and 
 
 ## FlightAware AeroAPI
 
-`AeroAPI` uses a server-side key. It reads recent and historical flights, future schedules, airport metadata, and observed tracks from the provider. Airport timezone determines the requested calendar date. Future timetable entries without a FlightAware ID receive a Plano ID that is retained when the live flight can be matched by route, operating designator, and departure time. FlightAware's track endpoint supplies both ADS-B and other observation types, which Plano labels separately. Explicit inbound flight links take precedence over tail and airport continuity when following rotations up to 25 hours. [AeroAPI OpenAPI 4.17.1](https://www.flightaware.com/commercial/aeroapi/resources/aeroapi-openapi.yml)
+`AeroAPI` uses a server-side key. It reads recent and historical flights, future schedules, airport metadata, and observed tracks from the provider. Airport timezone determines the requested calendar date. Future timetable entries without a FlightAware ID receive a Plano ID that is retained when the live flight can be matched by route, operating designator, and departure time. FlightAware's track endpoint supplies both ADS-B and other observation types, which Plano labels separately. [AeroAPI OpenAPI 4.17.1](https://www.flightaware.com/commercial/aeroapi/resources/aeroapi-openapi.yml)
+
+Rotations return the immediate inbound first, then the earlier legs in the
+25-hour window. An explicit provider link takes precedence when aircraft,
+airport, and timing evidence agree. Tail-only matching uses movement order.
+The refresh worker retains cached history on a failed lookup with no verified
+legs. A verified partial result replaces the older chain, and an aircraft
+assignment change clears any history that could belong to the previous plane.
 
 The API requires an eligible account and plan. Check which endpoints, request volumes, storage, and public redistribution your agreement covers before enabling live data for other users. [AeroAPI license](https://www.flightaware.com/commercial/aeroapi/AeroAPI_Standard_License.pdf)
 

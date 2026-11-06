@@ -89,10 +89,13 @@ func (r Refresher) refresh(ctx context.Context) error {
 			flight.AircraftAge = r.Registry.Age(flight.TailNumber, now)
 		}
 		var inbound []feeds.Flight
-		if flight.ActualDeparture == nil && !finished(flight) && (flight.InboundID != "" || flight.TailNumber != "") {
+		if flightBeforeDeparture(flight) && (flight.InboundID != "" || flight.TailNumber != "") {
 			inbound, err = r.Flights.Rotation(ctx, flight)
 			if err != nil {
 				r.Logger.Warn("aircraft rotation refresh failed", "id", flight.ID, "error", err)
+				if len(inbound) == 0 {
+					inbound = nil
+				}
 			}
 		}
 		if err := r.Store.observeTracked(ctx, flight, positions, inbound, advisories); err != nil {

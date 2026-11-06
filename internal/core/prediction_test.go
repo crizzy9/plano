@@ -17,7 +17,7 @@ func TestPredictionFeaturesUseMatchingAndKnownSignals(t *testing.T) {
 	arrival := departure.Add(4 * time.Hour)
 	published := departure.Add(10 * time.Minute)
 	flight := feeds.Flight{ID: "main", Number: "UA7", Status: "scheduled", Origin: "SFO", Destination: "JFK", OriginICAO: "KSFO", DestinationICAO: "KJFK",
-		ScheduledDeparture: &departure, ScheduledArrival: &arrival, EstimatedDeparture: &published}
+		ScheduledDeparture: &departure, ScheduledArrival: &arrival, EstimatedDeparture: &published, InboundID: "inbound"}
 	inbound := []feeds.Flight{{ID: "inbound", Number: "UA8", Status: "airborne", DestinationICAO: "KSFO", Destination: "KSFO",
 		ObservedAt: now, ScheduledArrival: new(departure.Add(-20 * time.Minute)), EstimatedArrival: new(departure.Add(15 * time.Minute))}}
 	stopEnd := departure.Add(70 * time.Minute)

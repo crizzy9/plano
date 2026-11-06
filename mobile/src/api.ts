@@ -19,12 +19,14 @@ export interface Flight {
   estimatedDeparture?: string;
   estimatedArrival?: string;
   actualDeparture?: string;
+  actualLanding?: string;
   actualArrival?: string;
   departureGate?: string;
   arrivalGate?: string;
   departureTerminal?: string;
   arrivalTerminal?: string;
   tailNumber?: string;
+  inboundId?: string;
   aircraftType?: string;
   aircraftAge?: number;
   status: FlightStatus;
@@ -91,6 +93,7 @@ export interface FlightNotice {
 
 export interface FlightDetail {
   flight: Flight;
+  rotationSnapshot?: boolean;
   events?: FlightEvent[];
   telemetry?: Position[];
   inbound?: Flight[];
@@ -646,7 +649,10 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
       const path = flightIds.length ? `/v1/tracked?${query}` : '/v1/tracked';
       return (await authenticated<{ flights: Flight[] }>(path)).flights;
     },
-    detail: (id: string) => authenticated<FlightDetail>(flightPath(id)),
+    detail(id: string, rotationOf?: string) {
+      const query = rotationOf ? `?${new URLSearchParams({ rotationOf })}` : '';
+      return authenticated<FlightDetail>(`${flightPath(id)}${query}`);
+    },
     async radar(id: string, after?: string) {
       const query = after ? `?${new URLSearchParams({ after })}` : '';
       try {

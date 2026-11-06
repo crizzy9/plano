@@ -207,10 +207,24 @@ func (s Server) search(w http.ResponseWriter, r *http.Request, _ string) error {
 
 func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) error {
 	id := r.PathValue("id")
-	if !flightID.MatchString(id) {
+	rotationOf := r.URL.Query().Get("rotationOf")
+	if !flightID.MatchString(id) || rotationOf != "" && (!flightID.MatchString(rotationOf) || rotationOf == id) {
 		return errInvalid
 	}
-	d, err := s.Store.DetailsForInstallation(r.Context(), owner, id)
+	ctx := r.Context()
+	d, err := s.Store.DetailsForInstallation(ctx, owner, id)
+	if err != nil && !errors.Is(err, core.ErrNotFound) {
+		return err
+	}
+	var rotationSnapshot bool
+	if rotationOf != "" && !d.Tracked {
+		rotation, rotationErr := s.rotationDetails(ctx, owner, rotationOf, id, time.Now())
+		if rotationErr == nil {
+			d, err, rotationSnapshot = rotation, nil, true
+		} else if !errors.Is(rotationErr, core.ErrNotFound) {
+			return rotationErr
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -229,9 +243,10 @@ func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) er
 	}
 	respond(w, 200, struct {
 		core.Details
-		Weather []core.AirportWeather `json:"weather,omitempty"`
-		Notices []core.FlightNotice   `json:"notices,omitempty"`
-	}{d, weather, notices})
+		Weather          []core.AirportWeather `json:"weather,omitempty"`
+		Notices          []core.FlightNotice   `json:"notices,omitempty"`
+		RotationSnapshot bool                  `json:"rotationSnapshot,omitempty"`
+	}{d, weather, notices, rotationSnapshot})
 	return nil
 }
 

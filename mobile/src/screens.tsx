@@ -17,7 +17,7 @@ import { Action, Body, Chart, ErrorMessage, FlightRow, FlightStrip, Heading, Inp
 export type Routes = {
   Home: undefined;
   Search: undefined;
-  Flight: { id: string; number: string; initial?: Flight };
+  Flight: { id: string; number: string; initial?: Flight; rotationOf?: string };
   Tools: undefined;
   Import: undefined;
   Passport: undefined;
@@ -196,11 +196,11 @@ export function Search({ api, navigation }: APIProps<'Search'>) {
 
 export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'>) {
   const { colors } = usePalette();
-  const { id, initial } = route.params;
+  const { id, initial, rotationOf } = route.params;
   const load = useCallback(async () => {
-    const [detail, tracked] = await Promise.all([api.detail(id), api.tracked([id])]);
-    return { detail, tracked: tracked.some((item) => item.id === id) };
-  }, [api, id]);
+    const [detail, tracked] = await Promise.all([api.detail(id, rotationOf), api.tracked([id])]);
+    return { detail, tracked: !detail.rotationSnapshot && tracked.some((item) => item.id === id) };
+  }, [api, id, rotationOf]);
   const { value, setValue, error, pending, refresh } = useRemote(load, true, 30_000);
   const [actionError, setActionError] = useState<string>();
   const [operation, setOperation] = useState<'track' | 'share' | 'live'>();
@@ -208,6 +208,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const [pickupRevision, setPickupRevision] = useState(0);
   const flight = value?.detail.flight ?? initial;
   const detail = value?.detail;
+  const rotationSnapshot = detail?.rotationSnapshot === true;
   const weather = detail?.weather?.filter((report) => Date.parse(report.validUntil) > Date.now()) ?? [];
   const notices = value?.tracked && detail?.flight.id === id ? detail.notices : undefined;
   const noticeRows = useMemo(() => notices?.slice(0, 8).map((notice) => ({ notice, expires: Date.parse(notice.validUntil) })) ?? [], [notices]);
@@ -220,7 +221,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const currentNotices = noticeRows.filter(({ expires }) => expires > now).map(({ notice }) => notice);
 
   async function toggleTrack() {
-    if (!value || operation) return;
+    if (!value || rotationSnapshot || operation) return;
     setOperation('track');
     setActionError(undefined);
     try {
@@ -262,29 +263,32 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
       {!flight && pending && <Loading />}
       {flight && (
         <>
+          {rotationSnapshot && <Body>Aircraft rotation snapshot</Body>}
           <FlightStrip flight={flight} />
           <Body>{formatDay(flight.scheduledDeparture, flight.originTimeZone)} · Airport local times when available</Body>
-          <Body>Last flight update {formatTime(flight.observedAt)}</Body>
-          {value && !value.tracked && !isFinished(flight) && (
+          <Body>{rotationSnapshot ? 'Last reported' : 'Last flight update'} {formatTime(flight.observedAt)}</Body>
+          {value && !rotationSnapshot && !value.tracked && !isFinished(flight) && (
             <Input label="Seat (optional)" value={seat} onChangeText={setSeat} placeholder="12A"
               maxLength={8} autoCapitalize="characters" autoCorrect={false} />
           )}
-          <View style={layout.actions}>
-            {value && <Action label={value.tracked ? 'Stop tracking' : 'Track flight'} onPress={toggleTrack}
-              busy={operation === 'track'} disabled={pending || !!operation && operation !== 'track'}
-              icon="plane" secondary={value.tracked} />}
-            {value?.tracked && !isFinished(flight) && canStartLiveActivity && (
-              <Action label="Start Live Activity" icon="bell" secondary busy={operation === 'live'}
-                disabled={!!operation && operation !== 'live'} onPress={() => {
-                  setOperation('live');
-                  setActionError(undefined);
-                  void startIOSFlightActivity(api, flight, seat).catch((cause: unknown) => setActionError(errorText(cause)))
-                    .finally(() => setOperation(undefined));
-                }} />
-            )}
-            {value?.tracked && <Action label="Share live link" onPress={share} busy={operation === 'share'}
-              disabled={!!operation && operation !== 'share'} icon="share" secondary />}
-          </View>
+          {value && !rotationSnapshot && (
+            <View style={layout.actions}>
+              <Action label={value.tracked ? 'Stop tracking' : 'Track flight'} onPress={toggleTrack}
+                busy={operation === 'track'} disabled={pending || !!operation && operation !== 'track'}
+                icon="plane" secondary={value.tracked} />
+              {value.tracked && !isFinished(flight) && canStartLiveActivity && (
+                <Action label="Start Live Activity" icon="bell" secondary busy={operation === 'live'}
+                  disabled={!!operation && operation !== 'live'} onPress={() => {
+                    setOperation('live');
+                    setActionError(undefined);
+                    void startIOSFlightActivity(api, flight, seat).catch((cause: unknown) => setActionError(errorText(cause)))
+                      .finally(() => setOperation(undefined));
+                  }} />
+              )}
+              {value.tracked && <Action label="Share live link" onPress={share} busy={operation === 'share'}
+                disabled={!!operation && operation !== 'share'} icon="share" secondary />}
+            </View>
+          )}
           <ErrorMessage message={actionError} />
           {value?.tracked && <PickupLinks key={pickupRevision} api={api} flightId={id} />}
           {(flight.aircraftType || flight.aircraftAge != null || flight.tailNumber || flight.baggage) && (
@@ -323,16 +327,14 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
             </View>
           )}
           {currentNotices.length > 0 && <AirportNotices flight={flight} notices={currentNotices} />}
-          {!!detail?.inbound?.length && (
-            <View style={layout.section}>
-              <Heading>Where’s my plane?</Heading>
-              {detail.inbound.map((leg) => <FlightRow key={leg.id} flight={leg}
-                onPress={() => navigation.push('Flight', { id: leg.id, number: leg.number, initial: leg })} />)}
-            </View>
+          {detail && (!!detail.inbound?.length || value?.tracked && !flight.actualDeparture &&
+            !isFinished(flight) && !['taxi_out', 'airborne', 'landed', 'diverted'].includes(flight.status)) && (
+            <AircraftRotation flight={flight} legs={detail.inbound ?? []} open={(leg) =>
+              navigation.push('Flight', { id: leg.id, number: leg.number, initial: leg, rotationOf: value?.tracked ? flight.id : undefined })} />
           )}
           <FlightRadar key={`${id}:${flight.tailNumber ?? ''}:${!!value?.tracked}`}
             api={api} flight={flight} tracked={value?.tracked === true} history={detail?.telemetry} />
-          {detail && (
+          {detail && (!rotationSnapshot || !!detail.events?.length) && (
             <View style={layout.section}>
               <Heading>Flight updates</Heading>
               {!detail.events?.length && <Body>New flight updates will appear here.</Body>}
@@ -350,6 +352,85 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
         </>
       )}
     </Page>
+  );
+}
+
+const rotationFreshness = 30 * 60_000;
+
+function directRotationLeg(flight: Flight, leg: Flight | undefined) {
+  if (!leg || leg.id === flight.id || ['cancelled', 'diverted', 'unknown'].includes(leg.status)) return;
+  const airport = leg.destinationICAO || leg.destination;
+  const sameAirport = !!airport && (airport === (flight.originICAO || flight.origin) ||
+    (!(leg.destinationICAO && flight.originICAO) && !!leg.destination && leg.destination === flight.origin));
+  if (!sameAirport) return;
+  const linked = flight.inboundId === leg.id;
+  if (flight.tailNumber && leg.tailNumber) {
+    if (flight.tailNumber.toUpperCase() !== leg.tailNumber.toUpperCase()) return;
+    return { leg, source: linked ? 'Provider-linked inbound' : `Matched by tail ${leg.tailNumber}` };
+  }
+  if (linked) return { leg, source: 'Provider-linked inbound' };
+}
+
+function rotationTime(time: number, zone?: string) {
+  const options: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+  if (zone) {
+    try { return new Intl.DateTimeFormat(undefined, { ...options, timeZone: zone }).format(time); } catch { /* use UTC */ }
+  }
+  return new Intl.DateTimeFormat(undefined, { ...options, timeZone: 'UTC', timeZoneName: 'short' }).format(time);
+}
+
+function inboundArrival(leg: Flight, now: number, stale: boolean) {
+  const gateIn = Date.parse(leg.actualArrival ?? '');
+  if (Number.isFinite(gateIn)) return { label: 'Recorded gate arrival', time: gateIn };
+  const wheelsOn = Date.parse(leg.actualLanding ?? '');
+  const estimate = Date.parse(leg.estimatedArrival ?? '');
+  if (Number.isFinite(estimate) && (!Number.isFinite(wheelsOn) || estimate > wheelsOn)) {
+    return { label: stale || estimate <= now ? 'Last estimated gate arrival' : 'Estimated gate arrival', time: estimate };
+  }
+  if (Number.isFinite(wheelsOn)) return { label: 'Recorded landing', time: wheelsOn };
+  const scheduled = Date.parse(leg.scheduledArrival ?? '');
+  if (Number.isFinite(scheduled)) return { label: 'Scheduled gate arrival', time: scheduled };
+}
+
+function AircraftRotation({ flight, legs, open }: { flight: Flight; legs: Flight[]; open: (leg: Flight) => void }) {
+  const { colors } = usePalette();
+  const immediate = directRotationLeg(flight, legs[0]);
+  const earlier = immediate ? legs.slice(1) : legs;
+  const observed = Date.parse(immediate?.leg.observedAt ?? '');
+  const staleAt = observed + rotationFreshness;
+  const estimate = Date.parse(immediate?.leg.estimatedArrival ?? '');
+  const expiries = useMemo(() => [observed, staleAt, estimate].filter(Number.isFinite), [observed, staleAt, estimate]);
+  const now = useExpiryClock(expiries);
+  const stale = !Number.isFinite(observed) || observed > now || now >= staleAt;
+  const timing = immediate && inboundArrival(immediate.leg, now, stale);
+  const zone = flight.originTimeZone || immediate?.leg.destinationTimeZone;
+  return (
+    <View style={layout.section}>
+      <Heading>Where’s my plane?</Heading>
+      {immediate ? (
+        <>
+          <View style={styles.rotationSummary}>
+            <Text accessibilityRole="header" style={[styles.strong, { color: colors.text }]}>
+              Inbound to {flight.origin || flight.originICAO}
+            </Text>
+            {timing ? <Body>{timing.label} · {rotationTime(timing.time, zone)}</Body> : <Body>Arrival time unavailable.</Body>}
+            <Body>{immediate.source}</Body>
+            {Number.isFinite(observed) ? (
+              <Body>{stale ? 'Last reported' : 'Reported'} {rotationTime(observed, zone)}</Body>
+            ) : <Body>Report time unavailable.</Body>}
+          </View>
+          <FlightRow flight={immediate.leg} onPress={() => open(immediate.leg)} />
+        </>
+      ) : <Body>Immediate inbound details are unavailable.</Body>}
+      {!!earlier.length && (
+        <>
+          <Text accessibilityRole="header" style={[styles.strong, { color: colors.text }]}>
+            {immediate ? 'Earlier aircraft legs' : 'Available aircraft history'}
+          </Text>
+          {earlier.map((leg) => <FlightRow key={leg.id} flight={leg} onPress={() => open(leg)} />)}
+        </>
+      )}
+    </View>
   );
 }
 
@@ -644,5 +725,6 @@ function AlertsSettings({ api }: { api: PlanoAPI }) {
 const styles = StyleSheet.create({
   event: { borderBottomWidth: StyleSheet.hairlineWidth, paddingBottom: 12, gap: 5 },
   eventTitle: { flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 },
+  rotationSummary: { gap: 4 },
   strong: { fontSize: 16, fontWeight: '600' },
 });
