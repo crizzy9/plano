@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -47,6 +48,39 @@ func TestConnectionRiskAccountsForBoardingAndActualMovement(t *testing.T) {
 			window, risk := connectionRisk(in, out, arrival, departure, now, 30+defaultConnectionBoardingReserveMinutes, connectionDeparted(out))
 			if window != tc.wantWindow || risk != tc.want {
 				t.Fatalf("got %d min and %s, want %d min and %s", window, risk, tc.wantWindow, tc.want)
+			}
+		})
+	}
+}
+
+func TestConnectionAssessmentBoundsDepartureAfterMovement(t *testing.T) {
+	now := time.Date(2026, time.November, 5, 12, 0, 0, 0, time.UTC)
+	at := func(minutes int) *time.Time {
+		stamp := now.Add(time.Duration(minutes) * time.Minute)
+		return &stamp
+	}
+	arrival := feeds.Flight{Destination: "XZZ", Status: "arrived", ActualArrival: at(-35)}
+	for _, tc := range []struct {
+		name     string
+		onward   feeds.Flight
+		window   int
+		risk     string
+		guidance bool
+	}{
+		{"future ETD after taxi-out", feeds.Flight{Status: "taxi_out", EstimatedDeparture: at(65), ObservedAt: *at(-1)}, 34, "Missed", false},
+		{"known gate-out", feeds.Flight{Status: "airborne", ActualDeparture: at(-9), EstimatedDeparture: at(65), ObservedAt: *at(-1)}, 26, "Missed", false},
+		{"known landing but no gate-out", feeds.Flight{Status: "landed", ActualLanding: at(-15), EstimatedDeparture: at(65), ObservedAt: *at(-1)}, 20, "Missed", false},
+		{"future observation bounded by clock", feeds.Flight{Status: "airborne", ScheduledDeparture: at(65), ObservedAt: *at(1)}, 35, "Missed", false},
+		{"upcoming ETD", feeds.Flight{Status: "boarding", EstimatedDeparture: at(65), ObservedAt: *at(-1)}, 100, "Relaxed", true},
+		{"cancelled onward", feeds.Flight{Status: "cancelled", EstimatedDeparture: at(65), ObservedAt: *at(-1)}, 100, "Missed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.onward.Origin = "XZZ"
+			result, assessment, err := (Server{}).assessConnection(t.Context(), arrival, tc.onward, now,
+				func(context.Context, feeds.Flight, bool, time.Time) (*core.GatePrediction, error) { return nil, nil })
+			if err != nil || result.Risk != tc.risk || result.AvailableMinutes != tc.window || result.GuidanceAvailable != tc.guidance ||
+				assessment.Risk != tc.risk || assessment.Monitorable != tc.guidance {
+				t.Fatalf("assessment = %+v, monitor = %+v, error = %v", result, assessment, err)
 			}
 		})
 	}

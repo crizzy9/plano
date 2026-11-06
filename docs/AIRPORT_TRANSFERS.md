@@ -189,10 +189,12 @@ If the estimated arrival time has passed without a recorded gate arrival,
 the upcoming estimate starts from the current time.
 
 Once the onward flight has departed, Plano can still estimate whether the
-connection was feasible using the available flight times. It reports
-**Missed** if the inbound gate arrival was unrecorded or the elapsed time fell
-short of the estimates. A cancellation, inbound diversion, or an elapsed
-connection window also results in **Missed**.
+connection was feasible using the available flight times. If gate-out is
+unreported, the observed movement and the current time bound the estimate.
+It reports **Missed** if the inbound gate arrival was unrecorded or the elapsed
+time fell short of the estimates. A cancellation, inbound diversion, or an elapsed
+connection window also results in **Missed**. The app hides transfer directions
+after a confirmed onward departure, a cancellation, or an inbound diversion.
 
 When comparable flights suggest a gate and that gate identifies a more
 precise airport path, Plano can show its duration including the configured

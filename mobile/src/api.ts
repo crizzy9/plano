@@ -252,6 +252,7 @@ export interface Passport extends PassportHistory {
 
 export interface Connection {
   risk: string;
+  guidanceAvailable?: boolean;
   availableMinutes: number;
   transferMinutes: number;
   boardingReserveMinutes?: number;

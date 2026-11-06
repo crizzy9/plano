@@ -45,6 +45,7 @@ type connectionResult struct {
 	DepartureGate           string               `json:"departureGate"`
 	ArrivalGatePrediction   *core.GatePrediction `json:"arrivalGatePrediction,omitempty"`
 	DepartureGatePrediction *core.GatePrediction `json:"departureGatePrediction,omitempty"`
+	GuidanceAvailable       bool                 `json:"guidanceAvailable"`
 	Monitoring              bool                 `json:"monitoring,omitempty"`
 	MonitorEligible         bool                 `json:"monitorEligible,omitempty"`
 }
@@ -88,7 +89,7 @@ func (s Server) connection(w http.ResponseWriter, r *http.Request, owner string)
 func (s Server) assessConnection(ctx context.Context, in, out feeds.Flight, now time.Time, predictGate core.ConnectionGatePredictor) (connectionResult, core.ConnectionAssessment, error) {
 	var assessment core.ConnectionAssessment
 	arrive := first(in.ActualArrival, in.EstimatedArrival, in.ScheduledArrival)
-	depart := connectionDeparture(out)
+	depart := connectionWindowDeparture(out, now)
 	if arrive == nil || depart == nil || !connectionAirportsMatch(in, out) {
 		return connectionResult{}, assessment, errInvalid
 	}
@@ -101,6 +102,7 @@ func (s Server) assessConnection(ctx context.Context, in, out feeds.Flight, now 
 	planningMinutes := result.TransferMinutes + result.BoardingReserveMinutes
 	departed := connectionDeparted(out)
 	disrupted := connectionDisrupted(in, out)
+	result.GuidanceAvailable = !departed && !disrupted
 	var err error
 	result.ArrivalGatePrediction, err = predictGate(ctx, in, true, now)
 	if err != nil {
@@ -110,7 +112,7 @@ func (s Server) assessConnection(ctx context.Context, in, out feeds.Flight, now 
 	if err != nil {
 		return connectionResult{}, assessment, err
 	}
-	if !departed && !disrupted {
+	if result.GuidanceAvailable {
 		// Configured routes already include the operator's boarding allowance.
 		// An inferred gate may increase the total without replacing directions.
 		result.ForecastTransferMinutes = s.ConnectionRules.forecastTransfer(in, out, route.Precision, result.ArrivalGatePrediction, result.DepartureGatePrediction)
@@ -151,7 +153,7 @@ func terminalConnectionAlertUntil(in, out feeds.Flight, now time.Time) time.Time
 		observed = in.ObservedAt
 	}
 	expires := earlierTime(now, observed).Add(connectionAlertLifetime)
-	if depart := connectionDeparture(out); depart != nil {
+	if depart := connectionWindowDeparture(out, now); depart != nil {
 		expires = earlierTime(expires, depart.Add(connectionMonitorGrace))
 	}
 	return expires
@@ -159,6 +161,25 @@ func terminalConnectionAlertUntil(in, out feeds.Flight, now time.Time) time.Time
 
 func connectionDeparture(flight feeds.Flight) *time.Time {
 	return first(flight.ActualDeparture, flight.ActualTakeoff, flight.EstimatedDeparture, flight.ScheduledDeparture)
+}
+
+func connectionWindowDeparture(flight feeds.Flight, now time.Time) *time.Time {
+	departure := connectionDeparture(flight)
+	if !connectionDeparted(flight) || flight.ActualDeparture != nil && !flight.ActualDeparture.After(now) {
+		return departure
+	}
+	// Without a gate-out time, confirmed movement bounds the estimate. A
+	// stale schedule or ETD must not extend a window that has already closed.
+	latest := now
+	if !flight.ObservedAt.IsZero() {
+		latest = earlierTime(latest, flight.ObservedAt)
+	}
+	for _, bound := range []*time.Time{departure, flight.ActualTakeoff, flight.ActualLanding, flight.ActualArrival} {
+		if bound != nil {
+			latest = earlierTime(latest, *bound)
+		}
+	}
+	return &latest
 }
 
 func earlierTime(a, b time.Time) time.Time {

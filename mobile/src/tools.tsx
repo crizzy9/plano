@@ -460,7 +460,8 @@ function CheckedConnection({ api, inbound, outbound, monitorBusy, changeMonitori
   const inboundID = inbound.id;
   const outboundID = outbound.id;
   const load = useCallback(() => api.connection(inboundID, outboundID), [api, inboundID, outboundID]);
-  const { value: result, setValue: setResult, error, pending, refresh } = useRemote(load, true, 30_000);
+  const { value, setValue: setResult, error, pending, refresh } = useRemote(load, true, 30_000);
+  const result = error ? undefined : value;
   const [issue, setIssue] = useState<string>();
   const mounted = useRef(false);
   useEffect(() => {
@@ -496,20 +497,24 @@ function CheckedConnection({ api, inbound, outbound, monitorBusy, changeMonitori
           <Text style={[styles.detail, { color: colors.text }]}>{Math.max(0, result.availableMinutes)} min connection window · {result.transferMinutes} min estimated transfer</Text>
           {(result.boardingReserveMinutes ?? 0) > 0 && <Body>Timing includes an estimated {result.boardingReserveMinutes} min boarding reserve.</Body>}
           {result.precision && transferDetail[result.precision] && <Body>{transferDetail[result.precision]}</Body>}
-          {result.forecastTransferMinutes !== undefined && <Body>Historical gates suggest a {result.forecastTransferMinutes} min airport route. The risk estimate allows for whichever route requires more time, including boarding.</Body>}
-          <ConnectionGate direction="arrival" reported={result.arrivalGate ?? inbound.arrivalGate} prediction={result.arrivalGatePrediction} />
-          <ConnectionGate direction="departure" reported={result.departureGate ?? outbound.departureGate} prediction={result.departureGatePrediction} />
-          {result.instructions?.map((instruction, index) => <Body key={index}>{instruction}</Body>)}
-          <Action secondary label={airportMap ? `Open ${result.airport} terminal map` : `Open ${result.airport} in maps`} onPress={() => {
-            const place = encodeURIComponent(`${result.airport} airport`);
-            const fallback = Platform.OS === 'ios' ? `https://maps.apple.com/?q=${place}`
-              : `https://www.google.com/maps/search/?api=1&query=${place}`;
-            Linking.openURL(airportMap ?? fallback).catch((cause: unknown) => setIssue(errorText(cause)));
-          }} />
-          {airportGuide && <Action secondary label={`Open ${result.airport} transfer guide`} onPress={() => {
-            Linking.openURL(airportGuide).catch((cause: unknown) => setIssue(errorText(cause)));
-          }} />}
-          {(result.monitoring || result.monitorEligible) && (
+          {result.guidanceAvailable !== false && (
+            <>
+              {result.forecastTransferMinutes !== undefined && <Body>Historical gates suggest a {result.forecastTransferMinutes} min airport route. The risk estimate allows for whichever route requires more time, including boarding.</Body>}
+              <ConnectionGate direction="arrival" reported={result.arrivalGate ?? inbound.arrivalGate} prediction={result.arrivalGatePrediction} />
+              <ConnectionGate direction="departure" reported={result.departureGate ?? outbound.departureGate} prediction={result.departureGatePrediction} />
+              {result.instructions?.map((instruction, index) => <Body key={index}>{instruction}</Body>)}
+              <Action secondary label={airportMap ? `Open ${result.airport} terminal map` : `Open ${result.airport} in maps`} onPress={() => {
+                const place = encodeURIComponent(`${result.airport} airport`);
+                const fallback = Platform.OS === 'ios' ? `https://maps.apple.com/?q=${place}`
+                  : `https://www.google.com/maps/search/?api=1&query=${place}`;
+                Linking.openURL(airportMap ?? fallback).catch((cause: unknown) => setIssue(errorText(cause)));
+              }} />
+              {airportGuide && <Action secondary label={`Open ${result.airport} transfer guide`} onPress={() => {
+                Linking.openURL(airportGuide).catch((cause: unknown) => setIssue(errorText(cause)));
+              }} />}
+            </>
+          )}
+          {(result.monitoring || (result.guidanceAvailable !== false && result.monitorEligible)) && (
             <>
               <Heading>Connection alerts</Heading>
               <Body>{result.monitoring ? 'Plano is monitoring this connection for worsening risk.' : 'Monitor this connection to get an alert if its risk worsens.'}</Body>
