@@ -250,35 +250,37 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
     const subscription = AppState.addEventListener('focus', refreshWidgetPin);
     return () => subscription.remove();
   }, [widgetEligible, refreshWidgetPin]);
-  const weather = detail?.weather?.filter((report) => Date.parse(report.validUntil) > Date.now()) ?? [];
-  const forecasts = value?.tracked && !savedAt && !error && !rotationOf && !rotationSnapshot && detail?.flight.id === id
-    ? detail.weatherForecasts : undefined;
+  const liveDetail = !savedAt && !error && !rotationSnapshot && detail?.flight.id === id ? detail : undefined;
+  const trackedDetail = value?.tracked ? liveDetail : undefined;
+  const reports = trackedDetail?.weather;
+  const weatherRows = useMemo(() => reports?.map((report) => ({ report, expires: Date.parse(report.validUntil) })) ?? [], [reports]);
+  const forecasts = rotationOf ? undefined : trackedDetail?.weatherForecasts;
   const forecastRows = useMemo(() => forecasts?.map((forecast) => ({
     forecast, issued: Date.parse(forecast.issuedAt), starts: Date.parse(forecast.startsAt), expires: Date.parse(forecast.endsAt),
   })) ?? [], [forecasts]);
-  const notices = value?.tracked && detail?.flight.id === id ? detail.notices : undefined;
+  const notices = trackedDetail?.notices;
   const noticeRows = useMemo(() => notices?.slice(0, 8).map((notice) => ({ notice, expires: Date.parse(notice.validUntil) })) ?? [], [notices]);
-  const slots = value?.tracked && !savedAt && !error && !rotationSnapshot && detail?.flight.id === id && flight &&
+  const slots = trackedDetail && flight &&
     !flight.actualTakeoff && !flight.actualLanding && !flight.actualArrival &&
-    !['airborne', 'landed', 'arrived', 'cancelled', 'diverted'].includes(flight.status) ? detail.atfmSlots : undefined;
+    !['airborne', 'landed', 'arrived', 'cancelled', 'diverted'].includes(flight.status) ? trackedDetail.atfmSlots : undefined;
   const slotRows = useMemo(() => slots?.map((slot) => ({
     slot, takeoff: Date.parse(slot.takeoffAt), observed: Date.parse(slot.observedAt), expires: Date.parse(slot.validUntil),
   })) ?? [], [slots]);
-  const predictionExpiry = detail?.prediction?.validUntil;
+  const predictionExpiry = liveDetail?.prediction?.validUntil;
   const predictionExpiresAt = predictionExpiry === undefined ? Infinity : Date.parse(predictionExpiry);
-  const historicalRisk = !savedAt && !error && !rotationOf && !rotationSnapshot && detail?.flight.id === id
-    ? detail.historicalDepartureRisk : undefined;
+  const historicalRisk = rotationOf ? undefined : liveDetail?.historicalDepartureRisk;
   const historicalRiskExpiresAt = validHistoricalDepartureRisk(historicalRisk) && flight &&
     (flight.status === 'scheduled' || flight.status === 'boarding') &&
     !flight.actualDeparture && !flight.actualTakeoff && !flight.actualLanding && !flight.actualArrival
     ? Date.parse(flight.scheduledDeparture ?? '') : NaN;
   const expiries = useMemo(() => [predictionExpiresAt, historicalRiskExpiresAt,
-    ...noticeRows.map(({ expires }) => expires), ...slotRows.map(({ expires }) => expires),
+    ...weatherRows.map(({ expires }) => expires), ...noticeRows.map(({ expires }) => expires), ...slotRows.map(({ expires }) => expires),
     ...forecastRows.flatMap(({ issued, expires }) => [issued, expires])]
-    .filter(Number.isFinite), [predictionExpiresAt, historicalRiskExpiresAt, noticeRows, slotRows, forecastRows]);
+    .filter(Number.isFinite), [predictionExpiresAt, historicalRiskExpiresAt, weatherRows, noticeRows, slotRows, forecastRows]);
   const now = useExpiryClock(expiries);
-  const prediction = predictionExpiresAt > now ? detail?.prediction : undefined;
+  const prediction = predictionExpiresAt > now ? liveDetail?.prediction : undefined;
   const currentHistoricalRisk = historicalRiskExpiresAt > now ? historicalRisk : undefined;
+  const weather = weatherRows.filter(({ expires }) => expires > now).map(({ report }) => report);
   const currentNotices = noticeRows.filter(({ expires }) => expires > now).map(({ notice }) => notice);
   const currentSlots = slotRows.filter(({ takeoff, expires }) => Number.isFinite(takeoff) && expires > now);
   const currentForecasts = forecastRows.filter(({ issued, starts, expires }) => issued <= now && starts < expires && expires > now);
