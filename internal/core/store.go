@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -87,6 +86,8 @@ CREATE TABLE IF NOT EXISTS flights (
   id TEXT PRIMARY KEY, snapshot TEXT NOT NULL, observed_ns INTEGER NOT NULL,
   telemetry TEXT NOT NULL DEFAULT '[]', inbound TEXT NOT NULL DEFAULT '[]', prediction TEXT NOT NULL DEFAULT 'null'
 );
+CREATE INDEX IF NOT EXISTS flights_by_inbound_id ON flights(json_extract(snapshot,'$.inboundId'))
+WHERE json_extract(snapshot,'$.inboundId') IS NOT NULL;
 CREATE TABLE IF NOT EXISTS flight_estimate_anchors (
   flight_id TEXT PRIMARY KEY REFERENCES flights(id) ON DELETE CASCADE,
   departure DATETIME, arrival DATETIME
@@ -449,6 +450,7 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 	var raw, oldInbound, oldPrediction, oldTrack []byte
 	var estimateAnchors estimateAlertAnchors
 	var previousProvider, lastRadarTail string
+	var retainedDirect bool
 	provider := flight.AeroProviderID()
 	err = tx.QueryRowContext(ctx, `SELECT snapshot,inbound,prediction,telemetry,
 COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id),''),
@@ -506,6 +508,12 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 			if err := json.Unmarshal(oldInbound, &inbound); err != nil {
 				return err
 			}
+			retainedDirect = trackedRefresh && len(inbound) != 0 && isExactAeroInbound(flight, inbound[0]) && inbound[0].ObservedAt.After(flight.ObservedAt)
+		} else if trackedRefresh {
+			inbound, retainedDirect, err = keepNewerAeroInbound(flight, inbound, oldInbound)
+			if err != nil {
+				return err
+			}
 		}
 
 	}
@@ -517,7 +525,17 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 	}
 	var predictionValue *Prediction
 	if trackedRefresh || prior.ID == "" {
+		var advisoryDeadlines map[forecastAdvisory]time.Time
+		if retainedDirect {
+			// This poll crossed a callback commit. Use its current cache instead
+			// of the advisory snapshot taken before the network fetch.
+			advisories, advisoryDeadlines, err = readCurrentFlightAdvisories(ctx, tx, flight, decisionAt)
+			if err != nil {
+				return err
+			}
+		}
 		predictionValue = PredictWithModel(s.delayModel, flight, inbound, advisories, decisionAt)
+		capCachedAdvisoryValidity(predictionValue, advisoryDeadlines)
 	}
 	sameSchedule := prior.ScheduledDeparture != nil && flight.ScheduledDeparture != nil && prior.ScheduledDeparture.Equal(*flight.ScheduledDeparture)
 	if sameSchedule && (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flightBeforeDeparture(flight) {
@@ -608,28 +626,13 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 				return err
 			}
 		}
-		var old *Prediction
-		if err := json.Unmarshal(oldPrediction, &old); err != nil {
+		event, cleared, err := delayForecastTransition(ctx, tx, prior, flight, oldInbound, oldPrediction, predictionValue, decisionAt, sameSchedule)
+		if err != nil {
 			return err
 		}
-		var inboundForecastExpired bool
-		if old != nil && predictionValue != nil && sameSchedule && usesInboundTiming(old) {
-			var previousRotation []feeds.Flight
-			if err := json.Unmarshal(oldInbound, &previousRotation); err != nil {
-				return err
-			}
-			// Recovery can replace an expired warning even if the minutes hardly change.
-			_, valid := predictionValidity(old, prior, previousRotation, decisionAt)
-			inboundForecastExpired = !valid
-		}
-		predictionCleared = old != nil && old.DelayMinutes >= flightDelayAlertMinutes &&
-			(!sameSchedule || inboundForecastExpired || predictionValue == nil || predictionValue.DelayMinutes < flightDelayAlertMinutes ||
-				old.DelayMinutes-predictionValue.DelayMinutes >= flightDelayAlertMinutes)
-		if predictionValue != nil && predictionValue.DelayMinutes >= flightDelayAlertMinutes &&
-			(!sameSchedule || inboundForecastExpired || old == nil || predictionValue.DelayMinutes >= old.DelayMinutes+flightDelayAlertMinutes ||
-				!slices.Equal(predictionValue.Reasons, old.Reasons)) {
-			events = append(events, Event{Kind: "delay_prediction", Title: "Departure delay predicted", Body: fmt.Sprintf("%s · %d min later", flight.Number, predictionValue.DelayMinutes),
-				At: flight.ObservedAt, validUntil: predictionValue.ValidUntil, advisoryEvidence: predictionValue.AdvisoryEvidence})
+		predictionCleared = cleared
+		if event.Kind != "" {
+			events = append(events, event)
 		}
 	}
 	if prior.ID != "" {

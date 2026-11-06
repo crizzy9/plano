@@ -12,7 +12,9 @@ For automatic registration in live mode, set `PLANO_AERO_SUBSCRIPTIONS=true`, co
 
 `PLANO_AERO_SUBSCRIPTIONS_MAX` defaults to `10` and accepts `1` to `50` managed scopes. `PLANO_AERO_SUBSCRIPTIONS_INTERVAL` defaults to `5m` and accepts `1m` to `1h`. Each pass issues at most eight provider requests and two creates. Registrations use FlightAware's `max_weekly=64` estimate gate. Provider terms, quotas, and actual delivery still apply. Periodic polling covers same-day flights, unsupported scopes, and provider failures. Plano verifies ownership before retiring a registration. Turning the reconciler off stops provider mutations. Existing date-bounded subscriptions may remain visible in the account.
 
-Plano responds with HTTP `200` after durably accepting a tracked flight's refresh hint. Untracked or provider-blocked flights also receive `200` without a refresh. The provider callback has no issue time or delivery ID, so its flight fields do not update the timeline directly. A leased worker fetches the current FlightAware record by instance ID, then writes changes and push jobs transactionally. A callback arriving during the fetch schedules another refresh. Periodic polling remains enabled.
+Plano responds with HTTP `200` after durably accepting an eligible refresh hint. Unknown or provider-blocked flights also receive `200` without a refresh. The provider callback has no issue time or delivery ID, so Plano uses the instance ID to fetch the authoritative FlightAware record. A leased worker writes changes and push jobs transactionally. A callback arriving during the fetch schedules another refresh. Periodic polling remains enabled.
+
+An existing subscription can also deliver an update for a direct inbound flight that AeroAPI explicitly links to an active tracked departure. Plano uses the fetched inbound record to update the rotation and forecast with current cached airport advisories. It retains the onward flight's observation timestamp. The managed reconciler registers individually tracked flights. An inbound-only leg receives callbacks when a provider subscription already covers it.
 
 ## FAA SWIM and EUROCONTROL bridges
 

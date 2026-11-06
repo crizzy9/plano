@@ -17,13 +17,32 @@ const aeroTargetsSQL = `SELECT f.id FROM flights f WHERE EXISTS(SELECT 1 FROM tr
 AND (f.id IN (SELECT flight_id FROM aero_instance_keys WHERE provider_id=?) OR
 (f.id=? AND json_extract(f.snapshot,'$.source')='flightaware_aeroapi' AND NOT EXISTS(SELECT 1 FROM aero_instance_keys WHERE flight_id=f.id)))`
 
-// QueueAeroRefresh persists an authenticated callback hint for an already tracked
-// flight. A hint received while a fetch is leased advances its generation.
+// Only an explicit direct link from a tracked, predeparture flight authorizes
+// an inbound callback. A cached first leg must agree with that link.
+const aeroInboundTargetsSQL = `SELECT f.id FROM flights f
+WHERE json_extract(f.snapshot,'$.inboundId')=?
+AND json_extract(f.snapshot,'$.source') IN ('flightaware_aeroapi','flightaware_schedule')
+AND julianday(json_extract(f.snapshot,'$.scheduledDeparture')) BETWEEN julianday(?) AND julianday(?)
+AND json_extract(f.snapshot,'$.inboundId')<>f.id
+AND NOT EXISTS(SELECT 1 FROM aero_instance_keys k WHERE k.flight_id=f.id AND k.provider_id=json_extract(f.snapshot,'$.inboundId'))
+AND COALESCE(json_extract(f.inbound,'$[0].id'),'') IN ('',json_extract(f.snapshot,'$.inboundId'))
+AND json_extract(f.snapshot,'$.status') NOT IN ('cancelled','taxi_out','airborne','landed','arrived','diverted')
+AND json_extract(f.snapshot,'$.actualDeparture') IS NULL AND json_extract(f.snapshot,'$.actualTakeoff') IS NULL
+AND json_extract(f.snapshot,'$.actualLanding') IS NULL AND json_extract(f.snapshot,'$.actualArrival') IS NULL
+AND EXISTS(SELECT 1 FROM tracked t WHERE t.flight_id=f.id)`
+
+func aeroInboundTargetArgs(providerID string, now time.Time) []any {
+	return []any{providerID, now.Add(-6 * time.Hour).Format(time.RFC3339Nano), now.Add(25 * time.Hour).Format(time.RFC3339Nano)}
+}
+
+// QueueAeroRefresh persists an authenticated hint for a tracked flight or its
+// direct inbound. A hint received while a fetch is leased advances its generation.
 func (s *Store) QueueAeroRefresh(ctx context.Context, providerID string, now time.Time) error {
+	args := append([]any{providerID, now.UnixNano(), providerID, providerID}, aeroInboundTargetArgs(providerID, now)...)
 	result, err := s.db.ExecContext(ctx, `INSERT INTO aero_refresh_jobs(provider_id,generation,due_ns)
-SELECT ?,1,? WHERE EXISTS(`+aeroTargetsSQL+`)
+SELECT ?,1,? WHERE EXISTS(`+aeroTargetsSQL+`) OR EXISTS(`+aeroInboundTargetsSQL+`)
 ON CONFLICT(provider_id) DO UPDATE SET generation=aero_refresh_jobs.generation+1,
-due_ns=CASE WHEN aero_refresh_jobs.lease_ns=0 THEN MIN(aero_refresh_jobs.due_ns,excluded.due_ns) ELSE aero_refresh_jobs.due_ns END`, providerID, now.UnixNano(), providerID, providerID)
+due_ns=CASE WHEN aero_refresh_jobs.lease_ns=0 THEN MIN(aero_refresh_jobs.due_ns,excluded.due_ns) ELSE aero_refresh_jobs.due_ns END`, args...)
 	if err != nil {
 		return err
 	}
@@ -83,23 +102,31 @@ WHERE provider_id=? AND lease_ns=?`, job.generation, due.UnixNano(), now.UnixNan
 }
 
 func (s *Store) refreshAeroFlight(ctx context.Context, source feeds.FlightSource, providerID string) error {
-	rows, err := s.db.QueryContext(ctx, aeroTargetsSQL, providerID, providerID)
+	args := append([]any{providerID, providerID}, aeroInboundTargetArgs(providerID, time.Now())...)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,0 FROM (`+aeroTargetsSQL+`)
+UNION ALL SELECT '',1 WHERE EXISTS(`+aeroInboundTargetsSQL+`)`, args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	var ids []string
+	var hasInboundTargets bool
 	for rows.Next() {
 		var id string
-		if err := rows.Scan(&id); err != nil {
+		var inbound bool
+		if err := rows.Scan(&id, &inbound); err != nil {
 			return err
 		}
-		ids = append(ids, id)
+		if inbound {
+			hasInboundTargets = true
+		} else {
+			ids = append(ids, id)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if err := rows.Close(); err != nil || len(ids) == 0 {
+	if err := rows.Close(); err != nil || len(ids) == 0 && !hasInboundTargets {
 		return err
 	}
 	flight, err := source.Get(ctx, providerID)
@@ -110,10 +137,14 @@ func (s *Store) refreshAeroFlight(ctx context.Context, source feeds.FlightSource
 		return feeds.ErrUnavailable
 	}
 	for _, id := range ids {
-		flight.ID = id
-		if err := s.observe(ctx, flight, nil, nil, nil, false, providerID); err != nil {
+		direct := flight
+		direct.ID = id
+		if err := s.observe(ctx, direct, nil, nil, nil, false, providerID); err != nil {
 			return err
 		}
+	}
+	if hasInboundTargets {
+		return s.applyAeroInbound(ctx, providerID, flight, time.Now())
 	}
 	return nil
 }

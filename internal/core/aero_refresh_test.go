@@ -1,7 +1,11 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -70,6 +74,178 @@ func TestAeroHintPersistsAndRequeuesNewGeneration(t *testing.T) {
 	if job, err := s.claimAeroRefresh(ctx, later); err != nil || job != nil {
 		t.Fatalf("backoff job %v %v", job, err)
 	}
+}
+
+func TestAeroInboundHintRequiresEligibleDirectLink(t *testing.T) {
+	const providerID = "AAL32-1"
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name    string
+		untrack bool
+		change  func(*feeds.Flight, *[]feeds.Flight)
+		want    bool
+	}{
+		{name: "explicit link before rotation is cached", want: true},
+		{name: "matching first leg", change: func(_ *feeds.Flight, rotation *[]feeds.Flight) {
+			*rotation = []feeds.Flight{{ID: providerID}}
+		}, want: true},
+		{name: "matching older leg only", change: func(_ *feeds.Flight, rotation *[]feeds.Flight) {
+			*rotation = []feeds.Flight{{ID: "AAL31-1"}, {ID: providerID}}
+		}},
+		{name: "inferred link only", change: func(onward *feeds.Flight, rotation *[]feeds.Flight) {
+			onward.InboundID = ""
+			*rotation = []feeds.Flight{{ID: providerID}}
+		}},
+		{name: "unknown instance", change: func(onward *feeds.Flight, _ *[]feeds.Flight) {
+			onward.InboundID = "AAL31-1"
+		}},
+		{name: "untracked onward", untrack: true},
+		{name: "non-AeroAPI onward", change: func(onward *feeds.Flight, _ *[]feeds.Flight) {
+			onward.Source = "demo"
+		}},
+		{name: "old onward", change: func(onward *feeds.Flight, _ *[]feeds.Flight) {
+			onward.ScheduledDeparture = new(now.Add(-7 * time.Hour))
+		}},
+		{name: "far future onward", change: func(onward *feeds.Flight, _ *[]feeds.Flight) {
+			onward.ScheduledDeparture = new(now.Add(26 * time.Hour))
+		}},
+		{name: "already left the gate", change: func(onward *feeds.Flight, _ *[]feeds.Flight) {
+			onward.ActualDeparture = new(now.Add(-time.Minute))
+		}},
+		{name: "cancelled onward", change: func(onward *feeds.Flight, _ *[]feeds.Flight) {
+			onward.Status = "cancelled"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			s, err := Open(filepath.Join(t.TempDir(), "inbound-hint.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			onward := feeds.Flight{ID: "AAL33-1", Source: "flightaware_aeroapi", Status: "scheduled", InboundID: providerID,
+				ScheduledDeparture: new(now.Add(time.Hour)), ObservedAt: now}
+			var rotation []feeds.Flight
+			if tc.change != nil {
+				tc.change(&onward, &rotation)
+			}
+			if err := s.Observe(ctx, onward, nil, rotation, nil); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.untrack {
+				trackAeroCallbackFixture(t, s, onward.ID)
+			}
+			if err := s.QueueAeroRefresh(ctx, providerID, now); err != nil {
+				t.Fatal(err)
+			}
+			job, err := s.claimAeroRefresh(ctx, now)
+			if err != nil || (job != nil) != tc.want || job != nil && job.providerID != providerID {
+				t.Fatalf("inbound job = %+v, want queued %v: %v", job, tc.want, err)
+			}
+			if !tc.want {
+				source := new(countingAeroSource)
+				if err := s.refreshAeroFlight(ctx, source, providerID); err != nil || len(source.ids) != 0 {
+					t.Fatalf("ineligible inbound fetches = %v: %v", source.ids, err)
+				}
+			}
+		})
+	}
+}
+
+func TestAeroCallbackSharesOneFetchWithDirectAliasAndOnward(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(filepath.Join(t.TempDir(), "inbound-fetch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC().Add(-time.Minute)
+	inbound := feeds.Flight{ID: "AAL32-1", Number: "AA32", Source: "flightaware_aeroapi", Status: "airborne",
+		Origin: "ORD", Destination: "JFK", TailNumber: "N123AA", ObservedAt: now.Add(-time.Minute),
+		ScheduledDeparture: new(now.Add(-3 * time.Hour)), ActualTakeoff: new(now.Add(-2 * time.Hour)),
+		ScheduledArrival: new(now.Add(15 * time.Minute)), EstimatedArrival: new(now.Add(15 * time.Minute))}
+	onward := feeds.Flight{ID: "AAL33-1", Number: "AA33", Source: "flightaware_aeroapi", Status: "scheduled", InboundID: inbound.ID,
+		Origin: "JFK", Destination: "BOS", TailNumber: inbound.TailNumber, ObservedAt: inbound.ObservedAt,
+		ScheduledDeparture: new(now.Add(time.Hour))}
+	if err := s.Observe(ctx, onward, nil, []feeds.Flight{inbound}, nil); err != nil {
+		t.Fatal(err)
+	}
+	trackAeroCallbackFixture(t, s, onward.ID)
+	local := inbound
+	local.ID, local.Source = "local-inbound-alias", "flightaware_schedule"
+	if err := s.Observe(ctx, local, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	trackAeroCallbackFixture(t, s, local.ID)
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO aero_instance_keys VALUES(?,?)`, inbound.ID, local.ID); err != nil {
+		t.Fatal(err)
+	}
+	freshArrival := now.Add(35 * time.Minute)
+	body, err := json.Marshal(map[string]any{"flights": []map[string]any{{
+		"fa_flight_id": inbound.ID, "ident_iata": inbound.Number, "registration": inbound.TailNumber,
+		"origin": map[string]string{"code_iata": inbound.Origin}, "destination": map[string]string{"code_iata": inbound.Destination},
+		"scheduled_out": inbound.ScheduledDeparture, "actual_off": inbound.ActualTakeoff,
+		"scheduled_in": inbound.ScheduledArrival, "estimated_in": freshArrival,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	source := feeds.NewAeroAPI("test-key", &http.Client{Transport: aeroCallbackTransport(func(r *http.Request) (*http.Response, error) {
+		paths = append(paths, r.URL.Path)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body))}, nil
+	})})
+	if err := s.refreshAeroFlight(ctx, source, inbound.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || paths[0] != "/aeroapi/flights/"+inbound.ID {
+		t.Fatalf("expected one provider fetch, got %v", paths)
+	}
+	direct, err := s.Flight(ctx, local.ID)
+	if err != nil || !direct.ObservedAt.After(inbound.ObservedAt) || direct.EstimatedArrival == nil || !direct.EstimatedArrival.Equal(freshArrival) {
+		t.Fatalf("direct alias did not receive the refresh: %+v, %v", direct, err)
+	}
+	var alias string
+	if err := s.db.QueryRowContext(ctx, `SELECT provider_id FROM aero_instance_keys WHERE flight_id=?`, local.ID).Scan(&alias); err != nil || alias != inbound.ID {
+		t.Fatalf("direct alias changed to %q: %v", alias, err)
+	}
+	details, err := s.Details(ctx, onward.ID)
+	if err != nil || !details.Flight.ObservedAt.Equal(onward.ObservedAt) || len(details.Inbound) != 1 ||
+		details.Inbound[0].ID != inbound.ID || !details.Inbound[0].ObservedAt.Equal(direct.ObservedAt) {
+		t.Fatalf("onward did not receive the same provider revision: %+v, %v", details, err)
+	}
+}
+
+func trackAeroCallbackFixture(t *testing.T, s *Store, flightID string) {
+	t.Helper()
+	ctx := t.Context()
+	token, err := s.CreateInstallation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := s.Installation(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Track(ctx, owner, flightID, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type countingAeroSource struct {
+	feeds.FlightSource
+	ids []string
+}
+
+func (source *countingAeroSource) Get(_ context.Context, id string) (feeds.Flight, error) {
+	source.ids = append(source.ids, id)
+	return feeds.Flight{}, feeds.ErrUnavailable
+}
+
+type aeroCallbackTransport func(*http.Request) (*http.Response, error)
+
+func (transport aeroCallbackTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return transport(r)
 }
 
 type gatedAeroSource struct {

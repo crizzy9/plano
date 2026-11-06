@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -111,26 +112,7 @@ func (s *Store) FlightNotices(ctx context.Context, flight feeds.Flight, now time
 	if departure == nil && arrival == nil {
 		return notices, nil
 	}
-	// Compare revisions before checking freshness or applicability. An expired
-	// or cancelled revision can supersede an earlier notice that still matches.
-	t := now.UnixNano()
-	rows, err := s.db.QueryContext(ctx, `WITH current_signed AS NOT MATERIALIZED (`+currentPushedAdvisories+`)
-SELECT source,id,observed_ns,expires_ns,data FROM (
-  SELECT p.source,p.id,p.observed_ns,p.expires_ns,p.data FROM polled_flight_notices p
-  WHERE p.airport IN (?,?,?,?) AND p.airport<>'' AND p.expires_ns>? AND p.observed_ns<=?
-    AND NOT EXISTS (SELECT 1 FROM current_signed a WHERE a.source=p.source AND a.id=p.id AND a.observed_ns>=p.observed_ns)
-  UNION ALL
-  SELECT a.source,a.id,a.observed_ns,a.expires_ns,a.data FROM current_signed a
-  WHERE json_extract(a.data,'$.airport') IN (?,?,?,?) AND json_extract(a.data,'$.airport')<>''
-    AND a.expires_ns>?
-    AND NOT EXISTS (SELECT 1 FROM polled_flight_notices p WHERE p.source=a.source AND p.id=a.id
-                    AND p.observed_ns>a.observed_ns AND p.observed_ns<=?)
-) AS c WHERE NOT EXISTS (SELECT 1 FROM advisory_supersessions r WHERE r.source=c.source
-  AND r.airport=json_extract(c.data,'$.airport') AND r.predecessor_id=c.id AND r.observed_ns BETWEEN c.observed_ns AND ?)
-ORDER BY observed_ns DESC,source,id`,
-		t, t, t,
-		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t,
-		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t, t)
+	rows, err := currentFlightAdvisoryRows(ctx, s.db, flight, now)
 	if err != nil {
 		return nil, err
 	}
@@ -187,6 +169,69 @@ ORDER BY observed_ns DESC,source,id`,
 		}
 	}
 	return notices, rows.Err()
+}
+
+type flightAdvisoryRowsQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func currentFlightAdvisoryRows(ctx context.Context, db flightAdvisoryRowsQueryer, flight feeds.Flight, now time.Time) (*sql.Rows, error) {
+	// Compare revisions before checking freshness or applicability. An expired
+	// or cancelled revision can supersede an earlier notice that still matches.
+	t := now.UnixNano()
+	return db.QueryContext(ctx, `WITH current_signed AS NOT MATERIALIZED (`+currentPushedAdvisories+`)
+SELECT source,id,observed_ns,expires_ns,data FROM (
+  SELECT p.source,p.id,p.observed_ns,p.expires_ns,p.data FROM polled_flight_notices p
+  WHERE p.airport IN (?,?,?,?) AND p.airport<>'' AND p.expires_ns>? AND p.observed_ns<=?
+    AND NOT EXISTS (SELECT 1 FROM current_signed a WHERE a.source=p.source AND a.id=p.id AND a.observed_ns>=p.observed_ns)
+  UNION ALL
+  SELECT a.source,a.id,a.observed_ns,a.expires_ns,a.data FROM current_signed a
+  WHERE json_extract(a.data,'$.airport') IN (?,?,?,?) AND json_extract(a.data,'$.airport')<>''
+    AND a.expires_ns>?
+    AND NOT EXISTS (SELECT 1 FROM polled_flight_notices p WHERE p.source=a.source AND p.id=a.id
+                    AND p.observed_ns>a.observed_ns AND p.observed_ns<=?)
+) AS c WHERE NOT EXISTS (SELECT 1 FROM advisory_supersessions r WHERE r.source=c.source
+  AND r.airport=json_extract(c.data,'$.airport') AND r.predecessor_id=c.id AND r.observed_ns BETWEEN c.observed_ns AND ?)
+ORDER BY observed_ns DESC,source,id`,
+		t, t, t,
+		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t,
+		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t, t)
+}
+
+func readCurrentFlightAdvisories(ctx context.Context, tx *sql.Tx, flight feeds.Flight, now time.Time) ([]feeds.Advisory, map[forecastAdvisory]time.Time, error) {
+	rows, err := currentFlightAdvisoryRows(ctx, tx, flight, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var advisories []feeds.Advisory
+	deadlines := make(map[forecastAdvisory]time.Time)
+	for rows.Next() {
+		var source, id string
+		var observed, expires int64
+		var raw []byte
+		if err := rows.Scan(&source, &id, &observed, &expires, &raw); err != nil {
+			return nil, nil, err
+		}
+		var advisory feeds.Advisory
+		if err := json.Unmarshal(raw, &advisory); err != nil {
+			return nil, nil, err
+		}
+		advisories = append(advisories, advisory)
+		deadlines[advisoryEvidence(advisory)] = time.Unix(0, expires).UTC()
+	}
+	return advisories, deadlines, rows.Err()
+}
+
+func capCachedAdvisoryValidity(forecast *Prediction, deadlines map[forecastAdvisory]time.Time) {
+	if forecast == nil {
+		return
+	}
+	for _, evidence := range forecast.AdvisoryEvidence {
+		if deadline, ok := deadlines[evidence]; ok {
+			forecast.ValidUntil = earliestValidity(forecast.ValidUntil, deadline)
+		}
+	}
 }
 
 func upcomingNoticeOperations(flight feeds.Flight) (departure, arrival *time.Time) {

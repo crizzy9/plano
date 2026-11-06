@@ -263,7 +263,8 @@ func inboundLeg(flight feeds.Flight, rotation []feeds.Flight, now time.Time) (le
 	scheduled := *flight.ScheduledDeparture
 	if arrival == nil || arrival.IsZero() || arrival.Before(scheduled.Add(-25*time.Hour)) ||
 		leg.ScheduledArrival != nil && leg.ScheduledArrival.After(scheduled) ||
-		leg.ScheduledArrival == nil && !linked && arrival.After(scheduled) {
+		leg.ScheduledArrival == nil && !linked && arrival.After(scheduled) ||
+		!inboundChronologyCompatible(*leg, *arrival, scheduled) {
 		return nil, nil, nil
 	}
 	if leg.ActualArrival != nil {
@@ -277,6 +278,15 @@ func inboundLeg(flight feeds.Flight, rotation []feeds.Flight, now time.Time) (le
 		return nil, nil, nil
 	}
 	return leg, arrival, validUntil
+}
+
+func inboundChronologyCompatible(leg feeds.Flight, arrival, onwardDeparture time.Time) bool {
+	departure := firstTime(leg.ScheduledDeparture, leg.ActualDeparture, leg.ActualTakeoff, leg.EstimatedDeparture)
+	if departure != nil && (!departure.Before(onwardDeparture) || arrival.Before(*departure)) {
+		return false
+	}
+	actualDeparture := firstTime(leg.ActualDeparture, leg.ActualTakeoff)
+	return actualDeparture == nil || !arrival.Before(*actualDeparture)
 }
 
 func inboundArrival(leg feeds.Flight) (arrival *time.Time, estimated bool) {

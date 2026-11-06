@@ -120,6 +120,77 @@ func TestAeroCallbackDrivesOutboxFromAuthoritativeFlight(t *testing.T) {
 	}
 }
 
+func TestAeroInboundCallbackUpdatesOnwardForecastWithoutPolling(t *testing.T) {
+	store, err := core.Open(filepath.Join(t.TempDir(), "inbound-callback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	now := time.Now().UTC()
+	onward := feeds.Flight{ID: "UAL88-onward", Source: "flightaware_aeroapi", Number: "UA88", Origin: "SFO", OriginICAO: "KSFO",
+		Destination: "EWR", Status: "scheduled", InboundID: "UAL87-inbound", TailNumber: "N123AA",
+		ScheduledDeparture: new(now.Add(time.Hour)), ObservedAt: now.Add(-2 * time.Minute)}
+	owner := trackTestFlight(t, store, onward)
+	if err := store.Register(ctx, owner, core.Device{Platform: "ios", Kind: "alert", Token: "inbound-device"}, now); err != nil {
+		t.Fatal(err)
+	}
+	advisory := feeds.Advisory{Source: feeds.FAASWIM, ID: "departure-wind", Airport: "KSFO", Kind: "departure_delay", Direction: "departure",
+		Reason: "strong winds", DelayMinutes: new(35), ObservedAt: now.Add(-time.Minute), EndsAt: new(now.Add(2 * time.Hour))}
+	if err := store.PublishAdvisory(ctx, advisory, now); err != nil {
+		t.Fatal(err)
+	}
+	inbound := feeds.Flight{ID: onward.InboundID, Source: "flightaware_aeroapi", Number: "UA87", Origin: "LAX", Destination: "SFO",
+		DestinationICAO: "KSFO", TailNumber: onward.TailNumber, Status: "airborne", ObservedAt: now,
+		ScheduledDeparture: new(now.Add(-time.Hour)), ActualTakeoff: new(now.Add(-30 * time.Minute)),
+		ScheduledArrival: new(now.Add(30 * time.Minute)), EstimatedArrival: new(now.Add(80 * time.Minute))}
+	source := callbackSource{flight: inbound}
+	logger := slog.New(slog.DiscardHandler)
+	key := strings.Repeat("i", 32)
+	handler := api.Server{Store: store, Source: source, AeroCallbackKey: []byte(key), Logger: logger}.Handler()
+	request := httptest.NewRequest(http.MethodPost, "/v1/webhooks/aeroapi", strings.NewReader(
+		`{"alert_id":2,"event_code":"arrival","flight":{"fa_flight_id":"UAL87-inbound","estimated_in":"2026-01-01T00:00:00Z"}}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.SetBasicAuth("plano", key)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("inbound callback = %d %s", response.Code, response.Body)
+	}
+	ended := make(chan struct{}, 2)
+	pushed := make(chan push.Message, 1)
+	go func() { defer func() { ended <- struct{}{} }(); store.RunAeroRefresh(ctx, source, logger) }()
+	go func() {
+		defer func() { ended <- struct{}{} }()
+		store.RunDispatcher(ctx, recordPush(func(ctx context.Context, _ push.Target, message push.Message) error {
+			if message.Title == "Departure delay predicted" {
+				select {
+				case pushed <- message:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return nil
+		}), logger)
+	}()
+	defer func() { cancel(); <-ended; <-ended }()
+	select {
+	case message := <-pushed:
+		if message.FlightID != onward.ID || message.Body != "UA88 · 60 min later" {
+			t.Fatalf("unexpected callback forecast alert: %+v", message)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("direct inbound callback did not dispatch an onward forecast")
+	}
+	details, err := store.Details(ctx, onward.ID)
+	if err != nil || !details.Flight.ObservedAt.Equal(onward.ObservedAt) || details.Flight.Status != onward.Status ||
+		len(details.Inbound) != 1 || details.Inbound[0].ID != inbound.ID || details.Prediction == nil ||
+		details.Prediction.DelayMinutes != 60 || !strings.Contains(strings.Join(details.Prediction.Reasons, " "), "strong winds") {
+		t.Fatalf("unexpected onward details: %+v, %v", details, err)
+	}
+}
+
 func TestSignedAdvisoryQueuesOnceAndDoesNotChangeFlightObservation(t *testing.T) {
 	store, err := core.Open(filepath.Join(t.TempDir(), "advisory.db"))
 	if err != nil {

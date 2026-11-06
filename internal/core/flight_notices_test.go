@@ -20,6 +20,39 @@ func noticeFlight(now time.Time) feeds.Flight {
 		ScheduledArrival: new(now.Add(2 * time.Hour))}
 }
 
+func TestCachedAdvisoryForecastRetainsTheOriginalCacheDeadline(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(filepath.Join(t.TempDir(), "forecast-cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	polledAt := now.Add(-29 * time.Minute)
+	advisory := feeds.Advisory{Source: feeds.FAASWIM, ID: "polled-weather", Airport: "KSFO", Kind: "departure_delay",
+		Direction: "departure", Reason: "strong winds", DelayMinutes: new(45), ObservedAt: polledAt.Add(-time.Minute),
+		EndsAt: new(now.Add(time.Hour))}
+	if err := s.cachePolledFlightNotices(ctx, advisory.Source, []feeds.Advisory{advisory}, polledAt); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	flight := noticeFlight(now)
+	advisories, deadlines, err := readCurrentFlightAdvisories(ctx, tx, flight, now)
+	if err != nil || len(advisories) != 1 {
+		t.Fatalf("cached advisories = %+v, error = %v", advisories, err)
+	}
+	forecast := Predict(flight, nil, advisories, now)
+	capCachedAdvisoryValidity(forecast, deadlines)
+	wantDeadline := polledAt.Add(polledNoticeMaxAge)
+	if forecast == nil || forecast.DelayMinutes != 45 || forecast.ValidUntil == nil || !forecast.ValidUntil.Equal(wantDeadline) {
+		t.Fatalf("forecast = %+v, want 45-minute delay valid until %s", forecast, wantDeadline)
+	}
+}
+
 func TestFlightNoticesMatchPublishedOperationAndWindow(t *testing.T) {
 	ctx := t.Context()
 	s, err := Open(filepath.Join(t.TempDir(), "notices.db"))

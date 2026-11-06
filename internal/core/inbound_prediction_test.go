@@ -35,6 +35,12 @@ func TestPredictionUsesOnlyTheVerifiedDirectInbound(t *testing.T) {
 		{"known conflicting ICAO", func(leg *feeds.Flight) { leg.DestinationICAO = "KOAK" }},
 		{"provider snapshot from the future", func(leg *feeds.Flight) { leg.ObservedAt = now.Add(time.Second) }},
 		{"expired gate estimate", func(leg *feeds.Flight) { leg.ObservedAt = now.Add(-inboundForecastTTL) }},
+		{"inbound departs after onward", func(leg *feeds.Flight) {
+			leg.ScheduledDeparture, leg.EstimatedArrival = new(departure.Add(time.Hour)), new(departure.Add(2*time.Hour))
+		}},
+		{"inbound ETA predates its recorded takeoff", func(leg *feeds.Flight) {
+			leg.ActualTakeoff = new(departure.Add(20 * time.Minute))
+		}},
 		{"diverted", func(leg *feeds.Flight) { leg.Status = "diverted" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
