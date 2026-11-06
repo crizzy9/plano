@@ -172,6 +172,13 @@ func run(logger *slog.Logger) error {
 	if err != nil || interval < 5*time.Second || interval > 30*time.Minute {
 		return errors.New("PLANO_REFRESH_INTERVAL must be between 5s and 30m")
 	}
+	var radarCadence time.Duration
+	if receiver != nil {
+		radarCadence, err = time.ParseDuration(env("PLANO_ADSB_REFRESH_INTERVAL", "5s"))
+		if err != nil || radarCadence < 3*time.Second || radarCadence > time.Minute {
+			return errors.New("PLANO_ADSB_REFRESH_INTERVAL must be between 3s and 60s")
+		}
+	}
 	var delayModel *predict.Model
 	if path := os.Getenv("PLANO_DELAY_MODEL_FILE"); path != "" && !demo {
 		file, err := os.Open(path)
@@ -198,8 +205,11 @@ func run(logger *slog.Logger) error {
 	defer workers.Wait()
 	defer stop()
 	workers.Go(func() {
-		(core.Refresher{Store: store, Flights: flights, Advisories: advisories, Receiver: receiver, Registry: registry, Logger: logger, Interval: interval}).Run(ctx)
+		(core.Refresher{Store: store, Flights: flights, Advisories: advisories, Registry: registry, Logger: logger, Interval: interval}).Run(ctx)
 	})
+	if receiver != nil {
+		workers.Go(func() { store.RunRadar(ctx, receiver, registry, radarCadence, logger) })
+	}
 	if sender.APNs != nil || sender.FCM != nil {
 		workers.Go(func() { store.RunDispatcher(ctx, sender, logger) })
 	}

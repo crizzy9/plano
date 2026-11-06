@@ -232,3 +232,15 @@ for the selected host and alert session. Plano includes it in FCM data. The
 app verifies the binding before displaying a notification or updating its
 widget. Switching servers or turning alerts off invalidates the old binding
 on the device, including while a remote revocation is pending.
+
+## Local radar and sharing
+
+With `PLANO_ADSB_URL` configured, the receiver worker samples matching
+tracked airborne legs every five seconds by default. Set
+`PLANO_ADSB_REFRESH_INTERVAL` between `3s` and `60s` to suit the receiver.
+Plano stops sampling stale flight lifecycle records and retains local points
+for seven days. Flight detail can still show provider track history. Local
+receiver points appear only to the installation tracking the flight.
+
+Friends and pickup links use separate permissions on the same instance.
+[Flight sharing](FLIGHT_SHARING.md)

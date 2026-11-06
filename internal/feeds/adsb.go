@@ -133,7 +133,8 @@ func normalizeRegistration(registration string) string {
 // Match uses aircraft identity and the active flight's known timeframe. A
 // conflicting callsign or registration rules out a point even with a Mode S hit.
 func (s ADSBSnapshot) Match(flight Flight, modeSHex string) (Position, bool) {
-	if flight.Status != "taxi_out" && flight.Status != "airborne" && flight.Status != "landed" {
+	if flight.Status != "taxi_out" && flight.Status != "airborne" && flight.Status != "landed" &&
+		!(flight.Status == "diverted" && flight.ActualTakeoff != nil && flight.ActualLanding == nil && flight.ActualArrival == nil) {
 		return Position{}, false
 	}
 	tail := normalizeRegistration(flight.TailNumber)

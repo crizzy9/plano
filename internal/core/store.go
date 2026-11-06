@@ -156,7 +156,7 @@ CREATE INDEX IF NOT EXISTS bookings_by_locator ON bookings(owner, locator_hash);
 CREATE TABLE IF NOT EXISTS shares (
   token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, flight_id TEXT NOT NULL, expires INTEGER NOT NULL,
   FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
-);`); err != nil {
+);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -292,9 +292,17 @@ func (s *Store) list(ctx context.Context, query string, args ...any) ([]feeds.Fl
 }
 
 func (s *Store) Details(ctx context.Context, id string) (Details, error) {
+	return s.DetailsForInstallation(ctx, "", id)
+}
+
+// DetailsForInstallation adds local receiver positions only while this
+// installation tracks the flight. Provider history retains its existing scope.
+func (s *Store) DetailsForInstallation(ctx context.Context, owner, id string) (Details, error) {
 	d := Details{Events: make([]Event, 0)}
 	var snapshot, telemetry, inbound, prediction []byte
-	err := s.db.QueryRowContext(ctx, `SELECT snapshot,telemetry,inbound,prediction FROM flights WHERE id=?`, id).Scan(&snapshot, &telemetry, &inbound, &prediction)
+	var tracked bool
+	err := s.db.QueryRowContext(ctx, `SELECT snapshot,telemetry,inbound,prediction,
+EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flights WHERE id=?`, owner, id).Scan(&snapshot, &telemetry, &inbound, &prediction, &tracked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return d, ErrNotFound
 	}
@@ -325,7 +333,22 @@ func (s *Store) Details(ctx context.Context, id string) (Details, error) {
 		}
 		d.Events = append(d.Events, event)
 	}
-	return d, rows.Err()
+	if err := rows.Err(); err != nil {
+		return d, err
+	}
+	if err := rows.Close(); err != nil {
+		return d, err
+	}
+	if tracked {
+		local, err := s.radarPositions(ctx, owner, id, nil, 2000)
+		if err != nil {
+			return d, err
+		}
+		d.Telemetry = mergeFlightPositions(d.Telemetry, local)
+	} else {
+		d.Telemetry = slices.DeleteFunc(d.Telemetry, func(p feeds.Position) bool { return p.Source == "operator_readsb" })
+	}
+	return d, nil
 }
 
 func (s *Store) Observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory) error {
@@ -356,7 +379,10 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 	}
 	var prior feeds.Flight
 	var raw, oldInbound, oldPrediction, oldTrack []byte
-	err = tx.QueryRowContext(ctx, `SELECT snapshot,inbound,prediction,telemetry FROM flights WHERE id=?`, flight.ID).Scan(&raw, &oldInbound, &oldPrediction, &oldTrack)
+	var previousProvider string
+	provider := flight.AeroProviderID()
+	err = tx.QueryRowContext(ctx, `SELECT snapshot,inbound,prediction,telemetry,
+COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id),'') FROM flights WHERE id=?`, flight.ID).Scan(&raw, &oldInbound, &oldPrediction, &oldTrack, &previousProvider)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -372,6 +398,24 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 			if inbound == nil {
 				inbound = make([]feeds.Flight, 0)
 			}
+		}
+		providerChanged := previousProvider != "" && provider != "" && provider != previousProvider
+		aircraftChanged := prior.TailNumber != "" && flight.TailNumber != "" && prior.TailNumber != flight.TailNumber
+		if aircraftChanged || providerChanged {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM radar_positions WHERE flight_id=?`, flight.ID); err != nil {
+				return err
+			}
+			if track == nil && providerChanged {
+				track = make([]feeds.Position, 0)
+			}
+			// Do not keep legacy receiver fixes attributed to the previous aircraft.
+			if track == nil && len(oldTrack) > 0 {
+				if err := json.Unmarshal(oldTrack, &track); err != nil {
+					return err
+				}
+				track = slices.DeleteFunc(track, func(p feeds.Position) bool { return p.Source == "operator_readsb" })
+			}
+			oldTrack = nil
 		}
 		if flight.AircraftAge == nil && flight.TailNumber != "" && flight.TailNumber == prior.TailNumber {
 			flight.AircraftAge = prior.AircraftAge
@@ -441,7 +485,7 @@ snapshot=excluded.snapshot, observed_ns=excluded.observed_ns, telemetry=COALESCE
 		return err
 	}
 
-	if provider := flight.AeroProviderID(); provider != "" {
+	if provider != "" {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO aero_instance_keys(provider_id,flight_id) VALUES(?,?)
 ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider, flight.ID); err != nil {
 			return err
@@ -522,19 +566,6 @@ func truncate(s string, n int) string {
 }
 
 func (s *Store) Health(ctx context.Context) error { return s.db.PingContext(ctx) }
-
-func (s *Store) Share(ctx context.Context, owner, id string, expires time.Time) (string, error) {
-	token := randomToken()
-	result, err := s.db.ExecContext(ctx, `INSERT INTO shares SELECT ?,owner,flight_id,? FROM tracked WHERE owner=? AND flight_id=?`, hash(token), expires.UnixNano(), owner, id)
-	if err != nil {
-		return "", err
-	}
-	n, err := result.RowsAffected()
-	if err == nil && n == 0 {
-		err = ErrNotFound
-	}
-	return token, err
-}
 
 func (s *Store) Shared(ctx context.Context, token string, now time.Time) (feeds.Flight, error) {
 	var flight feeds.Flight

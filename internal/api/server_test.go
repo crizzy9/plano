@@ -61,7 +61,7 @@ func TestSelfHostedTrackingPersistsAndSharesStayScoped(t *testing.T) {
 	}
 	call("POST", "/v1/tracked", owner, track, 204)
 	call("POST", "/v1/shares", other, track, 404)
-	var share struct{ URL string }
+	var share struct{ ID, URL string }
 	if err := json.Unmarshal(call("POST", "/v1/shares", owner, track, 201).Body.Bytes(), &share); err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +88,24 @@ func TestSelfHostedTrackingPersistsAndSharesStayScoped(t *testing.T) {
 	}
 	if page := call("GET", link.Path, "", "", 200); !strings.Contains(page.Body.String(), "SFO to EWR") || !strings.Contains(page.Body.String(), "Synthetic demo flight") {
 		t.Fatal(page.Body.String())
+	}
+	links := call("GET", "/v1/shares?flightId="+id, owner, "", 200).Body.String()
+	if !strings.Contains(links, share.ID) || strings.Contains(links, link.Path) {
+		t.Fatal(links)
+	}
+	if foreign := call("GET", "/v1/shares?flightId="+id, other, "", 200).Body.String(); !strings.Contains(foreign, `"links":[]`) {
+		t.Fatal(foreign)
+	}
+	call("DELETE", "/v1/shares/"+share.ID, other, "", 404)
+	call("GET", link.Path, "", "", 200)
+	call("DELETE", "/v1/shares/"+share.ID, owner, "", 204)
+	call("GET", link.Path, "", "", 404)
+	if err := json.Unmarshal(call("POST", "/v1/shares", owner, track, 201).Body.Bytes(), &share); err != nil {
+		t.Fatal(err)
+	}
+	link, err = url.Parse(share.URL)
+	if err != nil {
+		t.Fatal(err)
 	}
 	call("DELETE", "/v1/tracked/"+id, owner, "", 204)
 	call("GET", link.Path, "", "", 404)

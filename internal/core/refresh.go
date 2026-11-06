@@ -14,7 +14,6 @@ type Refresher struct {
 	Store      *Store
 	Flights    feeds.FlightSource
 	Advisories []feeds.AdvisorySource
-	Receiver   *feeds.ADSBReceiver
 	Registry   *feeds.FAARegistry
 	Logger     *slog.Logger
 	Interval   time.Duration
@@ -61,13 +60,6 @@ func (r Refresher) refresh(ctx context.Context) error {
 		return err
 	}
 	advisories = mergeAdvisories(advisories, pushed, now)
-	var adsb feeds.ADSBSnapshot
-	if r.Receiver != nil {
-		adsb, err = r.Receiver.Snapshot(ctx)
-		if err != nil {
-			r.Logger.Warn("ADS-B receiver unavailable", "error", err)
-		}
-	}
 	for _, prior := range active {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -87,15 +79,8 @@ func (r Refresher) refresh(ctx context.Context) error {
 				r.Logger.Warn("flight track refresh failed", "id", flight.ID, "error", err)
 			}
 		}
-		var modeS string
 		if r.Registry != nil && !finished(flight) {
 			flight.AircraftAge = r.Registry.Age(flight.TailNumber, now)
-			modeS = r.Registry.ModeSHex(flight.TailNumber)
-		}
-		if r.Receiver != nil && flight.ActualTakeoff != nil && !finished(flight) {
-			if position, ok := adsb.Match(flight, modeS); ok {
-				positions = append(positions, position)
-			}
 		}
 		var inbound []feeds.Flight
 		if flight.ActualDeparture == nil && !finished(flight) && (flight.InboundID != "" || flight.TailNumber != "") {

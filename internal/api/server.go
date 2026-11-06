@@ -78,12 +78,15 @@ func (s Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /v1/flights", s.auth(s.search))
 	mux.HandleFunc("GET /v1/flights/{id}", s.auth(s.details))
+	mux.HandleFunc("GET /v1/flights/{id}/radar", s.auth(s.radar))
 	mux.HandleFunc("GET /v1/tracked", s.auth(s.tracked))
 	mux.HandleFunc("POST /v1/tracked", s.auth(s.track))
 	mux.HandleFunc("DELETE /v1/tracked/{id}", s.auth(s.untrack))
 	mux.HandleFunc("POST /v1/devices", s.auth(s.device))
 	mux.HandleFunc("DELETE /v1/devices", s.auth(s.device))
 	mux.HandleFunc("POST /v1/shares", s.auth(s.share))
+	mux.HandleFunc("GET /v1/shares", s.auth(s.pickupLinks))
+	mux.HandleFunc("DELETE /v1/shares/{id}", s.auth(s.revokePickupLink))
 	mux.HandleFunc("GET /share/{token}", s.shared)
 	mux.HandleFunc("GET /v1/passport", s.auth(s.passport))
 	mux.HandleFunc("GET /v1/connections", s.auth(s.connection))
@@ -99,6 +102,7 @@ func (s Server) Handler() http.Handler {
 	if len(s.AdvisoryIngressKey) != 0 {
 		mux.HandleFunc("POST /v1/webhooks/advisory", s.advisoryCallback)
 	}
+	s.registerFriendRoutes(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -191,12 +195,12 @@ func (s Server) search(w http.ResponseWriter, r *http.Request, _ string) error {
 	return nil
 }
 
-func (s Server) details(w http.ResponseWriter, r *http.Request, _ string) error {
+func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) error {
 	id := r.PathValue("id")
 	if !flightID.MatchString(id) {
 		return errInvalid
 	}
-	d, err := s.Store.Details(r.Context(), id)
+	d, err := s.Store.DetailsForInstallation(r.Context(), owner, id)
 	if err != nil {
 		return err
 	}

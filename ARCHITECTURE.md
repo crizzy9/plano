@@ -39,6 +39,8 @@ AeroAPI search / polling / callbacks     FAA NAS / signed advisory bridges
 - A push message carries enough state to render the flight without an immediate API fetch. The push client enforces a 2 KiB request envelope. The internal Live Activity contract is `PlanoActivityAttributes` plus `flightId`, `flightNumber`, `status`, origin and destination codes, gate and terminal fields, optional seat, and departure, arrival and observation epochs.
 - The default active-flight polling interval is 60 seconds. FlightAware callbacks can wake a durable targeted refresh, and signed bridge advisories can enqueue airport alerts directly. Outbox commits wake the dispatcher immediately, while a 200 ms fallback recovers ready retries. Provider acceptance, device arrival, end-to-end alert latency and behavior on specific onboard networks require separate measurement.
 - The Android app widget shows a single flight’s phase, progress, and countdown. Compatible Android hosts can place it on the Lock Screen. It omits route, gate, terminal and seat details. [Android lock-screen widget support](https://android-developers.googleblog.com/2025/03/widgets-on-lock-screen-faq.html)
+- A separate radar worker samples an operator receiver and stores bounded-retention, ordered positions for tracked airborne flights. Installation checks gate local receiver data. Provider and receiver history share the flight view, with cursor-based updates while the flight is active.
+- One-use Friends invitations create directed relationships. Each flight grant follows the sender’s tracking state. Public pickup links expire and have independently revocable handles. [Flight sharing](docs/FLIGHT_SHARING.md)
 - Every product route is available without a billing or entitlement check. External feed access, Apple signing and cloud push credentials belong to the instance operator. The self-host service can also run against explicitly labeled synthetic data for local evaluation. [Self-hosting](docs/SELF_HOSTING.md)
 
 ## Verification still required for full parity
@@ -50,7 +52,7 @@ AeroAPI search / polling / callbacks     FAA NAS / signed advisory bridges
 | Aviation ingestion | Approved live source accounts and observed coverage for AeroAPI callbacks, terminal, baggage, boarding, historical tracks, raw SWIM and EUROCONTROL data and aircraft registry enrichment. |
 | Prediction | Versioned training observations, holdout/backtest metrics, and validation of turnaround, weather, ATC and NOTAM attribution. A live fitted artifact and production holdout are still required. |
 | Connections and sync | Verified airport route data and gate accuracy, calendar scheduling on devices, a live inbound mail transport and TripIt feed, and authorized airline-side PNR lookup. |
-| Passport and Friends | Complete history and coordinate coverage, share-sheet and rendered card verification on devices, and a multi-user friend graph if required beyond per-flight links. |
+| Passport and Friends | Live coordinate coverage and signed-device verification of Passport, sharing, and the Friends workflow. |
 | Self-host deployment | Phone-to-server TLS, live credential mounts, restore testing and operation under expected load. |
 
 ## Verified self-host paths
