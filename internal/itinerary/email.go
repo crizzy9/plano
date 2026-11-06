@@ -18,6 +18,7 @@ const MaxEmailBytes = 256 << 10
 type emailParts struct {
 	plain, html []emailTextPart
 	calendars   []emailCalendarPart
+	subjects    []string
 	count       int
 }
 
@@ -43,12 +44,17 @@ func Email(raw []byte) (Itinerary, error) {
 	}
 	var parts emailParts
 	parts.read(message.Header.Get, message.Body, 0, 0)
-	decoder := mime.WordDecoder{}
-	subject, err := decoder.DecodeHeader(message.Header.Get("Subject"))
-	if err != nil {
-		subject = ""
+	notices := make(emailCancellationNotices)
+	subject := notices.strip(emailSubject(message.Header.Get("Subject")))
+	for _, forwarded := range parts.subjects {
+		notices.strip(forwarded)
 	}
-	var cancellations calendarCancellations
+	for _, text := range [][]emailTextPart{parts.plain, parts.html} {
+		for i := range text {
+			text[i].text = notices.strip(text[i].text)
+		}
+	}
+	cancellations := calendarCancellations{notices: notices}
 	inputs := make([]calendarInput, len(parts.calendars))
 	cancelledAlternatives := make(map[int]bool)
 	for i, part := range parts.calendars {
@@ -76,17 +82,19 @@ func Email(raw []byte) (Itinerary, error) {
 	if len(cancelledAlternatives) != 0 && plain == "" && html == "" && len(confirmed.Legs) == 0 {
 		subject = ""
 	}
-	result := fromText(subject+"\n"+plain, "")
-	before := len(result.Legs)
-	result.Legs = slices.DeleteFunc(result.Legs, cancellations.matchesText)
-	removed := len(result.Legs) < before
-	if len(result.Legs) == 0 {
-		result = fromText(subject+"\n"+html, "")
-		before = len(result.Legs)
-		result.Legs = slices.DeleteFunc(result.Legs, cancellations.matchesText)
-		removed = removed || len(result.Legs) < before
+	var removed bool
+	skip := func(leg Leg) bool {
+		if !cancellations.matchesText(leg) {
+			return false
+		}
+		removed = true
+		return true
 	}
-	if removed || cancellations.recognized && len(result.Legs) == 0 {
+	result := fromText(subject+"\n"+plain, "", skip)
+	if len(result.Legs) == 0 {
+		result = fromText(subject+"\n"+html, "", skip)
+	}
+	if removed || len(notices) != 0 || cancellations.recognized && len(result.Legs) == 0 {
 		result.BookingCode = ""
 	}
 	seen := make(map[Leg]bool)
@@ -105,8 +113,17 @@ func Email(raw []byte) (Itinerary, error) {
 		result.BookingCode = confirmed.BookingCode
 	}
 	result.Truncated = result.Truncated || confirmed.Truncated
-	result.CancellationOnly = cancellations.recognized && len(result.Legs) == 0
+	result.CancellationOnly = (cancellations.recognized || len(notices) != 0) && len(result.Legs) == 0
 	return limitItinerary(result, MaxFlights), nil
+}
+
+func emailSubject(raw string) string {
+	decoder := mime.WordDecoder{}
+	subject, err := decoder.DecodeHeader(raw)
+	if err != nil {
+		return ""
+	}
+	return subject
 }
 
 func joinedEmailText(parts []emailTextPart, cancelledAlternatives map[int]bool) string {
@@ -155,6 +172,7 @@ func (parts *emailParts) read(header func(string) string, body io.Reader, depth,
 	}
 	if kind == "message/rfc822" {
 		if child, err := mail.ReadMessage(body); err == nil {
+			parts.subjects = append(parts.subjects, emailSubject(child.Header.Get("Subject")))
 			parts.read(child.Header.Get, child.Body, depth+1, 0)
 		}
 		return

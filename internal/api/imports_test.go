@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,9 +23,11 @@ type evolvingImportSource struct {
 	demodata.Source
 	secondLeg       bool
 	firstLegLookups int
+	lookups         []string
 }
 
 func (s *evolvingImportSource) Search(ctx context.Context, number string, date time.Time) ([]feeds.Flight, error) {
+	s.lookups = append(s.lookups, number)
 	if number == "UA123" {
 		s.firstLegLookups++
 	}
@@ -83,6 +86,68 @@ func TestEmailRetryOnlyResolvesUnfinishedLegs(t *testing.T) {
 	flights, err := store.Tracked(ctx, owner)
 	if err != nil || len(flights) != 1 || flights[0].ID != "demo-UA456-2027-01-07" || source.firstLegLookups != 1 {
 		t.Fatalf("retry tracked %+v after %d first-leg lookups, error = %v", flights, source.firstLegLookups, err)
+	}
+}
+
+func TestEmailWebhookCancellationWithReplacement(t *testing.T) {
+	ctx := t.Context()
+	store, err := core.Open(filepath.Join(t.TempDir(), "plano.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	installation, err := store.CreateInstallation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.Installation(ctx, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := store.RotateEmailRelay(ctx, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &evolvingImportSource{secondLeg: true}
+	handler := (api.Server{Store: store, Source: source, Demo: true, Logger: slog.New(slog.DiscardHandler)}).Handler()
+	forward := func(subject, body string) {
+		t.Helper()
+		email := "Subject: " + subject + "\r\nContent-Type: text/plain\r\n\r\n" + body
+		r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/webhooks/email", strings.NewReader(email))
+		r.Header.Set("Content-Type", "message/rfc822")
+		r.Header.Set("Authorization", "Bearer "+relay)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("email delivery = %d (%s), want 204", w.Code, w.Body)
+		}
+	}
+	assertTracked := func(want ...string) {
+		t.Helper()
+		flights, err := store.Tracked(ctx, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, flight := range flights {
+			got = append(got, flight.ID)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("tracked flight IDs = %v, want %v", got, want)
+		}
+	}
+	const cancelled = "Flight UA123 on 5 January 2027 has been cancelled"
+	forward(cancelled, "Please contact the airline for assistance.\r\n")
+	assertTracked()
+	if len(source.lookups) != 0 {
+		t.Fatalf("cancellation triggered provider lookups: %v", source.lookups)
+	}
+	forward("Itinerary change", cancelled+".\r\nReplacement flight UA456 | Departure: 7 January 2027\r\n")
+	assertTracked("demo-UA456-2027-01-07")
+	forward("Itinerary change", "Flight UA456 on 7 January 2027 has been cancelled.\r\n")
+	assertTracked("demo-UA456-2027-01-07")
+	if !slices.Equal(source.lookups, []string{"UA456"}) {
+		t.Fatalf("provider lookups = %v, want only the replacement flight", source.lookups)
 	}
 }
 

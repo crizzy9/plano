@@ -88,7 +88,13 @@ exec /usr/local/bin/plano forward-email
 
 Send at most 256 KiB per message. `forward-email` exits with `75` for temporary failures so the mail system can retry. It reports `65` for rejected input, `77` for an unauthorized relay, and `78` for configuration or unexpected endpoint errors. Diagnostics omit email contents and credentials.
 
-The parser recognizes plain text, HTML text, forwarded messages, and calendar parts. It never follows links in the message. A `204` acknowledges an accepted delivery. A recognized calendar cancellation with no importable legs also returns `204` and leaves tracking as it was. A partial match keeps the resolved flights and returns `503`. A retry of the same bytes resolves only unfinished legs, even if you have since untracked a resolved flight. For `422`, review the original message and enter the flight manually if needed. Plano keeps digests for deduplication and discards the email body. [iCalendar cancellation method](https://www.rfc-editor.org/rfc/rfc5546.html#section-3.2.5)
+The parser recognizes plain text, HTML text, forwarded messages, and calendar parts. It never follows links in the message. A `204` acknowledges an accepted delivery. A recognized cancellation with no importable legs also returns `204` and leaves existing tracking in place. A partial match keeps the resolved flights and returns `503`. A retry of the same bytes resolves only unfinished legs, even if you have since untracked a resolved flight. For `422`, review the original message and enter the flight manually if needed. Plano keeps digests for deduplication and discards the email body. [iCalendar cancellation method](https://www.rfc-editor.org/rfc/rfc5546.html#section-3.2.5)
+
+Plain-text notices such as “Flight UA123 on 5 January 2027 has been
+cancelled” can suppress that dated leg. With a departure time in the notice,
+Plano can keep a different same-day departure. When the notice supplies only
+a date, copies with the same designator and date remain ambiguous.
+Clearly dated replacement flights can still be imported from the same email.
 
 ## Import a TripIt calendar feed
 

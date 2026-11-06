@@ -41,7 +41,13 @@ func Parse(text, date string) (Itinerary, error) {
 	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(text)), "BEGIN:VCALENDAR") {
 		return calendar(text, MaxFlights, "")
 	}
-	return fromText(text, date), nil
+	notices := make(emailCancellationNotices)
+	result := fromText(notices.strip(text), date, notices.matches)
+	result.CancellationOnly = len(notices) != 0 && len(result.Legs) == 0
+	if len(notices) != 0 {
+		result.BookingCode = ""
+	}
+	return result, nil
 }
 
 func validDate(value string) bool {
@@ -49,12 +55,22 @@ func validDate(value string) bool {
 	return err == nil
 }
 
-func fromText(text, date string) Itinerary {
+func fromText(text, date string, skip func(Leg) bool) Itinerary {
 	result := Itinerary{BookingCode: bookingCode(text)}
 	text = booking.ReplaceAllString(text, " ")
 	var seen = make(map[Leg]bool)
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	records := labeledTextRecords(lines, date)
+	// A suppressed precise leg still takes precedence over its own date-only
+	// copy, including when the cancellation names the instant in UTC.
+	skippedPreciseDays := make(map[Leg]bool)
+	for _, record := range records {
+		leg := record.leg
+		if (leg.LocalDeparture != "" || !leg.UTCDeparture.IsZero()) && skip(leg) {
+			skippedPreciseDays[Leg{Number: leg.Number, Date: leg.Date}] = true
+		}
+	}
+	rejectLeg := func(leg Leg) bool { return skip(leg) || skippedPreciseDays[leg] }
 	globalDate := date
 	if globalDate == "" {
 		globalDate = soleUnlabeledDate(lines, records)
@@ -67,7 +83,7 @@ func fromText(text, date string) Itinerary {
 		if record, labeled := records[index]; labeled {
 			blockDate = record.heading
 			globalDate = date
-			if leg := record.leg; leg.Number != "" && !seen[leg] {
+			if leg := record.leg; leg.Number != "" && !seen[leg] && !rejectLeg(leg) {
 				result.Legs = append(result.Legs, leg)
 				seen[leg] = true
 			}
@@ -91,7 +107,7 @@ func fromText(text, date string) Itinerary {
 		if day == "" {
 			continue
 		}
-		result.Legs = addLegs(result.Legs, seen, line, day, time.Time{}, candidateLimit)
+		result.Legs = addLegs(result.Legs, seen, line, day, time.Time{}, candidateLimit, rejectLeg)
 		if len(result.Legs) == candidateLimit {
 			break
 		}
@@ -136,7 +152,7 @@ func bookingCode(text string) string {
 	return found
 }
 
-func addLegs(legs []Leg, seen map[Leg]bool, text, date string, utcDeparture time.Time, limit int) []Leg {
+func addLegs(legs []Leg, seen map[Leg]bool, text, date string, utcDeparture time.Time, limit int, skip func(Leg) bool) []Leg {
 	// A line containing a booking locator or URL should never trigger an airline search.
 	if strings.Contains(text, "://") {
 		return legs
@@ -149,7 +165,7 @@ func addLegs(legs []Leg, seen map[Leg]bool, text, date string, utcDeparture time
 			break
 		}
 		leg := Leg{Number: match[1] + match[2], Date: date, UTCDeparture: utcDeparture}
-		if !seen[leg] {
+		if !seen[leg] && (skip == nil || !skip(leg)) {
 			legs = append(legs, leg)
 			seen[leg] = true
 		}

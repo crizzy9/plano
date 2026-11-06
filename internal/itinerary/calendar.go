@@ -171,9 +171,9 @@ func (input calendarInput) latestConfirmedRevisions() map[string]calendarRevisio
 
 func (event calendarEvent) flightLegs(legs []Leg, seen map[Leg]bool, start string, departure time.Time, limit int) []Leg {
 	clear(seen)
-	legs = addLegs(legs[:0], seen, unescapeCalendar(event.summary), start, departure, limit+1)
+	legs = addLegs(legs[:0], seen, unescapeCalendar(event.summary), start, departure, limit+1, nil)
 	if len(legs) == 0 {
-		legs = addLegs(legs, seen, unescapeCalendar(event.description), start, departure, limit+1)
+		legs = addLegs(legs, seen, unescapeCalendar(event.description), start, departure, limit+1, nil)
 	}
 	return legs
 }
@@ -212,7 +212,7 @@ func (input calendarInput) confirmed(limit int, from string, cancellations *cale
 				cancellations.recordText(event, leg)
 				continue
 			}
-			if cancellations.matchesSchedule(event, leg) {
+			if cancellations.matchesSchedule(event, leg) || cancellations.matchesNotice(event, leg) {
 				continue
 			}
 			accepted = true
@@ -247,6 +247,7 @@ type calendarCancellations struct {
 	sequences  map[string]int
 	schedules  map[Leg]bool // true when a cancellation for this schedule omitted UID
 	textLegs   map[Leg]bool
+	notices    emailCancellationNotices
 }
 
 func (input calendarInput) collectCancellations(cancellations *calendarCancellations) bool {
@@ -309,10 +310,27 @@ func (cancellations *calendarCancellations) matchesSchedule(event calendarEvent,
 }
 
 func (cancellations *calendarCancellations) matchesText(leg Leg) bool {
+	return cancellations.textLegs[cancellationLegKey(leg)] || cancellations.notices.matches(leg)
+}
+
+func (cancellations *calendarCancellations) matchesNotice(event calendarEvent, leg Leg) bool {
+	if len(cancellations.notices) == 0 {
+		return false
+	}
+	clock := calendarClock(event.start)
+	if leg.UTCDeparture.IsZero() {
+		leg.LocalDeparture = clock
+		return cancellations.notices.matches(leg)
+	}
+	return cancellations.notices.matches(leg) || clock != "" &&
+		cancellations.notices.matches(Leg{Number: leg.Number, Date: leg.Date, LocalDeparture: clock})
+}
+
+func cancellationLegKey(leg Leg) Leg {
 	if !leg.UTCDeparture.IsZero() {
 		leg = Leg{Number: leg.Number, UTCDeparture: leg.UTCDeparture.UTC().Truncate(time.Minute)}
 	}
-	return cancellations.textLegs[leg]
+	return leg
 }
 
 func (cancellations *calendarCancellations) recordText(event calendarEvent, leg Leg) {

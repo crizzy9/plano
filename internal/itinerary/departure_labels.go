@@ -39,7 +39,7 @@ func labeledTextRecords(lines []string, fallbackDate string) map[int]labeledReco
 		schedule := splitScheduleLine(lines[i])
 		var flights []Leg
 		if flightPattern.MatchString(schedule.prefix) {
-			flights = addLegs(nil, make(map[Leg]bool), schedule.prefix, "", time.Time{}, 2)
+			flights = addLegs(nil, make(map[Leg]bool), schedule.prefix, "", time.Time{}, 2, nil)
 		}
 		end := i
 		if len(flights) == 1 {
