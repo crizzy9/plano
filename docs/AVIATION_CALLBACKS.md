@@ -152,6 +152,35 @@ window, whichever is earlier. It also disappears after takeoff or a withdrawal.
 The slot describes wheels-off timing. Airline gate times and Plano's delay
 estimates remain separate.
 
+#### EUROCONTROL ADEXP messages
+
+An authorized subscriber can pass one ADEXP slot message, up to 16 KiB, to
+the same relay. `SAM` assigns a slot from `CTOT`, `SRM` revises it from
+`NEWCTOT`, and `SLC` withdraws it. Pass an independently verified AeroAPI
+flight ID, matching `IFPLID`, and the airline's scheduled departure instant.
+The relay checks the `IFPLID` in the message. The server checks the route and
+scheduled departure against the tracked flight. `EOBD` and `EOBT` describe
+estimated off-block timing in the flight plan. [ATFCM Users Manual §8.2.3 and Annex 1](https://www.eurocontrol.int/archive_download/all/node/10578)
+
+```sh
+plano forward-atfm-slot eurocontrol-adexp "$fa_flight_id" "$ifplid" \
+  "$scheduled_departure" "$observed_at" "$takeoff_date" < slot.adexp
+```
+
+Supply `scheduled_departure` and the original source observation or receipt
+time in RFC 3339. If the message contains `TIMESTAMP`, pass `-` for the
+observation argument or supply an instant that agrees with it. Supply a
+verified `takeoff_date` in UTC as `YYYY-MM-DD` when the assignment omits
+`CTOD`. If both dates are supplied they must agree. Omit the final argument
+for an `SLC`. Keep the original observation time and mapping when retrying.
+[ADEXP 4.0 §5 and Annex A](https://www.eurocontrol.int/sites/default/files/2026-04/eurocontrol-adexp-specification-4-0.pdf)
+
+The relay translates supported `REGCAUSE` combinations for weather, air
+traffic control capacity, and airport capacity. Operator comments and other
+raw message fields stay out of the signed envelope. The subscriber supplies
+upstream access, message framing, and flight identity mapping.
+[EUROCONTROL regulation reasons, Annex D](https://www.eurocontrol.int/archive_download/all/node/10578)
+
 ### FAA TFMData airport programs
 
 Pass one Flow Information XML message of up to 2 MiB from an authorized SWIM

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -60,18 +62,27 @@ func TestForwardATFMSlotToTrackedFlight(t *testing.T) {
 	slot := feeds.ATFMSlot{Version: 1, Source: feeds.FAASWIM, ProviderFlightID: flight.ID,
 		OriginICAO: flight.OriginICAO, DestinationICAO: flight.DestinationICAO, ScheduledDeparture: scheduled,
 		ObservedAt: now.Add(-20 * time.Second), Status: feeds.ATFMAssigned, TakeoffAt: &takeoff, Reason: "Arrival capacity reduced by thunderstorms"}
+	postInput := func(input io.Reader, signingKey []byte, want int) {
+		t.Helper()
+		exit, err := forwardATFMSlot(ctx, input, endpoint, signingKey, transport)
+		if exit != want || (err != nil) != (want != 0) {
+			t.Fatalf("relay exit %d (%v), want %d", exit, err, want)
+		}
+	}
 	post := func(slot feeds.ATFMSlot, signingKey []byte, want int) {
 		t.Helper()
 		raw, err := json.Marshal(slot)
 		if err != nil {
 			t.Fatal(err)
 		}
-		exit, err := forwardATFMSlot(ctx, bytes.NewReader(raw), endpoint, signingKey, transport)
-		if exit != want || (err != nil) != (want != 0) {
-			t.Fatalf("relay exit %d (%v), want %d", exit, err, want)
+		body := bytes.NewReader(raw)
+		input, status, err := atfmSlotRelayInput(body, nil, now)
+		if err != nil || status != 0 || input != body {
+			t.Fatalf("JSON relay did not preserve its input: %d (%v)", status, err)
 		}
+		postInput(input, signingKey, want)
 	}
-	get := func(token string, visible bool) {
+	get := func(token string, want *feeds.ATFMSlot) {
 		t.Helper()
 		r := httptest.NewRequest(http.MethodGet, "/v1/flights/"+flight.ID, nil)
 		r.Header.Set("Authorization", "Bearer "+token)
@@ -94,24 +105,52 @@ func TestForwardATFMSlotToTrackedFlight(t *testing.T) {
 				t.Fatalf("unexpected timeline event: %+v", event)
 			}
 		}
-		if (len(got.ATFMSlots) != 0) != visible {
-			t.Fatalf("slot visibility = %t, want %t", len(got.ATFMSlots) != 0, visible)
+		if (len(got.ATFMSlots) != 0) != (want != nil) {
+			t.Fatalf("unexpected slot visibility: %+v", got.ATFMSlots)
 		}
-		if visible && (len(got.ATFMSlots) != 1 || !got.ATFMSlots[0].TakeoffAt.Equal(takeoff) || got.ATFMSlots[0].Source != feeds.FAASWIM ||
-			got.ATFMSlots[0].Reason != slot.Reason || strings.Contains(w.Body.String(), `"providerFlightId"`)) {
+		if want != nil && (len(got.ATFMSlots) != 1 || !got.ATFMSlots[0].TakeoffAt.Equal(*want.TakeoffAt) ||
+			got.ATFMSlots[0].Source != want.Source || got.ATFMSlots[0].Reason != want.Reason ||
+			!got.ATFMSlots[0].ObservedAt.Equal(want.ObservedAt) || strings.Contains(w.Body.String(), `"providerFlightId"`)) {
 			t.Fatalf("unexpected public slot fields: %s", w.Body)
 		}
 	}
 	post(slot, bytes.Repeat([]byte("b"), 32), relayPermission)
-	get(ownerToken, false)
+	get(ownerToken, nil)
 	post(slot, key, 0)
-	get(ownerToken, true)
-	get(otherToken, false)
+	get(ownerToken, &slot)
+	get(otherToken, nil)
 	withdraw := slot
 	withdraw.Status, withdraw.TakeoffAt, withdraw.ObservedAt = feeds.ATFMWithdrawn, nil, now.Add(-10*time.Second)
 	post(withdraw, key, 0)
 	post(slot, key, 0)
-	get(ownerToken, false)
+	get(ownerToken, nil)
+
+	identity := fmt.Sprintf("-ARCID UAL88 -IFPLID ZZ12345678 -ADEP KSFO -ADES KEWR -EOBD %s -EOBT %s",
+		scheduled.Format("060102"), scheduled.Format("1504"))
+	postADEXP := func(message string, observedAt string, date ...string) {
+		t.Helper()
+		args := append([]string{"eurocontrol-adexp", flight.ID, "ZZ12345678", scheduled.Format(time.RFC3339), observedAt}, date...)
+		input, status, err := atfmSlotRelayInput(strings.NewReader(message), args, time.Now().UTC())
+		if err != nil || status != 0 {
+			t.Fatalf("ADEXP conversion exit %d: %v", status, err)
+		}
+		postInput(input, key, 0)
+	}
+	euroTakeoff := takeoff.Truncate(time.Minute)
+	euro := feeds.ATFMSlot{Source: feeds.Eurocontrol, TakeoffAt: &euroTakeoff, ObservedAt: now.Add(-8 * time.Second)}
+	sam := fmt.Sprintf("-TITLE SAM %s -CTOT %s -CTOD %s -TIMESTAMP %s", identity,
+		euroTakeoff.Format("1504"), euroTakeoff.Format("060102"), euro.ObservedAt.Format("060102150405"))
+	postADEXP(sam, "-")
+	get(ownerToken, &euro)
+	get(otherToken, nil)
+	euroTakeoff = euroTakeoff.Add(15 * time.Minute)
+	euro.ObservedAt = now.Add(-5 * time.Second)
+	postADEXP("-TITLE SRM "+identity+" -NEWCTOT "+euroTakeoff.Format("1504"),
+		euro.ObservedAt.Format(time.RFC3339), euroTakeoff.Format(time.DateOnly))
+	get(ownerToken, &euro)
+	postADEXP("-TITLE SLC "+identity+" -REASON OUTREG", now.Add(-2*time.Second).Format(time.RFC3339))
+	postADEXP(sam, "-")
+	get(ownerToken, nil)
 	for _, disabled := range []api.Server{{}, {Demo: true, AdvisoryIngressKey: key}} {
 		w := httptest.NewRecorder()
 		disabled.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, endpoint, nil))

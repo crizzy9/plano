@@ -18,6 +18,8 @@ const (
 	atfmSlotMaxAge   = 30 * time.Minute
 )
 
+var errInvalidATFMSlot = fmt.Errorf("%w: invalid ATFM slot", ErrInvalidQuery)
+
 // ATFMSlot is an authorized bridge's report of a flight-specific runway time.
 // ScheduledDeparture identifies the flight instance's airline schedule.
 type ATFMSlot struct {
@@ -34,40 +36,45 @@ type ATFMSlot struct {
 }
 
 func DecodeATFMSlot(input io.Reader, now time.Time) (ATFMSlot, error) {
-	invalid := fmt.Errorf("%w: invalid ATFM slot", ErrInvalidQuery)
 	body, err := io.ReadAll(io.LimitReader(input, MaxATFMSlotBytes+1))
 	if err != nil || len(body) > MaxATFMSlotBytes || !utf8.Valid(body) {
-		return ATFMSlot{}, invalid
+		return ATFMSlot{}, errInvalidATFMSlot
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	var slot ATFMSlot
-	if decoder.Decode(&slot) != nil || decoder.Decode(new(any)) != io.EOF || slot.Version != 1 ||
-		slot.Source != FAASWIM && slot.Source != Eurocontrol || !providerIdentifier.MatchString(slot.ProviderFlightID) ||
+	if decoder.Decode(&slot) != nil || decoder.Decode(new(any)) != io.EOF {
+		return ATFMSlot{}, errInvalidATFMSlot
+	}
+	return normalizeATFMSlot(slot, now)
+}
+
+func normalizeATFMSlot(slot ATFMSlot, now time.Time) (ATFMSlot, error) {
+	if slot.Version != 1 || slot.Source != FAASWIM && slot.Source != Eurocontrol || !providerIdentifier.MatchString(slot.ProviderFlightID) ||
 		!aeroAlertAirport.MatchString(slot.OriginICAO) || !aeroAlertAirport.MatchString(slot.DestinationICAO) ||
 		slot.ObservedAt.Before(now.Add(-atfmSlotMaxAge)) || slot.ObservedAt.After(now) ||
 		slot.ScheduledDeparture.Before(now.Add(-12*time.Hour)) || slot.ScheduledDeparture.After(now.Add(24*time.Hour)) {
-		return ATFMSlot{}, invalid
+		return ATFMSlot{}, errInvalidATFMSlot
 	}
 	switch slot.Status {
 	case ATFMAssigned:
 		if slot.TakeoffAt == nil || slot.TakeoffAt.Before(slot.ObservedAt.Add(-10*time.Minute)) ||
 			slot.TakeoffAt.After(slot.ObservedAt.Add(24*time.Hour)) {
-			return ATFMSlot{}, invalid
+			return ATFMSlot{}, errInvalidATFMSlot
 		}
 		takeoff := slot.TakeoffAt.UTC()
 		slot.TakeoffAt = &takeoff
 	case ATFMWithdrawn:
 		if slot.TakeoffAt != nil {
-			return ATFMSlot{}, invalid
+			return ATFMSlot{}, errInvalidATFMSlot
 		}
 	default:
-		return ATFMSlot{}, invalid
+		return ATFMSlot{}, errInvalidATFMSlot
 	}
 	if len(slot.Reason) > 160 || strings.ContainsFunc(slot.Reason, func(r rune) bool {
 		return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' || r == unicode.ReplacementChar
 	}) {
-		return ATFMSlot{}, invalid
+		return ATFMSlot{}, errInvalidATFMSlot
 	}
 	slot.Reason = strings.TrimSpace(slot.Reason)
 	slot.ObservedAt, slot.ScheduledDeparture = slot.ObservedAt.UTC(), slot.ScheduledDeparture.UTC()

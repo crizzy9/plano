@@ -48,11 +48,7 @@ func main() {
 		os.Exit(status)
 	}
 	if len(os.Args) > 1 && os.Args[1] == "forward-atfm-slot" {
-		if len(os.Args) != 2 {
-			fmt.Fprintln(os.Stderr, "usage: plano forward-atfm-slot")
-			os.Exit(relayConfigError)
-		}
-		status, err := forwardATFMSlotFromEnv(context.Background(), os.Stdin)
+		status, err := runATFMSlotRelay(context.Background(), os.Stdin, os.Args[2:])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}

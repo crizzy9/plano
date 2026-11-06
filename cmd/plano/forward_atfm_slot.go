@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -12,12 +13,54 @@ import (
 	"github.com/crizzy9/plano/internal/feeds"
 )
 
-func forwardATFMSlotFromEnv(ctx context.Context, input io.Reader) (int, error) {
+func runATFMSlotRelay(ctx context.Context, input io.Reader, args []string) (int, error) {
+	input, status, err := atfmSlotRelayInput(input, args, time.Now().UTC())
+	if err != nil {
+		return status, err
+	}
 	key, err := readAdvisoryRelayKey()
 	if err != nil {
 		return relayConfigError, err
 	}
 	return forwardATFMSlot(ctx, input, os.Getenv("PLANO_ATFM_SLOT_RELAY_URL"), key, nil)
+}
+
+func atfmSlotRelayInput(input io.Reader, args []string, now time.Time) (io.Reader, int, error) {
+	if len(args) == 0 {
+		return input, 0, nil
+	}
+	if (len(args) != 5 && len(args) != 6) || args[0] != "eurocontrol-adexp" {
+		return nil, relayConfigError, errors.New("usage: plano forward-atfm-slot [eurocontrol-adexp <fa-flight-id> <ifplid> <scheduled-departure> <observed-at|-> [takeoff-date]]")
+	}
+	scheduled, err := time.Parse(time.RFC3339Nano, args[3])
+	if err != nil || scheduled.IsZero() {
+		return nil, relayConfigError, errors.New("scheduled-departure must be an RFC 3339 instant")
+	}
+	binding := feeds.ADEXPATFMSlotBinding{ProviderFlightID: args[1], IFPLID: args[2], ScheduledDeparture: scheduled}
+	if args[4] != "-" {
+		binding.ObservedAt, err = time.Parse(time.RFC3339Nano, args[4])
+		if err != nil || binding.ObservedAt.IsZero() {
+			return nil, relayConfigError, errors.New("observed-at must be an RFC 3339 instant or '-' for a source timestamp")
+		}
+	}
+	if len(args) == 6 {
+		if _, err := time.Parse(time.DateOnly, args[5]); err != nil {
+			return nil, relayConfigError, errors.New("takeoff-date must be a UTC date in YYYY-MM-DD format")
+		}
+		binding.TakeoffDate = args[5]
+	}
+	slot, err := feeds.DecodeADEXPATFMSlot(input, binding, now)
+	if errors.Is(err, feeds.ErrUnavailable) {
+		return nil, relayTempFailure, errors.New("could not read EUROCONTROL ADEXP from standard input")
+	}
+	if err != nil {
+		return nil, relayDataError, errors.New("standard input did not yield a valid, bound EUROCONTROL slot message")
+	}
+	body, err := json.Marshal(slot)
+	if err != nil {
+		return nil, relayDataError, errors.New("could not encode the EUROCONTROL slot")
+	}
+	return bytes.NewReader(body), 0, nil
 }
 
 func forwardATFMSlot(ctx context.Context, input io.Reader, endpoint string, key []byte, transport http.RoundTripper) (int, error) {
