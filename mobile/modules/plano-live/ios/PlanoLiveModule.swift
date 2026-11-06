@@ -187,6 +187,7 @@ private enum LiveKeychain {
 private final class PlanoActivityCoordinator {
   static let shared = PlanoActivityCoordinator()
   private struct ActivityObservers {
+    let activity: Activity<PlanoActivityAttributes>
     let tokens: Task<Void, Never>
     let states: Task<Void, Never>
   }
@@ -198,7 +199,7 @@ private final class PlanoActivityCoordinator {
   private var startTokens: Task<Void, Never>?
   private var activities: Task<Void, Never>?
   private var observers: [String: ActivityObservers] = [:]
-  private var locallyEnding: Set<String> = []
+  private var locallyEnding: [String: Activity<PlanoActivityAttributes>] = [:]
   private var retirement: Task<Void, Never>?
   private let uploads = ActivityTokenUploads()
   private let transport: URLSession = {
@@ -216,7 +217,7 @@ private final class PlanoActivityCoordinator {
   func resume() {
     restore()
     guard let registration else { return }
-    for activity in Activity<PlanoActivityAttributes>.activities { observe(activity, using: registration, generation: generation) }
+    reconcileActivities(using: registration, generation: generation)
     uploads.retryPending()
   }
 
@@ -234,10 +235,11 @@ private final class PlanoActivityCoordinator {
     }
 
     let next = ActivityRegistration(server: server, token: token, binding: UUID().uuidString.lowercased())
+    let oldActivities = knownActivities()
     let change = invalidateRegistration()
     try? LiveKeychain.clear()
     configuring = next
-    await retireActivities()
+    await retireActivities(oldActivities)
     if target.matches(registration) { return }
     guard change == generation else { throw RegistrationError.superseded }
     configuring = nil
@@ -262,11 +264,11 @@ private final class PlanoActivityCoordinator {
         }
       }
     }
-    for activity in Activity<PlanoActivityAttributes>.activities { observe(activity, using: registration, generation: current) }
+    reconcileActivities(using: registration, generation: current)
     activities = Task {
       for await activity in Activity<PlanoActivityAttributes>.activityUpdates {
         guard isCurrent(current) else { break }
-        observe(activity, using: registration, generation: current)
+        reconcileActivities(including: activity, using: registration, generation: current)
       }
     }
   }
@@ -293,12 +295,11 @@ private final class PlanoActivityCoordinator {
     return generation
   }
 
-  private func retireActivities() async {
+  private func retireActivities(_ oldActivities: [Activity<PlanoActivityAttributes>]) async {
     if let retirement {
       await retirement.value
       return
     }
-    let oldActivities = Activity<PlanoActivityAttributes>.activities
     guard !oldActivities.isEmpty else { return }
     let ending = Task {
       for activity in oldActivities { await activity.end(nil, dismissalPolicy: .immediate) }
@@ -309,9 +310,10 @@ private final class PlanoActivityCoordinator {
   }
 
   func clear() async {
+    let oldActivities = knownActivities()
     _ = invalidateRegistration()
     try? LiveKeychain.clear()
-    await retireActivities()
+    await retireActivities(oldActivities)
   }
 
   func nextPushRevision() throws -> String {
@@ -325,6 +327,7 @@ private final class PlanoActivityCoordinator {
     let saved = Result { try LiveKeychain.loadChecked() }
     let ownsActivities = target.matches(registration) || target.matches(configuring) ||
       (registration == nil && configuring == nil && target.matches(try? saved.get()))
+    let oldActivities = ownsActivities ? knownActivities() : []
     if ownsActivities { _ = invalidateRegistration() }
 
     // Allocate the floor in the same actor turn that stops matching uploads.
@@ -333,7 +336,7 @@ private final class PlanoActivityCoordinator {
       if target.matches(try saved.get()) { try LiveKeychain.clear() }
       return try nextPushRevision()
     }
-    if ownsActivities { await retireActivities() }
+    if ownsActivities { await retireActivities(oldActivities) }
     return try floor.get()
   }
 
@@ -342,10 +345,12 @@ private final class PlanoActivityCoordinator {
     guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw RegistrationError.disabled }
     let state = try JSONDecoder().decode(PlanoActivityAttributes.ContentState.self, from: Data(stateJSON.utf8))
     guard !["arrived", "cancelled"].contains(state.status) else { throw RegistrationError.inactive }
-    if Activity<PlanoActivityAttributes>.activities.contains(where: {
-      $0.attributes.flightId == state.flightId && $0.attributes.activityBinding == binding &&
-        !locallyEnding.contains($0.id) && $0.activityState != .ended && $0.activityState != .dismissed
-    }) { return }
+    if knownActivities().contains(where: {
+      $0.attributes.flightId == state.flightId && $0.attributes.activityBinding == binding && isLive($0)
+    }) {
+      reconcileActivities(using: registration, generation: generation)
+      return
+    }
     let now = Date.now
     let observedAt = Date(timeIntervalSince1970: TimeInterval(state.observedEpoch))
     let staleDate = state.observedEpoch > 0 ? min(observedAt, now).addingTimeInterval(600) : now
@@ -354,13 +359,11 @@ private final class PlanoActivityCoordinator {
       content: ActivityContent(state: state, staleDate: staleDate),
       pushType: .token
     )
-    observe(activity, using: registration, generation: generation)
+    reconcileActivities(including: activity, using: registration, generation: generation)
   }
 
   func stop(flightId: String) async {
-    for activity in Activity<PlanoActivityAttributes>.activities where activity.attributes.flightId == flightId {
-      await endActivity(activity)
-    }
+    await stopActivities { $0.attributes.flightId == flightId }
   }
 
   func liveBinding(origin: String) -> String? {
@@ -370,37 +373,78 @@ private final class PlanoActivityCoordinator {
 
   func stop(flightId: String, origin: String, binding: String) async {
     guard liveBinding(origin: origin) == binding else { return }
-    for activity in Activity<PlanoActivityAttributes>.activities
-        where activity.attributes.flightId == flightId && activity.attributes.activityBinding == binding {
-      await endActivity(activity)
+    await stopActivities {
+      $0.attributes.flightId == flightId && $0.attributes.activityBinding == binding
     }
   }
 
+  private func stopActivities(where matches: (Activity<PlanoActivityAttributes>) -> Bool) async {
+    let endings = knownActivities().filter(matches).compactMap { beginEnding($0) }
+    for ending in endings { await ending.value }
+  }
+
   private func endActivity(_ activity: Activity<PlanoActivityAttributes>) async {
-    guard locallyEnding.insert(activity.id).inserted else { return }
+    if let ending = beginEnding(activity) { await ending.value }
+  }
+
+  private func beginEnding(_ activity: Activity<PlanoActivityAttributes>, generation: UUID? = nil) -> Task<Void, Never>? {
+    guard locallyEnding[activity.id] == nil else { return nil }
+    locallyEnding[activity.id] = activity
     removeObservation(for: activity)
     // Removing the observation can cancel the upload task that requested dismissal.
-    await Task { await activity.end(nil, dismissalPolicy: .immediate) }.value
-    locallyEnding.remove(activity.id)
+    return Task {
+      defer { locallyEnding[activity.id] = nil }
+      if let generation, !isCurrent(generation) { return }
+      await activity.end(nil, dismissalPolicy: .immediate)
+    }
   }
 
   private func isCurrent(_ current: UUID) -> Bool {
     !Task.isCancelled && generation == current
   }
 
+  private func isLive(_ activity: Activity<PlanoActivityAttributes>) -> Bool {
+    locallyEnding[activity.id] == nil && activity.activityState != .ended && activity.activityState != .dismissed
+  }
+
+  private func knownActivities(including incoming: Activity<PlanoActivityAttributes>? = nil) -> [Activity<PlanoActivityAttributes>] {
+    var candidates = Activity<PlanoActivityAttributes>.activities
+    var knownIDs = Set(candidates.map(\.id))
+    // A requested or streamed activity can lead ActivityKit's static snapshot.
+    for observer in observers.values where knownIDs.insert(observer.activity.id).inserted {
+      candidates.append(observer.activity)
+    }
+    // Retirement still owns handles removed from observation during dismissal.
+    for activity in locallyEnding.values where knownIDs.insert(activity.id).inserted {
+      candidates.append(activity)
+    }
+    if let incoming, knownIDs.insert(incoming.id).inserted {
+      candidates.append(incoming)
+    }
+    return candidates
+  }
+
+  private func reconcileActivities(including incoming: Activity<PlanoActivityAttributes>? = nil,
+                                   using registration: ActivityRegistration, generation: UUID) {
+    guard isCurrent(generation), let binding = registration.binding else { return }
+    let candidates = knownActivities(including: incoming)
+    let identities = candidates.map {
+      ActivityIdentity(id: $0.id, flightID: $0.attributes.flightId, binding: $0.attributes.activityBinding, eligible: isLive($0))
+    }
+    let retained = ActivityIdentity.retainedIDs(in: identities, binding: binding, observedIDs: Set(observers.keys))
+    for activity in candidates where isLive(activity) {
+      if retained.contains(activity.id) {
+        observe(activity, using: registration, generation: generation)
+      } else {
+        // Duplicates and retired bindings must stop uploading before dismissal.
+        _ = beginEnding(activity, generation: generation)
+      }
+    }
+  }
+
   private func observe(_ activity: Activity<PlanoActivityAttributes>, using registration: ActivityRegistration, generation: UUID) {
     let id = activity.id
-    guard isCurrent(generation), let binding = registration.binding, observers[id] == nil, !locallyEnding.contains(id),
-          activity.activityState != .ended, activity.activityState != .dismissed else { return }
-    guard activity.attributes.activityBinding == binding else {
-      // A delayed remote start can arrive after the registration changes.
-      // Its immutable attributes cannot authorize token upload in this session.
-      Task {
-        guard isCurrent(generation) else { return }
-        await endActivity(activity)
-      }
-      return
-    }
+    guard isCurrent(generation), observers[id] == nil, isLive(activity) else { return }
     let slot = ActivityTokenSlot.update(activityID: id, flightID: activity.attributes.flightId)
     let tokens = Task {
       if let token = activity.pushToken {
@@ -424,7 +468,7 @@ private final class PlanoActivityCoordinator {
         }
       }
     }
-    observers[id] = ActivityObservers(tokens: tokens, states: states)
+    observers[id] = ActivityObservers(activity: activity, tokens: tokens, states: states)
   }
 
   private func removeObservation(for activity: Activity<PlanoActivityAttributes>) {
