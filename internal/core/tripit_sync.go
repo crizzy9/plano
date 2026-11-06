@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+const tripItReceiptColumns = `(
+  owner TEXT NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
+  leg_key TEXT NOT NULL, date TEXT NOT NULL, PRIMARY KEY(owner,leg_key)
+)`
+
+const tripItReceiptIndex = `CREATE INDEX IF NOT EXISTS tripit_imported_legs_by_date ON tripit_imported_legs(date);`
+
 const tripItSyncSchema = `
 CREATE TABLE IF NOT EXISTS tripit_subscriptions (
   owner TEXT PRIMARY KEY REFERENCES installations(id) ON DELETE CASCADE,
@@ -17,11 +24,36 @@ CREATE TABLE IF NOT EXISTS tripit_subscriptions (
   matched INTEGER NOT NULL DEFAULT 0, unmatched INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS tripit_sync_due ON tripit_subscriptions(due_ns);
-CREATE TABLE IF NOT EXISTS tripit_imported_legs (
-  owner TEXT NOT NULL REFERENCES tripit_subscriptions(owner) ON DELETE CASCADE,
-  leg_key TEXT NOT NULL, date TEXT NOT NULL, PRIMARY KEY(owner,leg_key)
-);
-`
+CREATE TABLE IF NOT EXISTS tripit_imported_legs ` + tripItReceiptColumns + `;
+` + tripItReceiptIndex
+
+// Older databases tied exact-key receipts to a subscription. Move the foreign
+// key to the installation so stopping sync can erase the feed without making
+// those keys importable again. Keep the existing table name and row shape.
+func migrateTripItReceipts(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var legacy bool
+	if err := tx.QueryRow(`SELECT EXISTS (
+  SELECT 1 FROM pragma_foreign_key_list('tripit_imported_legs')
+  WHERE "table"='tripit_subscriptions' AND "from"='owner' AND "to"='owner'
+)`).Scan(&legacy); err != nil {
+		return err
+	}
+	if legacy {
+		if _, err := tx.Exec(`CREATE TABLE tripit_imported_legs_new ` + tripItReceiptColumns + `;
+INSERT INTO tripit_imported_legs_new(owner,leg_key,date) SELECT owner,leg_key,date FROM tripit_imported_legs;
+DROP TABLE tripit_imported_legs;
+ALTER TABLE tripit_imported_legs_new RENAME TO tripit_imported_legs;
+` + tripItReceiptIndex); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
 
 type TripItStatus struct {
 	Enabled    bool       `json:"enabled"`
@@ -139,7 +171,11 @@ WHERE owner=? AND generation=? AND lease_ns=?`, next.UnixNano(), now.UnixNano(),
 			return err
 		}
 		if count != 0 {
-			if err := trackFlight(ctx, tx, job.Owner, match.FlightID, "", now); err != nil {
+			day, err := time.Parse(time.DateOnly, match.Date)
+			if err != nil {
+				return err
+			}
+			if err := trackAutomaticFlight(ctx, tx, job.Owner, match.FlightID, now, day.AddDate(0, 0, 3)); err != nil {
 				return err
 			}
 		}

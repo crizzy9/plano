@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -239,9 +240,13 @@ CREATE INDEX IF NOT EXISTS bookings_by_locator ON bookings(owner, locator_hash);
 CREATE TABLE IF NOT EXISTS shares (
   token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, flight_id TEXT NOT NULL, expires INTEGER NOT NULL,
   FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
-);` + radarSchema + providerTrackSchema + pickupSchema + friendSchema + airportCacheSchema + passportArchiveSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema + delayProviderSamplesSchema + delayEarlySamplesSchema + tfmsProgramCancellationSchema + calendarSyncSchema + atfmSlotSchema); err != nil {
+);` + radarSchema + providerTrackSchema + pickupSchema + friendSchema + airportCacheSchema + passportArchiveSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema + delayProviderSamplesSchema + delayEarlySamplesSchema + tfmsProgramCancellationSchema + calendarSyncSchema + automaticFlightReceiptSchema + atfmSlotSchema); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	if err := migrateTripItReceipts(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("upgrade TripIt import receipts: %w", err)
 	}
 	tfmsLegacyReplayCutoff, err := upgradeTFMSAdvisoryDeadlines(db, time.Now(), legacyAdvisories)
 	if err != nil {

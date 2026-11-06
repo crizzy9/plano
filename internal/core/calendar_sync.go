@@ -28,8 +28,8 @@ func (s *Store) CalendarImportCompleted(ctx context.Context, owner, key string) 
 	return found, err
 }
 
-// CommitCalendarImport saves receipts in the same transaction as tracking.
-// Receipts survive untracking, including when two deliveries resolve together.
+// CommitCalendarImport saves both input and resolved flight receipts in the
+// same transaction as tracking. Receipts survive untracking.
 func (s *Store) CommitCalendarImport(ctx context.Context, owner string, legs []CalendarImportLeg) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -37,7 +37,6 @@ func (s *Store) CommitCalendarImport(ctx context.Context, owner string, legs []C
 	}
 	defer tx.Rollback()
 	now := time.Now()
-	tracked := make(map[string]bool, len(legs))
 	for _, leg := range legs {
 		res, err := tx.ExecContext(ctx, `INSERT INTO calendar_import_receipts(owner,digest,expires) VALUES(?,?,?)
 ON CONFLICT(owner,digest) DO NOTHING`, owner, calendarImportDigest(owner, leg.Key), leg.ExpiresAt.Unix())
@@ -48,13 +47,12 @@ ON CONFLICT(owner,digest) DO NOTHING`, owner, calendarImportDigest(owner, leg.Ke
 		if err != nil {
 			return err
 		}
-		if count == 0 || tracked[leg.FlightID] {
+		if count == 0 {
 			continue
 		}
-		if err := trackImportedFlight(ctx, tx, owner, leg.FlightID, "", now); err != nil {
+		if err := trackAutomaticFlight(ctx, tx, owner, leg.FlightID, now, leg.ExpiresAt); err != nil {
 			return err
 		}
-		tracked[leg.FlightID] = true
 	}
 	return s.commitOutbox(tx)
 }

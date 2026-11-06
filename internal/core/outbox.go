@@ -1239,6 +1239,12 @@ AND newer.observed_ns>r.observed_ns AND newer.observed_ns<=?)`,
 	if _, err := tx.ExecContext(ctx, `DELETE FROM calendar_import_receipts WHERE expires<=?`, now.Unix()); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM automatic_flight_receipts WHERE expires<=?`, now.Unix()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tripit_imported_legs WHERE date<?`, now.UTC().AddDate(0, 0, -2).Format(time.DateOnly)); err != nil {
+		return err
+	}
 	cutoff := now.Add(-atfmSlotRetention).UnixNano()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM atfm_slots WHERE observed_ns<=?`, cutoff); err != nil {
 		return err

@@ -104,6 +104,28 @@ func TestCalendarSyncAcknowledgesDistinctKeysForSameFlight(t *testing.T) {
 	checkCalendarSync(t, handler, token, unresolved, 200)
 }
 
+func TestCalendarSyncAliasAndTimeCorrectionDoesNotRetrack(t *testing.T) {
+	store, handler := calendarSyncFixture(t, calendarAliasSource{})
+	owner, token := calendarSyncInstallation(t, store)
+	other, otherToken := calendarSyncInstallation(t, store)
+	day := time.Now().UTC().AddDate(0, 0, 1).Format(time.DateOnly)
+	flightID := "demo-UA123-" + day
+	alias := fmt.Sprintf(`{"flights":[{"day":%q,"code":"DL100"}]}`, day)
+	checkCalendarSync(t, handler, token, alias, 200, day+" DL100")
+	assertCalendarTracks(t, store, owner, flightID)
+	if err := store.Untrack(t.Context(), owner, flightID); err != nil {
+		t.Fatal(err)
+	}
+
+	corrected := fmt.Sprintf(`{"flights":[{"day":%q,"code":"UA123","utcTime":"150000"},{"day":%q,"code":"UA456"}]}`, day, day)
+	checkCalendarSync(t, handler, token, corrected, 200, day+" UA123 150000", day+" UA456")
+	checkCalendarSync(t, handler, token, corrected, 200, day+" UA123 150000", day+" UA456")
+	assertCalendarTracks(t, store, owner, "demo-UA456-"+day)
+
+	checkCalendarSync(t, handler, otherToken, corrected, 200, day+" UA123 150000", day+" UA456")
+	assertCalendarTracks(t, store, other, flightID, "demo-UA456-"+day)
+}
+
 func TestCalendarSyncCommitsAvailableLegsDuringPartialProviderFailure(t *testing.T) {
 	store, handler := calendarSyncFixture(t, calendarAliasSource{})
 	owner, token := calendarSyncInstallation(t, store)
