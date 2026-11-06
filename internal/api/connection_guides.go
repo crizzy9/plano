@@ -16,6 +16,7 @@ type airportConnectionGuide struct {
 type connectionGuideDirections struct {
 	steps              []string
 	landside           bool
+	requiresScreening  bool
 	secureSameTerminal bool
 }
 
@@ -34,7 +35,9 @@ var airportConnectionGuides = []airportConnectionGuide{
 	{"EWR", "KEWR", "https://www.newarkairport.com/explore-ewr/airport-map", "https://www.newarkairport.com/flights/connections-guide", ewrConnectionDirections},
 	{"JFK", "KJFK", "https://www.jfkairport.com/explore-jfk/airport-map", "https://www.jfkairport.com/flights/connections-guide", jfkConnectionDirections},
 	{"LAX", "KLAX", "https://www.flylax.com/lax-terminal-maps", "https://www.flylax.com/sites/lax/files/2025-12/Terminal%20Connections%20Pedestrian%20Path%2025-1222.pdf", secureConnectionDirections(laxConnectionDirections)},
-	{iata: "ORD", icao: "KORD", mapURL: "https://maps.ord.flychicago.com/"},
+	{"ORD", "KORD", "https://maps.ord.flychicago.com/", "https://www.flychicago.com/ohare/tofrom/connecting/Pages/default.aspx", ordConnectionDirections},
+	{"DEN", "KDEN", "https://maps.flydenver.com/", "https://www.flydenver.com/about-den/facilities/#train", denConnectionDirections},
+	{"LHR", "EGLL", "https://www.heathrow.com/at-the-airport/airport-maps", "https://www.heathrow.com/connecting-flights", lhrConnectionDirections},
 }
 
 func (g airportConnectionGuide) matches(primary, icao string) bool {
@@ -58,10 +61,14 @@ func (r *ConnectionRules) routeForConnection(in, out feeds.Flight) (ConnectionRo
 		if !configured && (graph == nil || len(graph.nodes) == 0) && guide.directions != nil &&
 			!connectionDisrupted(in, out) && !connectionDeparted(out) {
 			if directions := guide.directions(in, out); len(directions.steps) != 0 {
-				if directions.landside {
+				switch {
+				case directions.landside:
 					route.TransferMinutes = defaultConnectionTerminalTransferMinutes
 					route.Instructions = append([]string{"Complete any required passport control and collect checked bags as directed. Check where to recheck them before going through security."}, directions.steps...)
-				} else {
+				case directions.requiresScreening:
+					route.TransferMinutes = defaultConnectionTerminalTransferMinutes
+					route.Instructions = directions.steps
+				default:
 					if directions.secureSameTerminal && connectionCode(in.ArrivalTerminal) != "" && connectionCode(out.DepartureTerminal) != "" {
 						route.TransferMinutes = defaultConnectionSameTerminalMinutes
 					}

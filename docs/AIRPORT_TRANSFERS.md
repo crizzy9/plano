@@ -9,10 +9,9 @@ the connection risk score.
 ## Official maps and connection directions
 
 Plano links to official terminal maps by default at SEA, DFW, ATL, SFO, EWR,
-JFK, LAX, and ORD. The map opens on the airport's website. When reported gates
-or terminals identify a supported path, Plano also shows directions. Secure
-routes apply when the traveler can stay past security. Public routes include
-screening at the onward terminal or gate area.
+JFK, LAX, ORD, DEN, and LHR. The map opens on the airport's website. When
+reported gates or terminals identify a supported path, Plano also shows
+directions. Secure routes apply when the traveler can stay past security.
 
 - SEA directions use walkways and the Blue, Green, and Yellow train lines.
   Follow airport staff and signs for shuttle buses during train interruptions.
@@ -43,10 +42,24 @@ screening at the onward terminal or gate area.
   bus with airport staff and follow posted signs. Trips involving unknown
   gates or remote gates in the 50s use the official map and general guidance.
   [LAX connector map](https://www.flylax.com/sites/lax/files/2025-12/Terminal%20Connections%20Pedestrian%20Path%2025-1222.pdf) · [LAWA construction notice](https://www.lawa.org/sites/lawa/files/2025-10/Construction%20Hot%20Topics_10.27.25.pdf) · [Terminal 5 status](https://www.flylax.com/terminals/terminal5)
+- ORD has secure walkways between Terminals 1, 2, and 3. For Terminal 5
+  transfers, Plano plans for the public Airport Transit System and screening.
+  Passengers who can stay past security may qualify for the Terminal Transfer
+  Bus between Terminal 5 and Terminal 1 or 3. Check current service and carry
+  your same-day onward boarding pass. [O’Hare connections](https://www.flychicago.com/ohare/tofrom/connecting/Pages/default.aspx) · [Terminal transportation](https://www.flychicago.com/ohare/ServicesAmenities/services/Pages/tbt.aspx)
+- DEN directions use the secure Train to the Gates between concourses A, B,
+  and C. Travelers arriving at A who need U.S. entry processing should follow
+  signs for customs in Jeppesen Terminal, recheck bags as directed, and clear
+  screening before taking the train to the onward concourse. [DEN facilities](https://www.flydenver.com/about-den/facilities/#train) · [International transfers](https://www.flydenver.com/international-travelers/)
+- LHR requires screening for every connection, including same-terminal
+  transfers. For flights on the same ticket, follow the purple Flight
+  Connections signs and use the free shuttle bus to change terminals. On
+  separate tickets, follow Arrivals and allow time for any immigration, bag
+  collection, check-in, and security. [Heathrow connections](https://www.heathrow.com/connecting-flights) · [Airport maps](https://www.heathrow.com/at-the-airport/airport-maps)
 
-These directions use general estimates for risk scoring. Verified public
-routes with another checkpoint use at least the 65-minute terminal-transfer
-estimate, plus the usual boarding reserve. The official map remains available
+These directions use general estimates for risk scoring. Built-in routes that
+plan for another checkpoint use the 65-minute terminal-transfer estimate plus
+the usual boarding reserve. The official map remains available
 when location information is incomplete or a connection is disrupted. Follow
 airport staff for passport control, baggage recheck, and current screening
 requirements.
