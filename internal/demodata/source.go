@@ -43,11 +43,14 @@ func flightAt(id string, now time.Time) (feeds.Flight, error) {
 	}
 	depart, arrive := day.Add(15*time.Hour), day.Add(20*time.Hour)
 	origin, destination, depGate, arrGate, distance := "SFO", "EWR", "F12", "C82", 2565
+	originZone, destinationZone := "America/Los_Angeles", "America/New_York"
 	if number == "UA456" {
 		depart, arrive = day.Add(22*time.Hour), day.Add(29*time.Hour)
 		origin, destination, depGate, arrGate, distance = "EWR", "LHR", "C84", "B39", 3465
+		originZone, destinationZone = "America/New_York", "Europe/London"
 	}
 	f := feeds.Flight{ID: id, Number: number, Origin: origin, Destination: destination, Status: "scheduled", ScheduledDeparture: &depart, ScheduledArrival: &arrive, DepartureGate: depGate, ArrivalGate: arrGate, DepartureTerminal: string(depGate[0]), ArrivalTerminal: string(arrGate[0]), TailNumber: "DEMO", AircraftType: "B789", DistanceMiles: &distance, ObservedAt: now, Source: demoSource}
+	f.OriginTimeZone, f.DestinationTimeZone = originZone, destinationZone
 	if !now.Before(depart.Add(-40 * time.Minute)) {
 		f.Status = "boarding"
 	}

@@ -16,9 +16,11 @@ var calendarZoneName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_
 
 // SubscriptionCalendar reads a bounded feed. Pass an inclusive YYYY-MM-DD
 // cutoff to leave older events outside the leg limit, or an empty cutoff for history.
-func SubscriptionCalendar(text, from string) (Itinerary, error) { return calendar(text, 1024, from) }
+func SubscriptionCalendar(text, from string) (Itinerary, error) {
+	return calendar(text, 1024, from, nil)
+}
 
-func calendar(text string, limit int, from string) (Itinerary, error) {
+func calendar(text string, limit int, from string, localDepartures map[Leg]bool) (Itinerary, error) {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "\n ", ""), "\n\t", "")
 	result := Itinerary{}
@@ -71,6 +73,11 @@ func calendar(text string, limit int, from string) (Itinerary, error) {
 				if !seen[leg] && len(result.Legs) <= limit {
 					result.Legs = append(result.Legs, leg)
 					seen[leg] = true
+				}
+				if localDepartures != nil && seen[leg] && !departure.IsZero() && len(startValue) == len(calendarDateTime) {
+					// A recognized TZID preserves the calendar event's wall clock.
+					clock := startValue[9:11] + ":" + startValue[11:13]
+					localDepartures[Leg{Number: leg.Number, Date: leg.Date, LocalDeparture: clock}] = true
 				}
 			}
 			code := bookingCode(description)
@@ -139,8 +146,7 @@ func calendarDeparture(value, zone string, locations map[string]*time.Location) 
 	if departure, err := time.Parse(calendarDateTime+"Z", value); err == nil {
 		return departure
 	}
-	if len(zone) > 128 || !calendarZoneName.MatchString(zone) || zone == "Local" || zone == "localtime" ||
-		zone == "posixrules" || strings.HasPrefix(zone, "posix/") || strings.HasPrefix(zone, "right/") {
+	if !validDepartureZone(zone) {
 		return time.Time{}
 	}
 	departure, err := time.Parse(calendarDateTime, value)

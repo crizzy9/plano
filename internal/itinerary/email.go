@@ -3,7 +3,6 @@ package itinerary
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/xml"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -44,18 +43,15 @@ func Email(raw []byte) (Itinerary, error) {
 	for _, leg := range result.Legs {
 		seen[leg] = true
 	}
-	timed := make(map[Leg]bool)
+	calendarLocalDepartures := make(map[Leg]bool)
 	var attachmentLocator string
 	for _, value := range parts.calendars {
-		extra, err := calendar(value, MaxFlights, "")
+		extra, err := calendar(value, MaxFlights, "", calendarLocalDepartures)
 		if err != nil {
 			continue
 		}
 		result.Truncated = result.Truncated || extra.Truncated
 		for _, leg := range extra.Legs {
-			if !leg.UTCDeparture.IsZero() {
-				timed[Leg{Number: leg.Number, Date: leg.Date}] = true
-			}
 			if !seen[leg] {
 				result.Legs = append(result.Legs, leg)
 				seen[leg] = true
@@ -65,8 +61,8 @@ func Email(raw []byte) (Itinerary, error) {
 			attachmentLocator = extra.BookingCode
 		}
 	}
-	// An exact start supersedes the same designator and date in the email body.
-	result.Legs = slices.DeleteFunc(result.Legs, func(leg Leg) bool { return timed[leg] })
+	result.Legs = slices.DeleteFunc(result.Legs, func(leg Leg) bool { return calendarLocalDepartures[leg] })
+	result.Legs = preferPreciseLegs(result.Legs)
 	if result.BookingCode == "" && len(result.Legs) == 1 {
 		result.BookingCode = attachmentLocator
 	}
@@ -144,37 +140,12 @@ func (parts *emailParts) read(header func(string) string, body io.Reader, depth 
 	}
 }
 
-func htmlText(value string) string {
-	decoder := xml.NewDecoder(strings.NewReader(value))
-	decoder.Strict, decoder.AutoClose, decoder.Entity = false, xml.HTMLAutoClose, xml.HTMLEntity
-	var output strings.Builder
-	var hidden int
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			return output.String()
-		}
-		switch current := token.(type) {
-		case xml.StartElement:
-			name := strings.ToLower(current.Name.Local)
-			if name == "script" || name == "style" || name == "head" {
-				hidden++
-			}
-			if hidden == 0 && (name == "br" || name == "p" || name == "div" || name == "tr") {
-				output.WriteByte('\n')
-			}
-			if hidden == 0 && (name == "td" || name == "th") {
-				output.WriteByte(' ')
-			}
-		case xml.EndElement:
-			name := strings.ToLower(current.Name.Local)
-			if hidden > 0 && (name == "script" || name == "style" || name == "head") {
-				hidden--
-			}
-		case xml.CharData:
-			if hidden == 0 {
-				output.Write(current)
-			}
+func preferPreciseLegs(legs []Leg) []Leg {
+	precise := make(map[Leg]bool)
+	for _, leg := range legs {
+		if !leg.UTCDeparture.IsZero() || leg.LocalDeparture != "" {
+			precise[Leg{Number: leg.Number, Date: leg.Date}] = true
 		}
 	}
+	return slices.DeleteFunc(legs, func(leg Leg) bool { return precise[leg] })
 }

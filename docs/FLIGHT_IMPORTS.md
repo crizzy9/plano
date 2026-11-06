@@ -4,6 +4,14 @@ Open **Tools → Import flights**. Plano imports only uniquely matched flight in
 
 The mobile calendar integration requests permission before reading event titles and departure times. On-demand and optional background scans send only recognized flight designators with departure dates or times to the selected self-host. Background sync enabled in an earlier release keeps sending dates until you turn it off and back on. iOS and Android decide when the background task can run.
 
+For an overnight flight, label the departure and arrival separately. Plano uses the departure date. If the confirmation supplies a local departure time, Plano matches the scheduled minute in the flight’s origin time zone. A missing origin time zone or multiple matching flights leaves that leg unresolved. Forwarded HTML tables with Flight, Departure, and Arrival headers can supply the same information.
+
+```text
+UA456 | Departure: 7 January 2027 5:00 PM | Arrival: 8 January 2027 5:00 AM
+```
+
+A labeled departure can also include a timestamp with a numeric UTC offset, such as `2027-01-07T17:00:00-05:00`. [RFC 3339 timestamp format](https://www.rfc-editor.org/rfc/rfc3339.html#section-5.6)
+
 ## Forward confirmation emails
 
 In the import screen, generate an email relay token. Each installation has one relay credential. Generating a replacement invalidates the previous token. A relay token can submit email for import. Installation credentials are required to view tracked flights or bookings.

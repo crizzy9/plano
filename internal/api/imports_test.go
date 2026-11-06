@@ -3,7 +3,6 @@ package api_test
 import (
 	"context"
 	"encoding/json"
-	"github.com/crizzy9/plano/internal/feeds"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 	"github.com/crizzy9/plano/internal/api"
 	"github.com/crizzy9/plano/internal/core"
 	"github.com/crizzy9/plano/internal/demodata"
+	"github.com/crizzy9/plano/internal/feeds"
 )
 
 type evolvingImportSource struct {
@@ -64,7 +64,12 @@ func TestRelayReplayRevocationAndPrivateBookingLookup(t *testing.T) {
 	owner := token(request(http.MethodPost, "/v1/installations", "", jsonType, `{}`, 201))
 	other := token(request(http.MethodPost, "/v1/installations", "", jsonType, `{}`, 201))
 	relay := token(request(http.MethodPost, "/v1/import/email-relay", owner, jsonType, `{}`, 201))
-	const body = "Subject: itinerary\r\nContent-Type: text/plain\r\n\r\nUA123 2027-01-05\r\nUA456 2027-01-07\r\nBooking reference: ZXC12B\r\n"
+	const body = "Subject: itinerary\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" +
+		`<p>Booking reference: ZXC12B</p><table>
+<tr><th>Flight</th><th>Departure Date</th><th>Departure Time</th><th>Arrival</th></tr>
+<tr><td>UA123</td><td>5 January 2027</td><td>7:00 AM</td><td>5 January 2027<br>3:00 PM</td></tr>
+<tr><td>UA456</td><td>7 January 2027</td><td>5:00 PM</td><td>8 January 2027<br>5:00 AM</td></tr>
+</table>`
 	request(http.MethodPost, "/v1/webhooks/email", owner, "message/rfc822", body, 401)
 	request(http.MethodGet, "/v1/tracked", relay, jsonType, "", 401)
 	partial := request(http.MethodPost, "/v1/webhooks/email", relay, "message/rfc822", body, 503)

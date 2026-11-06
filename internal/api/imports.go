@@ -73,7 +73,21 @@ func (s Server) resolveItinerary(ctx context.Context, parsed itinerary.Itinerary
 
 func (s Server) lookupLeg(ctx context.Context, leg itinerary.Leg) ([]feeds.Flight, error) {
 	if leg.UTCDeparture.IsZero() {
-		return s.lookup(ctx, leg.Number, leg.Date)
+		flights, err := s.lookup(ctx, leg.Number, leg.Date)
+		if err != nil || leg.LocalDeparture == "" {
+			return flights, err
+		}
+		seen := make(map[string]bool)
+		var matches []feeds.Flight
+		for _, flight := range flights {
+			if seen[flight.ID] || flight.ScheduledDeparture == nil ||
+				!leg.MatchesLocalDeparture(*flight.ScheduledDeparture, flight.OriginTimeZone) {
+				continue
+			}
+			seen[flight.ID] = true
+			matches = append(matches, flight)
+		}
+		return matches, nil
 	}
 	utc := leg.UTCDeparture.UTC()
 	dates := []string{utc.Format(time.DateOnly), utc.AddDate(0, 0, -1).Format(time.DateOnly), utc.AddDate(0, 0, 1).Format(time.DateOnly)}

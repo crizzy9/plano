@@ -13,8 +13,9 @@ const MaxFlights = 8
 var ErrInvalid = errors.New("no unambiguous dated flights in itinerary")
 
 type Leg struct {
-	Number, Date string
-	UTCDeparture time.Time
+	Number, Date   string
+	LocalDeparture string
+	UTCDeparture   time.Time
 }
 
 type Itinerary struct {
@@ -35,7 +36,7 @@ func Parse(text, date string) (Itinerary, error) {
 		return Itinerary{}, ErrInvalid
 	}
 	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(text)), "BEGIN:VCALENDAR") {
-		return calendar(text, MaxFlights, "")
+		return calendar(text, MaxFlights, "", nil)
 	}
 	return fromText(text, date), nil
 }
@@ -50,12 +51,28 @@ func fromText(text, date string) Itinerary {
 	text = booking.ReplaceAllString(text, " ")
 	var seen = make(map[Leg]bool)
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	global := dates(text)
-	if date == "" && len(global) == 1 {
-		date = global[0]
+	records := labeledTextRecords(lines, date)
+	globalDate := date
+	if globalDate == "" {
+		globalDate = soleUnlabeledDate(lines, records)
 	}
+	// A date-only duplicate can coexist temporarily with a more precise leg.
+	// Keep one extra candidate beyond two variants per permitted leg.
+	const candidateLimit = 2*MaxFlights + 1
 	var blockDate string
-	for _, line := range lines {
+	for index, line := range lines {
+		if record, labeled := records[index]; labeled {
+			blockDate = record.heading
+			globalDate = date
+			if leg := record.leg; leg.Number != "" && !seen[leg] {
+				result.Legs = append(result.Legs, leg)
+				seen[leg] = true
+			}
+			if len(result.Legs) == candidateLimit {
+				break
+			}
+			continue
+		}
 		lineDates := dates(line)
 		if len(lineDates) > 1 {
 			blockDate = ""
@@ -64,18 +81,19 @@ func fromText(text, date string) Itinerary {
 		if len(lineDates) == 1 {
 			blockDate = lineDates[0]
 		}
-		day := date
+		day := globalDate
 		if len(lineDates) == 1 || day == "" {
 			day = blockDate
 		}
 		if day == "" {
 			continue
 		}
-		result.Legs = addLegs(result.Legs, seen, line, day, time.Time{}, MaxFlights+1)
-		if len(result.Legs) > MaxFlights {
+		result.Legs = addLegs(result.Legs, seen, line, day, time.Time{}, candidateLimit)
+		if len(result.Legs) == candidateLimit {
 			break
 		}
 	}
+	result.Legs = preferPreciseLegs(result.Legs)
 	return limitItinerary(result, MaxFlights)
 }
 

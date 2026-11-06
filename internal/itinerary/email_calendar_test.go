@@ -10,20 +10,22 @@ import (
 func TestEmailPrefersTimedCalendarLegsToDuplicateBodyDate(t *testing.T) {
 	for _, test := range []struct {
 		name    string
+		body    string
 		extra   []string
 		hours   []int
 		locator string
 	}{
-		{name: "one precise leg", hours: []int{2}, locator: "ABC12D"},
+		{name: "one precise leg", body: "UA123 2026-12-07", hours: []int{2}, locator: "ABC12D"},
+		{name: "same local clock", body: "UA123 | Departure: 7 December 2026 18:00", hours: []int{2}, locator: "ABC12D"},
 		{
-			name: "distinct timed legs", hours: []int{2, 5},
+			name: "distinct timed legs", body: "UA123 2026-12-07", hours: []int{2, 5},
 			extra: []string{"BEGIN:VEVENT", "DTSTART;TZID=America/Los_Angeles:20261207T210000", "SUMMARY:UA123", "END:VEVENT"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			message := []string{
 				"Subject: Your trip", "Content-Type: multipart/mixed; boundary=plano-test", "",
-				"--plano-test", "Content-Type: text/plain", "", "UA123 2026-12-07",
+				"--plano-test", "Content-Type: text/plain", "", test.body,
 				"--plano-test", "Content-Type: text/calendar", "", "BEGIN:VCALENDAR",
 				"BEGIN:VEVENT", "DTSTART;TZID=America/Los_Angeles:20261207T180000", "SUMMARY:UA123",
 				"DESCRIPTION:Booking reference: ABC12D", "END:VEVENT",
@@ -42,5 +44,23 @@ func TestEmailPrefersTimedCalendarLegsToDuplicateBodyDate(t *testing.T) {
 				t.Fatalf("unexpected email itinerary: %+v, want legs %v and locator %q", result, want, test.locator)
 			}
 		})
+	}
+}
+
+func TestEmailKeepsDistinctLocalAndCalendarClocks(t *testing.T) {
+	message := []string{
+		"Subject: Your trip", "Content-Type: multipart/mixed; boundary=plano-test", "",
+		"--plano-test", "Content-Type: text/plain", "", "UA123 | Departure: 7 December 2026 21:00",
+		"--plano-test", "Content-Type: text/calendar", "", "BEGIN:VCALENDAR",
+		"BEGIN:VEVENT", "DTSTART;TZID=America/Los_Angeles:20261207T180000", "SUMMARY:UA123", "END:VEVENT",
+		"END:VCALENDAR", "--plano-test--", "",
+	}
+	result, err := Email([]byte(strings.Join(message, "\r\n")))
+	want := []Leg{
+		{Number: "UA123", Date: "2026-12-07", LocalDeparture: "21:00"},
+		{Number: "UA123", Date: "2026-12-07", UTCDeparture: time.Date(2026, time.December, 8, 2, 0, 0, 0, time.UTC)},
+	}
+	if err != nil || !slices.Equal(result.Legs, want) {
+		t.Fatalf("unexpected email itinerary: %+v, %v, want %v", result, err, want)
 	}
 }
