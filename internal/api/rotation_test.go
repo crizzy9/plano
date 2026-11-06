@@ -22,7 +22,8 @@ func TestTrackedRotationLegDetailsAndProviderTrack(t *testing.T) {
 	defer store.Close()
 	now := time.Now().Add(-time.Minute)
 	parent := feeds.Flight{ID: "out", ObservedAt: now}
-	inbound := feeds.Flight{ID: "in", Number: "UA7", Status: "airborne", ObservedAt: now}
+	inbound := feeds.Flight{ID: "in", Number: "UA7", Status: "airborne", TailNumber: "N1AA", ObservedAt: now,
+		ActualTakeoff: new(now.Add(-time.Hour))}
 	earlier := feeds.Flight{ID: "earlier", Number: "UA8", Status: "arrived", ObservedAt: now}
 	if err := store.Observe(ctx, parent, nil, []feeds.Flight{inbound, earlier}, nil); err != nil {
 		t.Fatal(err)
@@ -84,13 +85,40 @@ func TestTrackedRotationLegDetailsAndProviderTrack(t *testing.T) {
 	}
 	source.err = nil
 	source.beforeReturn = func() {
+		parent.ObservedAt = parent.ObservedAt.Add(time.Millisecond)
+		inbound.ObservedAt = parent.ObservedAt
+		inbound.EstimatedArrival = new(now.Add(time.Hour))
+		if err := store.Observe(ctx, parent, nil, []feeds.Flight{inbound, earlier}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result.Telemetry = nil
+	if err := json.Unmarshal(get("/v1/flights/in?rotationOf=out", ownerToken, 200), &result); err != nil ||
+		len(result.Telemetry) != 256 || result.Flight.EstimatedArrival == nil {
+		t.Fatalf("an estimate refresh dropped matching telemetry: %+v %v", result.Flight, err)
+	}
+	source.beforeReturn = func() {
+		parent.ObservedAt = parent.ObservedAt.Add(time.Millisecond)
+		inbound.ObservedAt = parent.ObservedAt
+		inbound.TailNumber = "N2BB"
+		inbound.ActualTakeoff = new(now.Add(-30 * time.Minute))
+		if err := store.Observe(ctx, parent, nil, []feeds.Flight{inbound, earlier}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result.Telemetry = nil
+	if err := json.Unmarshal(get("/v1/flights/in?rotationOf=out", ownerToken, 200), &result); err != nil ||
+		result.Flight.TailNumber != inbound.TailNumber || len(result.Telemetry) != 0 {
+		t.Fatalf("replacement aircraft got old inbound telemetry: %+v %v", result, err)
+	}
+	source.beforeReturn = func() {
 		if err := store.Untrack(ctx, owner, parent.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
 	get("/v1/flights/in?rotationOf=out", ownerToken, 404)
 	get("/v1/flights/in?rotationOf=out", ownerToken, 404)
-	if len(source.calls) != 3 {
+	if len(source.calls) != 5 {
 		t.Fatalf("provider request was not fenced after untracking: %v", source.calls)
 	}
 }

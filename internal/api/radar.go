@@ -2,7 +2,10 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"time"
+
+	"github.com/crizzy9/plano/internal/feeds"
 )
 
 func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) error {
@@ -12,7 +15,7 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 	}
 	query := r.URL.Query()
 	provider := query.Get("provider")
-	if (provider != "" || query.Get("providerAfter") != "" || query.Get("providerRevision") != "") && provider != "1" {
+	if (provider != "" || query.Get("providerAfter") != "" || query.Get("providerRevision") != "" || query.Get("receiverRevision") != "") && provider != "1" {
 		return errInvalid
 	}
 	after, err := parseRadarCursor(query.Get("after"))
@@ -27,35 +30,57 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 	if err != nil {
 		return err
 	}
-	const pageSize = 256
-	positions, err := s.Store.RadarPositions(r.Context(), owner, id, after, pageSize)
+	receiverRevision, err := parseReceiverRevision(query.Get("receiverRevision"))
 	if err != nil {
 		return err
 	}
-	result := map[string]any{"positions": positions}
-	if len(positions) > 0 {
-		result["cursor"] = positions[len(positions)-1].At.UTC().Format(time.RFC3339Nano)
-	}
+	const pageSize = 256
+	result := make(map[string]any)
+	var positions []feeds.Position
 	if provider == "1" {
 		providerLimit := pageSize
 		if providerRevision != nil {
 			// A replacement can fill the client's entire visible history.
 			providerLimit = 512
 		}
-		providerPositions, revision, err := s.Store.RadarProviderPositions(r.Context(), owner, id, providerAfter, providerRevision, providerLimit)
+		page, err := s.Store.RadarPage(r.Context(), owner, id, after, receiverRevision, providerAfter, providerRevision, pageSize, providerLimit)
 		if err != nil {
 			return err
 		}
-		result["providerPositions"] = providerPositions
-		if revision != nil {
-			result["providerRevision"] = revision.Format(time.RFC3339Nano)
+		positions = page.Positions
+		if page.ReceiverRevision != nil {
+			result["receiverRevision"] = strconv.FormatInt(*page.ReceiverRevision, 10)
 		}
-		if len(providerPositions) > 0 {
-			result["providerCursor"] = providerPositions[len(providerPositions)-1].At.UTC().Format(time.RFC3339Nano)
+		result["providerPositions"] = page.ProviderPositions
+		if page.ProviderRevision != nil {
+			result["providerRevision"] = page.ProviderRevision.Format(time.RFC3339Nano)
 		}
+		if len(page.ProviderPositions) > 0 {
+			result["providerCursor"] = page.ProviderPositions[len(page.ProviderPositions)-1].At.UTC().Format(time.RFC3339Nano)
+		}
+	} else {
+		positions, err = s.Store.RadarPositions(r.Context(), owner, id, after, pageSize)
+		if err != nil {
+			return err
+		}
+	}
+	result["positions"] = positions
+	if len(positions) > 0 {
+		result["cursor"] = positions[len(positions)-1].At.UTC().Format(time.RFC3339Nano)
 	}
 	respond(w, 200, result)
 	return nil
+}
+
+func parseReceiverRevision(value string) (*int64, error) {
+	if value == "" {
+		return nil, nil
+	}
+	revision, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || revision < 0 || strconv.FormatInt(revision, 10) != value {
+		return nil, errInvalid
+	}
+	return &revision, nil
 }
 
 func parseRadarCursor(cursor string) (*time.Time, error) {

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -35,12 +36,13 @@ type Store struct {
 }
 
 type Details struct {
-	Flight     feeds.Flight     `json:"flight"`
-	Events     []Event          `json:"events"`
-	Telemetry  []feeds.Position `json:"telemetry"`
-	Inbound    []feeds.Flight   `json:"inbound"`
-	Prediction *Prediction      `json:"prediction"`
-	Tracked    bool             `json:"-"`
+	Flight           feeds.Flight     `json:"flight"`
+	Events           []Event          `json:"events"`
+	Telemetry        []feeds.Position `json:"telemetry"`
+	ReceiverRevision string           `json:"receiverRevision,omitempty"`
+	Inbound          []feeds.Flight   `json:"inbound"`
+	Prediction       *Prediction      `json:"prediction"`
+	Tracked          bool             `json:"-"`
 }
 
 type Device struct {
@@ -341,8 +343,11 @@ func (s *Store) Details(ctx context.Context, id string) (Details, error) {
 func (s *Store) DetailsForInstallation(ctx context.Context, owner, id string) (Details, error) {
 	d := Details{Events: make([]Event, 0)}
 	var snapshot, telemetry, inbound, prediction []byte
-	err := s.db.QueryRowContext(ctx, `SELECT snapshot,telemetry,inbound,prediction,
-EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flights WHERE id=?`, owner, id).Scan(&snapshot, &telemetry, &inbound, &prediction, &d.Tracked)
+	var observedNS, receiverRevision int64
+	err := s.db.QueryRowContext(ctx, `SELECT snapshot,telemetry,inbound,prediction,observed_ns,
+COALESCE((SELECT revision_ns FROM radar_receiver_revisions WHERE flight_id=flights.id),0),
+EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flights WHERE id=?`, owner, id).
+		Scan(&snapshot, &telemetry, &inbound, &prediction, &observedNS, &receiverRevision, &d.Tracked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return d, ErrNotFound
 	}
@@ -396,7 +401,12 @@ EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flight
 		return d, err
 	}
 	if d.Tracked {
-		local, err := s.radarPositions(ctx, owner, id, nil, 2000)
+		d.ReceiverRevision = strconv.FormatInt(receiverRevision, 10)
+	}
+	if d.Tracked && d.Flight.TailNumber != "" {
+		// A concurrent observation can reset the receiver track after the detail
+		// snapshot has been read. Keep newer fixes out of the older response.
+		local, err := readRadarPositions(ctx, s.db, owner, id, nil, &observedNS, 2000)
 		if err != nil {
 			return d, err
 		}
@@ -436,12 +446,13 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 	var prior feeds.Flight
 	var raw, oldInbound, oldPrediction, oldTrack []byte
 	var estimateAnchors estimateAlertAnchors
-	var previousProvider string
+	var previousProvider, lastRadarTail string
 	provider := flight.AeroProviderID()
 	err = tx.QueryRowContext(ctx, `SELECT snapshot,inbound,prediction,telemetry,
-COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id),''), anchors.departure, anchors.arrival
+COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id),''),
+COALESCE((SELECT last_tail FROM radar_receiver_revisions WHERE flight_id=flights.id),''), anchors.departure, anchors.arrival
 FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flights.id WHERE flights.id=?`, flight.ID).
-		Scan(&raw, &oldInbound, &oldPrediction, &oldTrack, &previousProvider, &estimateAnchors.departure, &estimateAnchors.arrival)
+		Scan(&raw, &oldInbound, &oldPrediction, &oldTrack, &previousProvider, &lastRadarTail, &estimateAnchors.departure, &estimateAnchors.arrival)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -459,12 +470,22 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 			}
 		}
 		providerChanged := previousProvider != "" && provider != "" && provider != previousProvider
-		aircraftChanged := prior.TailNumber != "" && flight.TailNumber != "" && prior.TailNumber != flight.TailNumber
-		if aircraftChanged || providerChanged {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM radar_positions WHERE flight_id=?`, flight.ID); err != nil {
+		if prior.TailNumber != "" {
+			lastRadarTail = prior.TailNumber
+		}
+		aircraftChanged := lastRadarTail != "" && flight.TailNumber != "" && lastRadarTail != flight.TailNumber
+		tailWithdrawn := prior.TailNumber != "" && flight.TailNumber == ""
+		// A database from before receiver revisions can have fixes from an
+		// earlier aircraft even when its last snapshot omitted the tail.
+		tailRevealed := lastRadarTail == "" && flight.TailNumber != ""
+		if aircraftChanged || providerChanged || tailWithdrawn || tailRevealed {
+			if !tailWithdrawn || providerChanged {
+				lastRadarTail = flight.TailNumber
+			}
+			if err := resetRadarReceiver(ctx, tx, flight, lastRadarTail); err != nil {
 				return err
 			}
-			if track == nil && providerChanged {
+			if track == nil && (aircraftChanged || providerChanged || tailRevealed) {
 				track = make([]feeds.Position, 0)
 			}
 			// Do not keep legacy receiver fixes attributed to the previous aircraft.

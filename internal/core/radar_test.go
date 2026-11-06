@@ -74,6 +74,132 @@ func TestRadarAppendCursorAndCurrentAircraftGuard(t *testing.T) {
 	}
 }
 
+func TestRadarPageResetsAcrossMissingTailAndAircraftChange(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "radar-revision.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	takeoff := now.Add(-time.Hour)
+	flight := feeds.Flight{ID: "radar-revision", Number: "XY123", TailNumber: "N1AA", Status: "airborne", ActualTakeoff: &takeoff, ObservedAt: now}
+	provider := feeds.Position{At: now.Add(-time.Minute), Latitude: 33, Longitude: -100, Source: "flightaware_aeroapi"}
+	old := feeds.Position{At: now.Add(-time.Second), Latitude: 35, Longitude: -92, Source: "operator_readsb"}
+	fresh := feeds.Position{At: now.Add(-2 * time.Second), Latitude: 36, Longitude: -91, Source: "operator_readsb"}
+	if err := s.Observe(ctx, flight, []feeds.Position{provider, old}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	token, err := s.CreateInstallation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := s.Installation(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Track(ctx, owner, flight.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	sample := func(current feeds.Flight, position feeds.Position) {
+		t.Helper()
+		if err := s.recordRadarSamples(ctx, []radarSample{{current, position}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page := func(account string, after *time.Time, known *int64) RadarPage {
+		t.Helper()
+		result, err := s.RadarPage(ctx, account, flight.ID, after, known, nil, nil, 256, 256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	observeTail := func(tail string) {
+		t.Helper()
+		flight.TailNumber = tail
+		flight.ObservedAt = flight.ObservedAt.Add(time.Second)
+		if err := s.Observe(ctx, flight, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sample(flight, old)
+	initial := page(owner, nil, nil)
+	if initial.ReceiverRevision == nil || *initial.ReceiverRevision != 0 || len(initial.Positions) != 1 || len(initial.ProviderPositions) != 1 {
+		t.Fatalf("initial receiver page = %+v", initial)
+	}
+	observeTail("N1AA")
+	if result := page(owner, &old.At, initial.ReceiverRevision); result.ReceiverRevision == nil || *result.ReceiverRevision != 0 || len(result.Positions) != 0 {
+		t.Fatalf("ordinary observation reset the receiver cursor: %+v", result)
+	}
+	previous := flight
+	observeTail("")
+	withdrawn := page(owner, &old.At, initial.ReceiverRevision)
+	if withdrawn.ReceiverRevision == nil || *withdrawn.ReceiverRevision == 0 || len(withdrawn.Positions) != 0 || len(withdrawn.ProviderPositions) != 1 {
+		t.Fatalf("tail withdrawal should reset receiver only: %+v", withdrawn)
+	}
+	details, err := s.DetailsForInstallation(ctx, owner, flight.ID)
+	if err != nil || len(details.Telemetry) != 1 || details.Telemetry[0].Source != provider.Source {
+		t.Fatalf("legacy receiver fix survived tail withdrawal: %+v, %v", details.Telemetry, err)
+	}
+	observeTail("N1AA")
+	if restored := page(owner, &old.At, withdrawn.ReceiverRevision); restored.ReceiverRevision == nil ||
+		*restored.ReceiverRevision != *withdrawn.ReceiverRevision || len(restored.Positions) != 0 || len(restored.ProviderPositions) != 1 {
+		t.Fatalf("restoring the same tail should preserve provider history: %+v", restored)
+	}
+	observeTail("")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	observeTail("N2BB")
+	sample(previous, old)
+	sample(flight, fresh)
+	replacement := page(owner, &old.At, initial.ReceiverRevision)
+	if replacement.ReceiverRevision == nil || *replacement.ReceiverRevision == *withdrawn.ReceiverRevision ||
+		len(replacement.Positions) != 1 || !replacement.Positions[0].At.Equal(fresh.At) || len(replacement.ProviderPositions) != 0 {
+		t.Fatalf("new aircraft should replace both cached paths: %+v", replacement)
+	}
+	staleDetails, err := readRadarPositions(ctx, s.db, owner, flight.ID, nil, new(previous.ObservedAt.UnixNano()), 256)
+	if err != nil || len(staleDetails) != 0 {
+		t.Fatalf("new receiver fix leaked into older detail snapshot: %+v, %v", staleDetails, err)
+	}
+	foreign := page("untracked-installation", nil, nil)
+	if foreign.ReceiverRevision != nil || foreign.ProviderRevision != nil || foreign.Positions == nil || foreign.ProviderPositions == nil ||
+		len(foreign.Positions) != 0 || len(foreign.ProviderPositions) != 0 {
+		t.Fatalf("untracked reader got receiver or provider data: %+v", foreign)
+	}
+}
+
+func TestRadarFirstKnownTailClearsUnattributedLegacyTrack(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "radar-legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := t.Context()
+	now := time.Now().UTC()
+	flight := feeds.Flight{ID: "legacy-blank-tail", Number: "XY123", Status: "airborne", ObservedAt: now}
+	provider := feeds.Position{At: now.Add(-time.Minute), Latitude: 33, Longitude: -100, Source: "flightaware_aeroapi"}
+	if err := s.Observe(ctx, flight, []feeds.Position{provider}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	flight.TailNumber = "N2BB"
+	flight.ObservedAt = now.Add(time.Second)
+	if err := s.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := s.Details(ctx, flight.ID)
+	if err != nil || len(detail.Telemetry) != 0 || detail.Flight.TailNumber != flight.TailNumber {
+		t.Fatalf("newly identified aircraft inherited old telemetry: %+v, %v", detail, err)
+	}
+}
+
 type radarFixtureTransport func(*http.Request) (*http.Response, error)
 
 func (f radarFixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

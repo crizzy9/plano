@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS radar_positions (
   at_ns INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(flight_id,at_ns)
 );
 CREATE INDEX IF NOT EXISTS radar_positions_expiry ON radar_positions(at_ns);
+CREATE TABLE IF NOT EXISTS radar_receiver_revisions (
+  flight_id TEXT PRIMARY KEY REFERENCES flights(id) ON DELETE CASCADE,
+  revision_ns INTEGER NOT NULL, last_tail TEXT NOT NULL
+);
 `
 
 const radarFlightStatus = `json_extract(snapshot,'$.status') IN ('airborne','diverted')
@@ -28,6 +32,23 @@ AND json_extract(snapshot,'$.actualArrival') IS NULL`
 type radarSample struct {
 	flight   feeds.Flight
 	position feeds.Position
+}
+
+type RadarPage struct {
+	Positions         []feeds.Position
+	ReceiverRevision  *int64
+	ProviderPositions []feeds.Position
+	ProviderRevision  *time.Time
+}
+
+func resetRadarReceiver(ctx context.Context, tx *sql.Tx, flight feeds.Flight, lastTail string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM radar_positions WHERE flight_id=?`, flight.ID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO radar_receiver_revisions(flight_id,revision_ns,last_tail) VALUES(?,?,?)
+ON CONFLICT(flight_id) DO UPDATE SET revision_ns=excluded.revision_ns,last_tail=excluded.last_tail`,
+		flight.ID, flight.ObservedAt.UnixNano(), lastTail)
+	return err
 }
 
 func (s *Store) radarFlights(ctx context.Context, now time.Time) ([]feeds.Flight, error) {
@@ -122,17 +143,29 @@ func (s *Store) RadarPositions(ctx context.Context, owner, id string, after *tim
 	if _, err := s.Flight(ctx, id); err != nil {
 		return nil, err
 	}
-	return s.radarPositions(ctx, owner, id, after, limit)
+	return readRadarPositions(ctx, s.db, owner, id, after, nil, limit)
 }
 
-func (s *Store) radarPositions(ctx context.Context, owner, id string, after *time.Time, limit int) ([]feeds.Position, error) {
-	var rows *sql.Rows
-	var err error
-	if after == nil {
-		rows, err = s.db.QueryContext(ctx, `SELECT data FROM radar_positions WHERE flight_id=? AND EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=radar_positions.flight_id) ORDER BY at_ns DESC LIMIT ?`, id, owner, limit)
-	} else {
-		rows, err = s.db.QueryContext(ctx, `SELECT data FROM radar_positions WHERE flight_id=? AND at_ns>? AND EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=radar_positions.flight_id) ORDER BY at_ns ASC LIMIT ?`, id, after.UnixNano(), owner, limit)
+type radarRowsQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func readRadarPositions(ctx context.Context, db radarRowsQueryer, owner, id string, after *time.Time, observedNS *int64, limit int) ([]feeds.Position, error) {
+	query := `SELECT p.data FROM radar_positions p JOIN flights f ON f.id=p.flight_id
+WHERE p.flight_id=? AND EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=p.flight_id)
+AND COALESCE(json_extract(f.snapshot,'$.tailNumber'),'')<>''`
+	args := []any{id, owner}
+	if observedNS != nil {
+		query += ` AND f.observed_ns=?`
+		args = append(args, *observedNS)
 	}
+	if after == nil {
+		query += ` ORDER BY p.at_ns DESC LIMIT ?`
+	} else {
+		query += ` AND p.at_ns>? ORDER BY p.at_ns ASC LIMIT ?`
+		args = append(args, after.UnixNano())
+	}
+	rows, err := db.QueryContext(ctx, query, append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}
@@ -161,13 +194,17 @@ func (s *Store) RadarProviderPositions(ctx context.Context, owner, id string, af
 	if limit < 1 || limit > 2000 {
 		return nil, nil, errors.New("invalid radar page size")
 	}
+	return readRadarProviderPositions(ctx, s.db, owner, id, after, knownRevision, limit)
+}
+
+func readRadarProviderPositions(ctx context.Context, db rowQueryer, owner, id string, after, knownRevision *time.Time, limit int) ([]feeds.Position, *time.Time, error) {
 	var knownNS any
 	if knownRevision != nil {
 		knownNS = knownRevision.UnixNano()
 	}
 	var telemetry []byte
 	var revision sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT
+	err := db.QueryRowContext(ctx, `SELECT
   CASE WHEN t.owner IS NOT NULL THEN f.observed_ns END,
   CASE WHEN t.owner IS NOT NULL AND f.observed_ns IS NOT ? THEN f.telemetry END
 FROM flights f LEFT JOIN tracked t ON t.owner=? AND t.flight_id=f.id
@@ -213,6 +250,45 @@ WHERE f.id=?`, knownNS, owner, id).Scan(&revision, &telemetry)
 		}
 	}
 	return positions, &currentRevision, nil
+}
+
+// RadarPage reads both feeds from one snapshot so a receiver reset cannot
+// pair fixes from the previous aircraft with a newer provider revision.
+func (s *Store) RadarPage(ctx context.Context, owner, id string, receiverAfter *time.Time, receiverKnown *int64, providerAfter, providerKnown *time.Time, receiverLimit, providerLimit int) (RadarPage, error) {
+	if receiverLimit < 1 || receiverLimit > 2000 || providerLimit < 1 || providerLimit > 2000 {
+		return RadarPage{}, errors.New("invalid radar page size")
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return RadarPage{}, err
+	}
+	defer tx.Rollback()
+	var revision sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT CASE WHEN t.owner IS NOT NULL THEN COALESCE(r.revision_ns,0) END
+FROM flights f LEFT JOIN tracked t ON t.owner=? AND t.flight_id=f.id
+LEFT JOIN radar_receiver_revisions r ON r.flight_id=f.id WHERE f.id=?`, owner, id).Scan(&revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RadarPage{}, ErrNotFound
+	}
+	if err != nil {
+		return RadarPage{}, err
+	}
+	if !revision.Valid {
+		return RadarPage{Positions: []feeds.Position{}, ProviderPositions: []feeds.Position{}}, nil
+	}
+	page := RadarPage{ReceiverRevision: &revision.Int64}
+	if receiverKnown != nil && *receiverKnown != revision.Int64 {
+		receiverAfter = nil
+	}
+	page.Positions, err = readRadarPositions(ctx, tx, owner, id, receiverAfter, nil, receiverLimit)
+	if err != nil {
+		return RadarPage{}, err
+	}
+	page.ProviderPositions, page.ProviderRevision, err = readRadarProviderPositions(ctx, tx, owner, id, providerAfter, providerKnown, providerLimit)
+	if err != nil {
+		return RadarPage{}, err
+	}
+	return page, tx.Commit()
 }
 
 func mergeFlightPositions(provider, local []feeds.Position) []feeds.Position {

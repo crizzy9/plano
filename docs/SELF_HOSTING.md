@@ -389,8 +389,11 @@ Plano stops sampling stale flight lifecycle records and retains local points
 for seven days. The flight screen reads cached provider positions and receiver
 positions on independent cursors while a tracked flight is airborne. Provider
 positions refresh on the main `PLANO_REFRESH_INTERVAL`. The mobile app replaces
-its provider snapshot when the revision changes. Local receiver points appear
-only to an installation tracking the flight.
+its provider snapshot when the revision changes. A withdrawn tail number or a
+change of aircraft or provider instance clears the affected receiver history.
+The current app resets its receiver cursor and removes those points when the
+server reports the reset. Local receiver points appear only to an installation
+tracking the flight.
 
 The map uses bundled Natural Earth coastlines. The latest position identifies
 its source and UTC observation time. Altitude, ground speed and vertical motion

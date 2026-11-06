@@ -101,11 +101,74 @@ func TestRadarProviderPagesCachedPositionsIndependently(t *testing.T) {
 	if removed := decode(get(ownerToken, query)); removed.ProviderPositions == nil || len(removed.ProviderPositions) != 0 || removed.ProviderCursor != "" || removed.ProviderRevision != "" {
 		t.Fatalf("removed flight still returns provider fixes: %+v", removed)
 	}
-	for _, invalid := range []string{"provider=2", "provider=1&providerAfter=bad", "provider=1&providerRevision=bad", "provider=1&after=bad", "providerAfter=2026-01-01T00:00:00Z", "providerRevision=2026-01-01T00:00:00Z"} {
+	for _, invalid := range []string{"provider=2", "provider=1&providerAfter=bad", "provider=1&providerRevision=bad", "provider=1&after=bad", "providerAfter=2026-01-01T00:00:00Z", "providerRevision=2026-01-01T00:00:00Z", "receiverRevision=0", "provider=1&receiverRevision=-1", "provider=1&receiverRevision=00", "provider=1&receiverRevision=bad"} {
 		importTestRequest(t, handler, http.MethodGet, path+"?"+invalid, ownerToken, "", http.StatusBadRequest)
 	}
 	importTestRequest(t, handler, http.MethodGet, path+"?provider=1", "", "", http.StatusUnauthorized)
 	importTestRequest(t, handler, http.MethodGet, "/v1/flights/unknown-flight/radar?provider=1", ownerToken, "", http.StatusNotFound)
+}
+
+func TestRadarReceiverRevisionReportsAResetWithoutFixes(t *testing.T) {
+	service := newImportTestServer(t)
+	token, owner := newImportTestInstallation(t, service.Store)
+	other, _ := newImportTestInstallation(t, service.Store)
+	now := time.Now().UTC()
+	flight := feeds.Flight{ID: "radar-receiver-revision", Number: "XY123", Status: "airborne", TailNumber: "N1AA", ObservedAt: now}
+	observe := func() {
+		t.Helper()
+		if err := service.Store.Observe(t.Context(), flight, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observe()
+	if err := service.Store.Track(t.Context(), owner, flight.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	handler := service.Handler()
+	query := url.Values{"provider": {"1"}, "after": {now.Format(time.RFC3339Nano)}}
+	get := func(credential string) string {
+		t.Helper()
+		raw := importTestRequest(t, handler, http.MethodGet, "/v1/flights/"+flight.ID+"/radar?"+query.Encode(), credential, "", http.StatusOK)
+		var page struct {
+			Positions []feeds.Position `json:"positions"`
+			Cursor    string           `json:"cursor"`
+			Revision  string           `json:"receiverRevision"`
+		}
+		if err := json.Unmarshal([]byte(raw), &page); err != nil || page.Positions == nil || len(page.Positions) != 0 || page.Cursor != "" {
+			t.Fatalf("unexpected receiver page: %s, error = %v", raw, err)
+		}
+		return page.Revision
+	}
+	detailRevision := func(credential string) string {
+		t.Helper()
+		raw := importTestRequest(t, handler, http.MethodGet, "/v1/flights/"+flight.ID, credential, "", http.StatusOK)
+		var detail struct {
+			Revision string `json:"receiverRevision"`
+		}
+		if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+			t.Fatal(err)
+		}
+		return detail.Revision
+	}
+	initial := get(token)
+	if initial == "" || detailRevision(token) != initial {
+		t.Fatal("tracked detail and receiver page must share an initial revision")
+	}
+	query.Set("receiverRevision", initial)
+	flight.ObservedAt = flight.ObservedAt.Add(time.Millisecond)
+	observe()
+	if got := get(token); got != initial {
+		t.Fatalf("ordinary observation changed receiver revision to %q from %q", got, initial)
+	}
+	flight.TailNumber = ""
+	flight.ObservedAt = flight.ObservedAt.Add(time.Millisecond)
+	observe()
+	if got := get(token); got == "" || got == initial || detailRevision(token) != got {
+		t.Fatalf("receiver reset failed to advance both routes from %q to %q", initial, got)
+	}
+	if got := get(other); got != "" || detailRevision(other) != "" {
+		t.Fatalf("receiver revision leaked to an untracked installation: %q", got)
+	}
 }
 
 func TestRadarProviderRevisionReplacesCorrectedAndClearedHistory(t *testing.T) {

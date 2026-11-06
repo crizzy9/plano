@@ -333,8 +333,9 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
             <AircraftRotation flight={flight} legs={detail.inbound ?? []} open={(leg) =>
               navigation.push('Flight', { id: leg.id, number: leg.number, initial: leg, rotationOf: value?.tracked ? flight.id : undefined })} />
           )}
-          <FlightRadar key={`${api.server}:${id}:${flight.tailNumber ?? ''}:${flight.actualTakeoff ?? ''}:${!!value?.tracked}`}
-            api={api} flight={flight} tracked={value?.tracked === true} history={detail?.telemetry} />
+          <FlightRadar key={`${api.server}:${id}:${flight.tailNumber ?? ''}:${flight.actualTakeoff ?? ''}:${detail?.receiverRevision ?? ''}:${!!value?.tracked}`}
+            api={api} flight={flight} tracked={value?.tracked === true} history={detail?.telemetry}
+            detailRevision={detail?.receiverRevision} refreshFlight={refresh} />
           {detail && (!rotationSnapshot || !!detail.events?.length) && (
             <View style={layout.section}>
               <Heading>Flight updates</Heading>
@@ -567,27 +568,32 @@ function RadarReadout({ position }: { position: Position }) {
   );
 }
 
-function FlightRadar({ api, flight, tracked, history }: {
+function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFlight }: {
   api: PlanoAPI;
   flight: Flight;
   tracked: boolean;
   history?: Position[];
+  detailRevision?: string;
+  refreshFlight: () => void;
 }) {
   const id = flight.id;
   const inFlight = tracked && (flight.status === 'airborne' || flight.status === 'diverted') && !flight.actualLanding && !flight.actualArrival;
-  const cursor = useRef<string>(undefined);
+  const receiverCursor = useRef<{ after?: string; revision?: string }>({});
   const providerRevision = useRef<string>(undefined);
-  const [radar, setRadar] = useState<Position[]>([]);
+  const [receiver, setReceiver] = useState<{ revision?: string; positions: Position[] }>({ positions: [] });
   const [provider, setProvider] = useState<{ revision: string; positions: Position[] }>();
   const [stream, setStream] = useState<'ready' | 'unavailable' | 'interrupted'>();
   const [checkedAt, setCheckedAt] = useState(0);
+  const replacingAircraft = receiver.revision !== undefined && detailRevision !== receiver.revision;
   const points = useMemo(() => {
+    if (replacingAircraft) return [];
     if (provider && radarAfter(provider.revision, flight.observedAt)) {
       // A newer provider snapshot can correct or remove an earlier fix.
-      return mergeRadarPositions(provider.positions, history?.filter((point) => point.source === 'operator_readsb'), radar);
+      const localHistory = history?.filter((point) => point.source === 'operator_readsb');
+      return mergeRadarPositions(provider.positions, localHistory, receiver.positions);
     }
-    return mergeRadarPositions(history, radar);
-  }, [provider, flight.observedAt, history, radar]);
+    return mergeRadarPositions(history, receiver.positions);
+  }, [provider, flight.observedAt, history, receiver.positions, replacingAircraft]);
 
   useFocusEffect(useCallback(() => {
     if (!inFlight) return;
@@ -603,7 +609,8 @@ function FlightRadar({ api, flight, tracked, history }: {
       try {
         const knownRevision = providerRevision.current;
         const revision = knownRevision && radarAfter(knownRevision, flight.observedAt) ? knownRevision : flight.observedAt;
-        const result = await api.radar(id, cursor.current, revision);
+        const knownReceiver = receiverCursor.current;
+        const result = await api.radar(id, knownReceiver.after, revision, knownReceiver.revision);
         if (!focused || !foreground) return;
         setCheckedAt(Date.now());
         if (!result) {
@@ -617,11 +624,18 @@ function FlightRadar({ api, flight, tracked, history }: {
           providerRevision.current = nextRevision;
           setProvider({ revision: nextRevision, positions: result.providerPositions ?? [] });
         }
-        if (result.positions.length) {
-          const nextCursor = result.cursor ?? mergeRadarPositions(result.positions).at(-1)?.at;
-          if (result.positions.length === radarPageSize && nextCursor && nextCursor !== cursor.current) delay = 1_000;
-          if (nextCursor) cursor.current = nextCursor;
-          setRadar((previous) => mergeRadarPositions(previous, result.positions));
+        const nextReceiverRevision = result.receiverRevision;
+        const replaceReceiver = nextReceiverRevision !== undefined && nextReceiverRevision !== knownReceiver.revision;
+        if (replaceReceiver || result.positions.length) {
+          const nextCursor = result.positions.length ? result.cursor ?? mergeRadarPositions(result.positions).at(-1)?.at : undefined;
+          if (!replaceReceiver && result.positions.length === radarPageSize && nextCursor && nextCursor !== knownReceiver.after) delay = 1_000;
+          const receiverRevision = nextReceiverRevision ?? knownReceiver.revision;
+          receiverCursor.current = { after: replaceReceiver ? nextCursor : nextCursor ?? knownReceiver.after, revision: receiverRevision };
+          setReceiver((previous) => ({
+            revision: receiverRevision,
+            positions: mergeRadarPositions(replaceReceiver ? undefined : previous.positions, result.positions),
+          }));
+          if (replaceReceiver && detailRevision !== receiverRevision) refreshFlight();
         }
       } catch {
         delay *= 3;
@@ -645,13 +659,14 @@ function FlightRadar({ api, flight, tracked, history }: {
       clearTimeout(timer);
       subscription.remove();
     };
-  }, [api, id, inFlight, flight.observedAt]));
+  }, [api, id, inFlight, flight.observedAt, detailRevision, refreshFlight]));
 
   const latest = points.at(-1);
   if (!inFlight && !latest) return null;
   const age = latest ? checkedAt - radarInstant(latest.at).millis : Number.POSITIVE_INFINITY;
   const fresh = inFlight && stream === 'ready' && age >= -30_000 && age <= 120_000;
-  const note = stream === 'interrupted' ? 'Live updates are temporarily unavailable.'
+  const note = replacingAircraft ? 'Refreshing flight details before showing radar.'
+    : stream === 'interrupted' ? 'Live updates are temporarily unavailable.'
     : stream === 'unavailable' ? 'Live positions are unavailable on this server.'
     : latest ? 'Waiting for a fresh position.' : 'Waiting for the first position.';
   return (

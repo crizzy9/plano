@@ -19,13 +19,16 @@ func (s Server) rotationDetails(ctx context.Context, owner, parent, id string, n
 	trackCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	points, trackErr := s.Source.Track(trackCtx, leg.ID)
-	// The tracked relationship can change while the provider request runs.
+	// The tracked relationship or operating aircraft can change during the request.
 	current, immediate, err := s.Store.TrackedRotationLeg(ctx, owner, parent, id)
 	if err != nil {
 		return core.Details{}, err
 	}
 	details.Flight = current
-	if trackErr == nil && immediate && current.Status == "airborne" {
+	takeoffMatches := leg.ActualTakeoff == nil && current.ActualTakeoff == nil ||
+		leg.ActualTakeoff != nil && current.ActualTakeoff != nil && leg.ActualTakeoff.Equal(*current.ActualTakeoff)
+	if trackErr == nil && immediate && current.Status == "airborne" && current.ActualLanding == nil &&
+		current.ActualArrival == nil && current.TailNumber == leg.TailNumber && takeoffMatches {
 		if len(points) > 256 {
 			points = points[len(points)-256:]
 		}

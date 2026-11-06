@@ -61,6 +61,7 @@ export interface Position {
 export interface RadarBatch {
   positions: Position[];
   cursor?: string;
+  receiverRevision?: string;
   providerPositions?: Position[];
   providerCursor?: string;
   providerRevision?: string;
@@ -103,6 +104,7 @@ export interface FlightDetail {
   rotationSnapshot?: boolean;
   events?: FlightEvent[];
   telemetry?: Position[];
+  receiverRevision?: string;
   inbound?: Flight[];
   prediction?: Prediction | null;
   weather?: AirportWeather[];
@@ -674,9 +676,10 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
       const query = rotationOf ? `?${new URLSearchParams({ rotationOf })}` : '';
       return authenticated<FlightDetail>(`${flightPath(id)}${query}`);
     },
-    async radar(id: string, after?: string, providerRevision?: string) {
+    async radar(id: string, after?: string, providerRevision?: string, receiverRevision?: string) {
       const query = new URLSearchParams({ provider: '1' });
       if (after) query.set('after', after);
+      if (receiverRevision !== undefined) query.set('receiverRevision', receiverRevision);
       if (providerRevision) query.set('providerRevision', providerRevision);
       try {
         return await authenticated<RadarBatch>(`${flightPath(id)}/radar?${query}`);
