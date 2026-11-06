@@ -22,6 +22,7 @@ type NativeLive = {
   disableAndroidPush?: (origin: string, expected: string | null, suppress: boolean) => Promise<RetiredAndroidPush | null>;
   androidWidgetDetailsEnabled?: () => Promise<boolean>;
   setAndroidWidgetDetailsEnabled?: (enabled: boolean) => Promise<void>;
+  resolveWidgetFlight?: (origin: string, key: string) => Promise<string | null>;
   nextIOSPushRevision?: () => Promise<string>;
   retireIOSPush?: (origin: string, token: string) => Promise<string>;
 };
@@ -57,6 +58,11 @@ export async function androidWidgetDetailsEnabled() {
 export async function setAndroidWidgetDetailsEnabled(enabled: boolean) {
   if (!native?.setAndroidWidgetDetailsEnabled) throw new Error('Widget settings require a current Android build of Plano.');
   await native.setAndroidWidgetDetailsEnabled(enabled);
+}
+
+export async function resolveAndroidWidgetFlight(origin: string, key: string) {
+  if (Platform.OS !== 'android') return null;
+  return await native?.resolveWidgetFlight?.(origin, key) ?? null;
 }
 
 export async function selectAndroidPushOrigin(origin: string) {

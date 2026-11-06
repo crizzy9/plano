@@ -298,6 +298,12 @@ gate, terminal, and seat from the next flight update. This setting applies to
 the device. Details can be visible on a lock screen that supports widgets.
 **Hide flight details on widget** removes the details from the widget cache.
 
+Tap a widget showing a current flight to open its details in Plano. The
+widget sends an opaque key scoped to the active alert session. Plano checks
+that the widget still shows the same flight and that your installation still
+tracks it. Tap routing starts with the next valid flight update after an
+upgrade. A stale widget tap opens Plano without selecting a flight.
+
 ## Local radar and sharing
 
 With `PLANO_ADSB_URL` configured, the receiver worker samples matching

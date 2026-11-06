@@ -61,6 +61,7 @@ internal data class WidgetFlightProgress(
   val departureAt: Long,
   val arrivalAt: Long,
   val details: WidgetFlightDetails? = null,
+  val flightId: String? = null,
 ) {
   val expiresAt: Long
     get() = observedAt + WIDGET_FRESH_MILLIS

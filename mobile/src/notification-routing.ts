@@ -2,13 +2,16 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { NavigationContainerRefWithCurrent } from '@react-navigation/native';
 import type { NotificationResponse } from 'expo-notifications';
 import { Linking, Platform } from 'react-native';
-import { createAPI, loadServer, type Flight } from './api';
+import { createAPI, loadServer, withActiveAndroidPushOrigin, type Flight } from './api';
+import { resolveAndroidWidgetFlight } from './live';
 import type { Routes } from './screens';
 
 interface AlertRoute {
   flightId: string;
   connectionInboundId?: string;
 }
+
+type TapRoute = AlertRoute | { widgetKey: string };
 
 const notificationPrefix = 'plano://notification/';
 
@@ -17,7 +20,7 @@ function validID(id: unknown): id is string {
     id !== '.' && id !== '..' && !/[^A-Za-z0-9_.-]/.test(id);
 }
 
-export function notificationRouteFromURL(url: string | null): AlertRoute | undefined {
+export function notificationRouteFromURL(url: string | null): TapRoute | undefined {
   if (!url?.startsWith(notificationPrefix)) return;
   const segments = url.slice(notificationPrefix.length).split('/');
   const [kind, flightId, connectionInboundId] = segments;
@@ -25,6 +28,9 @@ export function notificationRouteFromURL(url: string | null): AlertRoute | undef
   if (kind === 'flight' && segments.length === 2) return { flightId };
   if (kind === 'connection' && segments.length === 3 && validID(connectionInboundId) && connectionInboundId !== flightId) {
     return { flightId, connectionInboundId };
+  }
+  if (kind === 'widget' && segments.length === 2 && flightId.length === 64 && !/[^0-9a-f]/.test(flightId)) {
+    return { widgetKey: flightId };
   }
 }
 
@@ -55,7 +61,7 @@ export function notificationDestination(route: AlertRoute, tracked: Flight[]) {
 }
 
 interface PendingTap {
-  route: AlertRoute;
+  route: TapRoute;
   origin: string | undefined;
 }
 
@@ -78,7 +84,7 @@ export function useNotificationRouting(
     let active = true;
     let received = false;
     let removeResponses: (() => void) | undefined;
-    function receive(route: AlertRoute | undefined, sourceOrigin: string | undefined) {
+    function receive(route: TapRoute | undefined, sourceOrigin: string | undefined) {
       if (!active || !route) return;
       received = true;
       latest.current = { route, origin: sourceOrigin };
@@ -135,15 +141,36 @@ export function useNotificationRouting(
     const tap = pending;
     const serverAtTap = server;
     let active = true;
+    const currentTap = () => active && latest.current === tap && origin.current === serverAtTap;
     async function navigate() {
-      const { flightId, connectionInboundId } = tap.route;
+      let route: AlertRoute;
+      let widgetKey: string | undefined;
+      if ('widgetKey' in tap.route) {
+        widgetKey = tap.route.widgetKey;
+        const flightId = await resolveAndroidWidgetFlight(serverAtTap, widgetKey);
+        if (!validID(flightId) || !currentTap()) return;
+        route = { flightId };
+      } else {
+        route = tap.route;
+      }
+      const { flightId, connectionInboundId } = route;
       const ids = connectionInboundId ? [flightId, connectionInboundId] : [flightId];
       const tracked = await createAPI(serverAtTap, { access: 'existing-installation' }).tracked(ids);
-      const currentServer = await loadServer();
-      if (!active || latest.current !== tap || origin.current !== serverAtTap || currentServer !== serverAtTap || !navigation.isReady()) return;
-      const destination = notificationDestination(tap.route, tracked);
-      if (destination?.name === 'Connection') navigation.navigate('Connection', destination.params);
-      else if (destination?.name === 'Flight') navigation.navigate('Flight', destination.params);
+      const destination = notificationDestination(route, tracked);
+      if (!destination || !currentTap()) return;
+      const open = () => {
+        if (!currentTap() || !navigation.isReady()) return;
+        if (destination.name === 'Connection') navigation.navigate('Connection', destination.params);
+        else navigation.navigate('Flight', destination.params);
+      };
+      if (widgetKey) {
+        const key = widgetKey;
+        await withActiveAndroidPushOrigin(serverAtTap, async () => {
+          if (currentTap() && await resolveAndroidWidgetFlight(serverAtTap, key) === flightId) open();
+        });
+      } else if (await loadServer() === serverAtTap) {
+        open();
+      }
     }
     void navigate().catch(() => {}).finally(() => { if (active) discard(); });
     return () => { active = false; };

@@ -87,6 +87,13 @@ internal object AndroidPushSession {
   }
 
   @Synchronized
+  fun resolveWidgetFlight(context: Context, origin: String, key: String): String? {
+    val current = state(context)
+    if (!current.enabled || origin.isEmpty() || current.origin != origin) return null
+    return PlanoFlightWidget.resolveTap(context, current.generation, key)
+  }
+
+  @Synchronized
   fun setWidgetDetailsEnabled(context: Context, enabled: Boolean) {
     val current = state(context)
     PlanoFlightWidget.setDetailsEnabled(context, enabled, current.generation.takeIf { current.enabled })

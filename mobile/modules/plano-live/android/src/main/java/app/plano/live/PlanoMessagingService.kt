@@ -16,7 +16,7 @@ import expo.modules.notifications.service.ExpoFirebaseMessagingService
 private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
 private val notificationFlightId = Regex("[A-Za-z0-9_.-]{1,128}")
 
-private fun validNotificationFlightId(id: String?) =
+internal fun validNotificationFlightId(id: String?) =
   id != null && id != "." && id != ".." && notificationFlightId.matches(id)
 
 private fun notificationDestination(flightId: String?, inboundId: String?): Uri? {

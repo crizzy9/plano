@@ -7,6 +7,7 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.SystemClock
 import android.util.AtomicFile
 import android.view.View
@@ -35,12 +36,14 @@ internal object PlanoFlightWidget {
   private const val MAX_CANDIDATES = 8
   private const val MAX_STOPPED = 16
   private const val REQUEST_CODE = 731
+  private val tapKeyPattern = Regex("[0-9a-f]{64}")
   private var detailsBlocked = false
 
   private data class Cache(
     val detailsEnabled: Boolean = false,
     val flights: MutableMap<String, WidgetFlightProgress> = mutableMapOf(),
     val stopped: MutableMap<String, Long> = mutableMapOf(),
+    var expiredRoutingIds: Boolean = false,
   )
 
   // This is called only after the notification service accepts the FCM event's
@@ -68,10 +71,10 @@ internal object PlanoFlightWidget {
       if (progress == null || !progress.isFresh(now)) return
       cache.stopped.remove(key)
       val details = if (cache.detailsEnabled) WidgetFlightDetails.fromFlight(progress.phase, data) else null
-      cache.flights[key] = progress.copy(details = details)
+      cache.flights[key] = progress.copy(details = details, flightId = flightId.takeIf(::validNotificationFlightId))
     }
     write(context, cache, binding)
-    render(context, cache, now)
+    render(context, cache, now, binding)
   }
 
   @Synchronized
@@ -82,7 +85,7 @@ internal object PlanoFlightWidget {
     cache.flights.remove(key)
     cache.stopped[key] = now
     write(context, cache, binding)
-    render(context, cache, now)
+    render(context, cache, now, binding)
   }
 
   @Synchronized
@@ -92,7 +95,7 @@ internal object PlanoFlightWidget {
     try {
       write(context, cache, null)
     } finally {
-      render(context, cache, now)
+      render(context, cache, now, null)
     }
   }
 
@@ -111,14 +114,24 @@ internal object PlanoFlightWidget {
       if (!enabled) cacheFile(context).delete()
       throw cause
     } finally {
-      render(context, cache.copy(detailsEnabled = enabled && !detailsBlocked), now)
+      render(context, cache.copy(detailsEnabled = enabled && !detailsBlocked), now, binding)
     }
   }
 
   @Synchronized
   fun refresh(context: Context, binding: String?) {
     val now = System.currentTimeMillis()
-    render(context, read(context, now, binding), now)
+    val cache = read(context, now, binding)
+    if (cache.expiredRoutingIds) runCatching { write(context, cache, binding) }
+    render(context, cache, now, binding)
+  }
+
+  @Synchronized
+  fun resolveTap(context: Context, binding: String, key: String): String? {
+    if (!tapKeyPattern.matches(key)) return null
+    val now = System.currentTimeMillis()
+    val selected = selectWidgetFlight(read(context, now, binding).flights.values, now) ?: return null
+    return selected.flightId?.takeIf { selected.tapKey(binding) == key }
   }
 
   fun cancelRefresh(context: Context) {
@@ -126,7 +139,7 @@ internal object PlanoFlightWidget {
     refreshIntent(context, PendingIntent.FLAG_NO_CREATE)?.let(alarm::cancel)
   }
 
-  private fun render(context: Context, cache: Cache, now: Long) {
+  private fun render(context: Context, cache: Cache, now: Long, binding: String?) {
     val manager = AppWidgetManager.getInstance(context) ?: return
     val ids = manager.getAppWidgetIds(ComponentName(context, PlanoFlightWidgetProvider::class.java))
     if (ids.isEmpty()) return
@@ -151,7 +164,8 @@ internal object PlanoFlightWidget {
     } else {
       views.setChronometer(R.id.plano_widget_countdown, SystemClock.elapsedRealtime(), null, false)
     }
-    openApp(context)?.let { views.setOnClickPendingIntent(R.id.plano_widget_root, it) }
+    val tapKey = binding?.let { selected?.tapKey(it) }
+    openApp(context, tapKey)?.let { views.setOnClickPendingIntent(R.id.plano_widget_root, it) }
     manager.updateAppWidget(ids, views)
     val nextUpdate = selected?.expiresAt?.let { expiry -> minOf(expiry, countdown ?: expiry) }
     scheduleRefresh(context, nextUpdate, now)
@@ -187,8 +201,16 @@ internal object PlanoFlightWidget {
     return PendingIntent.getBroadcast(context, REQUEST_CODE, intent, flags or PendingIntent.FLAG_IMMUTABLE)
   }
 
-  private fun openApp(context: Context): PendingIntent? {
+  private fun WidgetFlightProgress.tapKey(binding: String): String? =
+    flightId?.let { hashPushIdentity("$binding\u0000$it") }
+
+  private fun openApp(context: Context, tapKey: String?): PendingIntent? {
     val intent = context.packageManager.getLaunchIntentForPackage(context.packageName) ?: return null
+    if (intent.component == null) return null
+    if (tapKey != null) {
+      intent.action = Intent.ACTION_VIEW
+      intent.data = Uri.parse("plano://notification/widget/$tapKey")
+    }
     intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
     return PendingIntent.getActivity(context, REQUEST_CODE, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
   }
@@ -213,6 +235,10 @@ internal object PlanoFlightWidget {
     val flights = data.optJSONArray("flights") ?: JSONArray()
     for (index in 0 until minOf(flights.length(), MAX_CANDIDATES)) {
       val entry = flights.getJSONObject(index)
+      val key = entry.getString("key")
+      val flightId = (entry.opt("flightId") as? String)?.takeIf {
+        validNotificationFlightId(it) && hashPushIdentity(it) == key
+      }
       val details = if (cache.detailsEnabled) entry.optJSONObject("details")?.let {
         WidgetFlightDetails.fromFields(it.optString("gate"), it.optString("terminal"), it.optString("seat"))
       } else null
@@ -222,8 +248,10 @@ internal object PlanoFlightWidget {
         entry.optLong("departureAt"),
         entry.optLong("arrivalAt"),
         details,
+        flightId,
       )
-      if (progress.isFresh(now)) cache.flights[entry.getString("key")] = progress
+      if (progress.isFresh(now)) cache.flights[key] = progress
+      else if (flightId != null) cache.expiredRoutingIds = true
     }
     val stopped = data.optJSONObject("stopped") ?: JSONObject()
     stopped.keys().asSequence().take(MAX_STOPPED).forEach { key ->
@@ -240,6 +268,7 @@ internal object PlanoFlightWidget {
     ).take(MAX_CANDIDATES).forEach { (key, progress) ->
       val entry = JSONObject().put("key", key).put("phase", progress.phase.name)
         .put("observedAt", progress.observedAt).put("departureAt", progress.departureAt).put("arrivalAt", progress.arrivalAt)
+      progress.flightId?.let { entry.put("flightId", it) }
       if (cache.detailsEnabled) progress.details?.let { details ->
         entry.put("details", JSONObject().put("gate", details.gate).put("terminal", details.terminal).put("seat", details.seat))
       }
