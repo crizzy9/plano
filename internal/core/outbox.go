@@ -73,6 +73,7 @@ WHERE d.platform='ios' AND d.kind='live_start' AND d.token=? AND b.binding<>''
 	}
 	var flight feeds.Flight
 	var seat string
+	var pendingImportantUpdate bool
 	if device.Kind == "live_update" {
 		// An update from a prior session can finish after the new start slot.
 		// A newer local activity may register before its own start token exists.
@@ -92,6 +93,17 @@ WHERE l.owner=? AND l.slot='start' AND l.revision>=? AND b.binding<>?)`,
 		}
 		if err = json.Unmarshal(raw, &flight); err != nil {
 			return err
+		}
+		if priorDeviceID != 0 {
+			// A rotation can retire the old device and cascade its outbox.
+			// Keep pending urgency only for the same activity and binding.
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM outbox o LEFT JOIN device_bindings b ON b.device_id=o.device_id
+WHERE o.device_id=? AND o.flight_id=? AND COALESCE(b.binding,'')=? AND o.done=0 AND o.expires>?
+AND json_extract(o.message,'$.APNsImmediateLiveUpdate')=1)`,
+				priorDeviceID, flight.ID, device.Binding, now.UnixNano()).Scan(&pendingImportantUpdate); err != nil {
+				return err
+			}
 		}
 	}
 	// Token ownership can move when an app is reinstalled. Cascade old queued work.
@@ -154,7 +166,11 @@ WHERE d.owner=? AND d.kind='live_start' AND COALESCE(b.binding,'')=?)`, flight.I
 		if finished(flight) {
 			kind = push.LiveEnd
 		}
+		if kind == push.LiveUpdate && pendingImportantUpdate && deviceID == priorDeviceID {
+			return s.commitOutbox(tx)
+		}
 		msg := liveMessage(flight, kind, seat, now)
+		msg.APNsImmediateLiveUpdate = kind == push.LiveUpdate && pendingImportantUpdate
 		if err := queueDevice(ctx, tx, deviceID, flight.ID, msg); err != nil {
 			return err
 		}
@@ -329,14 +345,22 @@ const (
 	liveHeartbeatInterval = time.Minute
 )
 
-func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time) push.Message {
+func liveContentState(flight feeds.Flight, seat string) *push.LiveState {
 	state := &push.LiveState{FlightID: flight.ID, FlightNumber: flight.Number, Status: flight.Status, Origin: flight.Origin, Destination: flight.Destination, DepartureGate: flight.DepartureGate, ArrivalGate: flight.ArrivalGate, DepartureTerminal: flight.DepartureTerminal, ArrivalTerminal: flight.ArrivalTerminal, Seat: seat, ObservedEpoch: flight.ObservedAt.Unix()}
 	if dep := firstTime(flight.ActualDeparture, flight.ActualTakeoff, flight.EstimatedDeparture, flight.ScheduledDeparture); dep != nil {
 		state.DepartureEpoch = dep.Unix()
 	}
-	if arr := effectiveArrival(flight); arr != nil {
+	if flight.Status == "diverted" {
+		// The provider can retain the original destination and its schedule.
+		state.ArrivalGate, state.ArrivalTerminal = "", ""
+	} else if arr := effectiveArrival(flight); arr != nil {
 		state.ArrivalEpoch = arr.Unix()
 	}
+	return state
+}
+
+func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time) push.Message {
+	state := liveContentState(flight, seat)
 	staleAt := now
 	if state.ObservedEpoch > 0 {
 		observed := now
@@ -345,7 +369,14 @@ func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time
 		}
 		staleAt = observed.Add(liveFreshness)
 	}
-	msg := push.Message{Kind: kind, FlightID: flight.ID, Title: flight.Number + " · " + flight.Origin + " to " + flight.Destination, Body: "Track this flight with Plano.", State: state, Timestamp: now, StaleAt: staleAt, ExpiresAt: now.Add(liveFreshness), CollapseID: hash(flight.ID)}
+	title := flight.Number + " · " + flight.Origin + " to " + flight.Destination
+	if flight.Status == "diverted" {
+		title = "Flight diverted"
+		if flight.Number != "" {
+			title = flight.Number + " · " + title
+		}
+	}
+	msg := push.Message{Kind: kind, FlightID: flight.ID, Title: title, Body: "Track this flight with Plano.", State: state, Timestamp: now, StaleAt: staleAt, ExpiresAt: now.Add(liveFreshness), CollapseID: hash(flight.ID)}
 	if observedNs := flight.ObservedAt.UnixNano(); state.ObservedEpoch > 0 && observedNs > 0 &&
 		time.Unix(0, observedNs).Equal(flight.ObservedAt) {
 		msg.LiveObservedNs = observedNs
@@ -354,6 +385,30 @@ func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time
 		msg.DismissAt = now.Add(20 * time.Minute)
 	}
 	return msg
+}
+
+func importantLiveChange(before, after *push.LiveState) bool {
+	if before.Status != after.Status {
+		switch after.Status {
+		case "boarding", "taxi_out", "airborne", "landed", "diverted":
+			return true
+		case "scheduled":
+			if before.Status != "" && before.Status != "unknown" {
+				return true
+			}
+		}
+	}
+	for _, location := range [][2]string{
+		{before.DepartureGate, after.DepartureGate},
+		{before.DepartureTerminal, after.DepartureTerminal},
+		{before.ArrivalGate, after.ArrivalGate},
+		{before.ArrivalTerminal, after.ArrivalTerminal},
+	} {
+		if !strings.EqualFold(strings.TrimSpace(location[0]), strings.TrimSpace(location[1])) {
+			return true
+		}
+	}
+	return false
 }
 
 func enqueueLive(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight, remapped bool) error {
@@ -382,13 +437,13 @@ LEFT JOIN device_bindings b ON b.device_id=d.id
 LEFT JOIN live_started l ON l.device_id=d.id AND l.flight_id=t.flight_id
 LEFT JOIN live_token_requests q ON q.device_id=d.id
 LEFT JOIN outbox recent ON NOT ? AND recent.id=(SELECT o.id FROM outbox o
-WHERE o.device_id=d.id AND o.flight_id=t.flight_id AND o.expires>CASE WHEN d.platform='android' THEN ? ELSE ? END
+WHERE o.device_id=d.id AND o.flight_id=t.flight_id AND o.expires>?
 AND (json_extract(o.message,'$.Kind') IN ('start','update') OR d.platform='android' AND json_extract(o.message,'$.Kind')='end')
 ORDER BY o.id DESC LIMIT 1)
 WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='live_start' AND NOT EXISTS (
   SELECT 1 FROM devices u LEFT JOIN device_bindings ub ON ub.device_id=u.id
   WHERE u.owner=d.owner AND u.kind='live_update' AND u.flight_id=t.flight_id AND COALESCE(ub.binding,'')=COALESCE(b.binding,'')
-)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, remapped, now.UnixNano(), recentExpiry.UnixNano(), flight.ID)
+)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, remapped, now.UnixNano(), flight.ID)
 	if err != nil {
 		return err
 	}
@@ -407,6 +462,7 @@ WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='l
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	previous := liveContentState(prior, "")
 	for _, a := range recipients {
 		kind := push.LiveUpdate
 		switch {
@@ -424,10 +480,24 @@ WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='l
 			kind = push.LiveStart
 		}
 		msg := liveMessage(flight, kind, a.seat, now)
-		if kind == push.LiveUpdate && len(a.recentMessage) > 0 {
+		if kind == push.LiveUpdate {
 			var recent push.Message
-			if err := json.Unmarshal(a.recentMessage, &recent); err != nil {
-				return err
+			if len(a.recentMessage) > 0 {
+				if err := json.Unmarshal(a.recentMessage, &recent); err != nil {
+					return err
+				}
+			}
+			if a.platform == "ios" {
+				baseline := previous
+				if recent.State != nil {
+					baseline = recent.State
+				}
+				msg.APNsImmediateLiveUpdate = importantLiveChange(baseline, msg.State)
+				if a.recentPending && recent.APNsImmediateLiveUpdate && !msg.APNsImmediateLiveUpdate {
+					// Routine refreshes must not replace a pending important
+					// change or reset its provider retry deadline.
+					continue
+				}
 			}
 			// A token registered from cached data may have queued stale state.
 			// Let the first fresh observation recover the surface immediately.

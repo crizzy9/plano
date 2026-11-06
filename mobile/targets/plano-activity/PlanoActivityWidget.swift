@@ -22,7 +22,7 @@ struct PlanoActivityWidget: Widget {
           FlightTimer(state: context.state, stale: context.isStale)
           Spacer()
           AirportGate(code: context.state.destination, gate: context.state.arrivalGateForDisplay,
-                      terminal: context.state.arrivalTerminalForDisplay)
+                      terminal: context.state.arrivalTerminalForDisplay, planned: context.state.isDiverted)
         }
         FlightProgress(state: context.state, stale: context.isStale)
         FlightSeat(seat: context.state.seat)
@@ -40,7 +40,7 @@ struct PlanoActivityWidget: Widget {
         }
         DynamicIslandExpandedRegion(.trailing) {
           AirportGate(code: context.state.destination, gate: context.state.arrivalGateForDisplay,
-                      terminal: context.state.arrivalTerminalForDisplay)
+                      terminal: context.state.arrivalTerminalForDisplay, planned: context.state.isDiverted)
         }
         DynamicIslandExpandedRegion(.center) {
           FlightTimer(state: context.state, stale: context.isStale)
@@ -84,8 +84,8 @@ private struct CompactFlightTiming: View {
   var body: some View {
     let now = Date.now
     Group {
-      if stale {
-        FlightPhaseIcon(state: state, stale: true)
+      if stale || state.isDiverted {
+        FlightPhaseIcon(state: state, stale: stale)
       } else if let end = state.countdownEnd(at: now, stale: false) {
         let countdown = Text(timerInterval: now...end, pauseTime: end, countsDown: true)
         ViewThatFits(in: .horizontal) {
@@ -132,9 +132,10 @@ private struct FlightPhaseIcon: View {
   let stale: Bool
 
   var body: some View {
-    Image(systemName: stale ? "clock" : state.phaseIcon)
+    let awaitingUpdate = stale && !state.isDiverted
+    Image(systemName: awaitingUpdate ? "clock" : state.phaseIcon)
       .foregroundStyle(.mint)
-      .accessibilityLabel(stale ? Text("Plano flight awaiting update") : Text("Plano flight, \(state.statusLabel)"))
+      .accessibilityLabel(awaitingUpdate ? Text("Plano flight awaiting update") : Text("Plano flight, \(state.displayedStatus(stale: stale))"))
   }
 }
 
@@ -152,10 +153,14 @@ private struct AirportGate: View {
   let code: String
   let gate: String?
   let terminal: String?
+  var planned = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
       Text(code).font(.title2.bold()).lineLimit(1).minimumScaleFactor(0.75)
+      if planned {
+        Text("Planned").font(.caption2).accessibilityLabel("Planned destination")
+      }
       if let gate, !gate.isEmpty {
         Text("Gate \(gate)").font(.caption)
       }
@@ -190,7 +195,7 @@ private struct FlightProgress: View {
   let stale: Bool
 
   var body: some View {
-    if let interval = state.arrivalProgress(at: .now, stale: stale) {
+    if let interval = state.arrivalProgress(at: .now) {
       ProgressView(timerInterval: interval, countsDown: false)
         .labelsHidden().tint(.mint)
         .accessibilityLabel(stale ? Text("Last estimated flight progress") : Text("Estimated flight progress"))
@@ -202,8 +207,9 @@ private struct FlightProgress: View {
 }
 
 private extension PlanoActivityAttributes.ContentState {
-  var arrivalGateForDisplay: String? { status == "diverted" ? nil : arrivalGate }
-  var arrivalTerminalForDisplay: String? { status == "diverted" ? nil : arrivalTerminal }
+  var isDiverted: Bool { status == "diverted" }
+  var arrivalGateForDisplay: String? { isDiverted ? nil : arrivalGate }
+  var arrivalTerminalForDisplay: String? { isDiverted ? nil : arrivalTerminal }
   var hasPushedBack: Bool { ["taxi_out", "airborne", "diverted"].contains(status) }
   var isArrivalPhase: Bool { hasPushedBack || ["landed", "arrived"].contains(status) }
   var countdownLabel: String { hasPushedBack ? "Arrival estimate" : "Until departure" }
@@ -212,15 +218,16 @@ private extension PlanoActivityAttributes.ContentState {
     switch status {
     case "cancelled": return "xmark.circle"
     case "landed", "arrived": return "airplane.arrival"
-    case "airborne", "diverted": return "airplane"
+    case "airborne": return "airplane"
+    case "diverted": return "exclamationmark.triangle"
     default: return "airplane.departure"
     }
   }
 
   func countdownEnd(at now: Date, stale: Bool) -> Date? {
     if hasPushedBack {
-      guard showsArrivalEstimate(stale: stale) else { return nil }
-      if departureEpoch > 0 { return arrivalProgress(at: now, stale: stale)?.upperBound }
+      guard showsArrivalEstimate else { return nil }
+      if departureEpoch > 0 { return arrivalProgress(at: now)?.upperBound }
       // A valid ETA can be available before the provider reports a start time.
       guard arrivalEpoch > 0 else { return nil }
       let arrival = Date(timeIntervalSince1970: Double(arrivalEpoch))
@@ -231,17 +238,17 @@ private extension PlanoActivityAttributes.ContentState {
     return departure > now ? departure : nil
   }
 
-  func arrivalProgress(at now: Date, stale: Bool = false) -> ClosedRange<Date>? {
-    guard showsArrivalEstimate(stale: stale), departureEpoch > 0, arrivalEpoch > departureEpoch else { return nil }
+  func arrivalProgress(at now: Date) -> ClosedRange<Date>? {
+    guard showsArrivalEstimate, departureEpoch > 0, arrivalEpoch > departureEpoch else { return nil }
     let departure = Date(timeIntervalSince1970: Double(departureEpoch))
     let arrival = Date(timeIntervalSince1970: Double(arrivalEpoch))
     guard departure <= now, arrival > now, arrival.timeIntervalSince(departure) <= maximumFlightInterval else { return nil }
     return departure...arrival
   }
 
-  private func showsArrivalEstimate(stale: Bool) -> Bool {
+  private var showsArrivalEstimate: Bool {
     // A diversion can carry the original destination's scheduled arrival.
-    hasPushedBack && (!stale || status != "diverted")
+    hasPushedBack && !isDiverted
   }
 
   func displayedStatus(stale: Bool) -> String {

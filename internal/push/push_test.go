@@ -114,6 +114,8 @@ func TestAPNsWireRequests(t *testing.T) {
 	collapsed.APNsCollapseID = strings.Repeat("a", 64)
 	update := fixtureActivity(LiveUpdate, now)
 	update.LiveObservedNs = now.Add(850 * time.Millisecond).UnixNano()
+	immediate := update
+	immediate.APNsImmediateLiveUpdate = true
 	for _, test := range []struct {
 		name, topic, pushType, priority, collapse string
 		message                                   Message
@@ -126,6 +128,7 @@ func TestAPNsWireRequests(t *testing.T) {
 		{"legacy start", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 0, ""},
 		{"bound start requests update token", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 1, binding},
 		{"update", "com.example.plano.push-type.liveactivity", "liveactivity", "5", "flight-update", update, 0, binding},
+		{"immediate update", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "flight-update", immediate, 0, binding},
 		{"end", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveEnd, now), 0, binding},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -167,6 +170,9 @@ func TestAPNsWireRequests(t *testing.T) {
 				}
 				if strings.Contains(string(body), "liveObservedNs") || strings.Contains(string(body), "LiveObservedNs") {
 					t.Errorf("APNs request contained Android live ordering metadata: %s", body)
+				}
+				if strings.Contains(strings.ToLower(string(body)), "apnsimmediateliveupdate") {
+					t.Errorf("APNs payload contained the internal delivery flag: %s", body)
 				}
 				var wire struct {
 					APS struct {
@@ -302,6 +308,7 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 	update.LiveObservedNs = now.UnixNano()
 	heartbeat := update
 	heartbeat.AndroidLiveHeartbeat = true
+	update.APNsImmediateLiveUpdate = true
 	end := fixtureActivity(LiveEnd, now)
 	end.LiveObservedNs = now.UnixNano()
 	messages := []Message{ordered, fixtureActivity(LiveStart, now), heartbeat, update, end, fixtureConnectionAlert(now)}
@@ -408,6 +415,9 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 			}
 			if strings.Contains(string(body), apnsFamily) {
 				t.Errorf("FCM request contained the APNs collapse override: %s", body)
+			}
+			if strings.Contains(strings.ToLower(string(body)), "apnsimmediateliveupdate") {
+				t.Errorf("FCM payload contained the APNs delivery flag: %s", body)
 			}
 			if sends == 2 {
 				return fixtureResponse(401, `{"error":{"status":"UNAUTHENTICATED"}}`, nil)
@@ -518,6 +528,35 @@ func TestLiveObservationTimeValidation(t *testing.T) {
 				t.Fatalf("prepare returned %v, wantError=%v", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestAPNsImmediateLiveUpdateValidation(t *testing.T) {
+	now := time.Unix(1800000000, 0)
+	for _, message := range []Message{fixtureAlert(now), fixtureActivity(LiveStart, now), fixtureActivity(LiveEnd, now)} {
+		message.APNsImmediateLiveUpdate = true
+		if _, err := message.prepare(now); err == nil {
+			t.Errorf("accepted APNs immediate delivery on %s", message.Kind)
+		}
+	}
+	for _, immediate := range []bool{false, true} {
+		message := fixtureActivity(LiveUpdate, now)
+		message.APNsImmediateLiveUpdate = immediate
+		raw, err := json.Marshal(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), `"APNsImmediateLiveUpdate"`) != immediate {
+			t.Fatalf("unexpected persisted delivery flag: %s", raw)
+		}
+		var queued Message
+		if err := json.Unmarshal(raw, &queued); err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := queued.prepare(now)
+		if err != nil || prepared.APNsImmediateLiveUpdate != immediate {
+			t.Fatalf("queued update with immediate=%v prepared with immediate=%v, error=%v", immediate, prepared.APNsImmediateLiveUpdate, err)
+		}
 	}
 }
 

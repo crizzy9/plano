@@ -455,6 +455,16 @@ foreground. Once the server receives it, earlier iOS registrations are retired
 and late requests at or below the cutoff are ignored. Registrations made after
 re-enabling alerts use newer revisions.
 
+Plano requests APNs priority 10 for Live Activity phase, gate, and terminal
+changes. ETA-only updates and routine refreshes use priority 5. A routine
+refresh leaves an outstanding important update and its retry schedule in
+place. APNs and the device control actual delivery.
+[Apple ActivityKit update frequency](https://developer.apple.com/documentation/ActivityKit/starting-and-updating-live-activities-with-activitykit-push-notifications#Determine-the-update-frequency)
+
+The provider may keep reporting the planned destination after a diversion.
+During a diversion, both apps show the diversion status and hide arrival
+timing, progress, gate, and terminal details.
+
 iOS state alerts for the same installation, flight, and category share an APNs
 collapse ID. A newer gate or carousel revision waits for any in-flight request
 in that category. Other alerts can send independently. APNs controls offline

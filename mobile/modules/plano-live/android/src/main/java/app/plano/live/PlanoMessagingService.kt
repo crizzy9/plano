@@ -140,7 +140,9 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     ).joinToString(" · ")
     val origin = data["origin"]?.takeIf { it.isNotBlank() }
     val destination = data["destination"]?.takeIf { it.isNotBlank() }
-    val route = if (origin != null && destination != null) getString(R.string.plano_live_route, origin, destination) else null
+    val route = if (phase != WidgetFlightPhase.DIVERTED && origin != null && destination != null) {
+      getString(R.string.plano_live_route, origin, destination)
+    } else null
     val genericTitle = getString(R.string.plano_live_progress_title)
     val title = listOfNotNull(data["flightNumber"]?.takeIf { it.isNotBlank() }, route)
       .joinToString(" · ").ifBlank { genericTitle }

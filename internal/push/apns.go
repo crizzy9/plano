@@ -198,7 +198,9 @@ func (a *APNs) request(m Message) ([]byte, http.Header, error) {
 				aps.InputPushToken = 1
 			}
 		case LiveUpdate:
-			headers.Set("apns-priority", "5")
+			if !m.APNsImmediateLiveUpdate {
+				headers.Set("apns-priority", "5")
+			}
 		case LiveEnd:
 			if !m.DismissAt.IsZero() {
 				aps.DismissalDate = m.DismissAt.Unix()

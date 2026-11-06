@@ -60,6 +60,18 @@ fun main() {
   check(landed.displayDeadline(now) == landed.expiresAt)
   check(landed.percent(now) == 100)
 
+  val diverted = checkNotNull(WidgetFlightProgress.fromEpochs("diverted", (now + 1_000L) / 1000,
+    (now - 900_000L) / 1000, (now + 1_800_000L) / 1000))
+  check(diverted.phase == WidgetFlightPhase.DIVERTED)
+  check(diverted.countdownTarget(now) == null)
+  check(diverted.copy(departureAt = now + 10_000L).countdownTarget(now) == null)
+  check(diverted.percent(now) == null)
+  check(diverted.displayDeadline(now) == diverted.expiresAt)
+  check(diverted.nextRefreshAt(now) == diverted.expiresAt)
+  val withDiversion = flights + ("diverted" to diverted)
+  check(selectWidgetFlight(withDiversion, now) == airborne)
+  check(selectWidgetFlight(withDiversion, now, "diverted") == diverted)
+
   val stoppedAt = now + 3_000L
   val newer = stoppedAt + 1_000L
   check(!acceptsLiveAfterStop(stoppedAt, false, LiveObservation(newer / 1000), newer))

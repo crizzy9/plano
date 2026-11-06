@@ -11,7 +11,7 @@ internal enum class WidgetFlightPhase(val priority: Int, val arrivalCountdown: B
   TAXI_OUT(2, true),
   LANDED(3),
   AIRBORNE(4, true),
-  DIVERTED(4, true);
+  DIVERTED(3);
 
   val departureDetails: Boolean
     get() = this == SCHEDULED || this == BOARDING
@@ -74,13 +74,15 @@ internal data class WidgetFlightProgress(
 
   fun percent(now: Long): Int? = when {
     phase == WidgetFlightPhase.LANDED -> 100
+    // A diversion can carry the original destination's arrival estimate.
+    phase == WidgetFlightPhase.DIVERTED -> null
     !phase.arrivalCountdown -> 0
     !hasValidFlightInterval -> null
     else -> ((now - departureAt).toDouble() / (arrivalAt - departureAt) * 100).toInt().coerceIn(0, 99)
   }
 
   fun countdownTarget(now: Long): Long? {
-    if (phase == WidgetFlightPhase.LANDED) return null
+    if (phase == WidgetFlightPhase.LANDED || phase == WidgetFlightPhase.DIVERTED) return null
     if (phase.arrivalCountdown && departureAt > 0 && !hasValidFlightInterval) return null
     val target = if (phase.arrivalCountdown) arrivalAt else departureAt
     return target.takeIf { it > 0 && it > now && it - now <= MAX_COUNTDOWN_MILLIS }
