@@ -179,7 +179,7 @@ AND (? IN (json_extract(f.snapshot,'$.origin'),json_extract(f.snapshot,'$.origin
 		return err
 	}
 	for _, item := range affected {
-		if err := saveEvent(ctx, tx, item.id, item.event); err != nil {
+		if err := saveEvent(ctx, tx, item.id, item.event, true); err != nil {
 			return err
 		}
 	}

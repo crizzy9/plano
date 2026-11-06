@@ -239,8 +239,8 @@ WHERE l.device_id=? AND o.done=1 AND json_extract(o.message,'$.Kind')=?`
 // A flight event can predate an installation's subscription. Track delivery
 // separately so later eligible subscribers still receive one check-in reminder.
 func queueCheckIn(ctx context.Context, tx *sql.Tx, flight feeds.Flight, now time.Time) error {
-	departure := effectiveDeparture(flight)
-	if departure == nil || flight.ActualDeparture != nil || finished(flight) || now.Before(departure.Add(-24*time.Hour)) || !now.Before(*departure) {
+	departure := checkInDeadline(flight, now)
+	if departure == nil {
 		return nil
 	}
 	event := Event{ID: hash(flight.ID + "\x00check_in"), Kind: "check_in", Title: "Check-in reminder", Body: "Check check-in availability for " + flight.Number + " with your airline.", At: now}
@@ -645,10 +645,23 @@ func (s *Store) deliver(ctx context.Context, sender PushSender, logger *slog.Log
 	// the lease again at the transport boundary without holding a transaction.
 	var expires int64
 	var connectionDirty, hasAdvisoryEvidence bool
-	const leasedRow = ` FROM outbox o WHERE o.id=? AND o.device_id=? AND o.lease_until=? AND o.done=0`
+	var flightEventKind string
+	var latestFlight []byte
+	var newerFlightEvent bool
+	var predictedDelay int
+	const leaseFilter = ` WHERE o.id=? AND o.device_id=? AND o.lease_until=? AND o.done=0`
+	const leasedRow = ` FROM outbox o` + leaseFilter
 	err := s.db.QueryRowContext(ctx, `SELECT o.expires, `+dirtyConnectionAlert+`,
-EXISTS(SELECT 1 FROM outbox_advisory_evidence WHERE outbox_id=o.id)`+leasedRow,
-		job.id, job.deviceID, job.lease).Scan(&expires, &connectionDirty, &hasAdvisoryEvidence)
+EXISTS(SELECT 1 FROM outbox_advisory_evidence WHERE outbox_id=o.id),
+COALESCE(json_extract(e.data,'$.kind'),''), f.snapshot,
+CASE WHEN json_extract(e.data,'$.kind')='delay_prediction' THEN COALESCE(json_extract(f.prediction,'$.delayMinutes'),0) ELSE 0 END,
+EXISTS(SELECT 1 FROM events newer WHERE newer.flight_id=e.flight_id AND newer.at_ns>e.at_ns
+  AND json_extract(newer.data,'$.kind')=json_extract(e.data,'$.kind')
+  AND EXISTS(SELECT 1 FROM outbox replacement WHERE replacement.device_id=o.device_id AND replacement.flight_id=o.flight_id
+    AND json_extract(replacement.message,'$.CollapseID')=newer.id))
+FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leaseFilter,
+		job.id, job.deviceID, job.lease).Scan(&expires, &connectionDirty, &hasAdvisoryEvidence,
+		&flightEventKind, &latestFlight, &predictedDelay, &newerFlightEvent)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
 			logger.Error("could not validate push lease", "job", job.id, "error", err)
@@ -664,6 +677,30 @@ EXISTS(SELECT 1 FROM outbox_advisory_evidence WHERE outbox_id=o.id)`+leasedRow,
 		}
 		return
 	}
+	if flightAlertSupersedable(flightEventKind) {
+		var current feeds.Flight
+		if err := json.Unmarshal(latestFlight, &current); err != nil {
+			logger.Error("could not validate flight push state", "job", job.id, "error", err)
+			return
+		}
+		now := time.Now()
+		if flightEventKind == "boarding" {
+			expires = min(expires, job.message.Timestamp.Add(boardingAlertLifetime).UnixNano())
+		}
+		if flightEventKind == "check_in" {
+			departure := checkInDeadline(current, now)
+			if departure == nil {
+				s.removeObsoletePush(ctx, logger, job)
+				return
+			}
+			expires = min(expires, departure.UnixNano())
+		}
+		if newerFlightEvent || !flightAlertRelevant(flightEventKind, current) || expires <= now.UnixNano() ||
+			flightEventKind == "delay_prediction" && predictedDelay < flightDelayAlertMinutes {
+			s.removeObsoletePush(ctx, logger, job)
+			return
+		}
+	}
 	if hasAdvisoryEvidence {
 		revised, err := outboxAdvisoryRevised(ctx, s.db, job.id, time.Now())
 		if err != nil {
@@ -673,10 +710,7 @@ EXISTS(SELECT 1 FROM outbox_advisory_evidence WHERE outbox_id=o.id)`+leasedRow,
 			return
 		}
 		if revised {
-			if _, err := s.db.ExecContext(ctx, `DELETE FROM outbox WHERE id=? AND device_id=? AND lease_until=? AND done=0`,
-				job.id, job.deviceID, job.lease); err != nil && ctx.Err() == nil {
-				logger.Error("could not remove obsolete advisory push", "job", job.id, "error", err)
-			}
+			s.removeObsoletePush(ctx, logger, job)
 			return
 		}
 		// Revocation can cascade the evidence rows while they are being checked.
@@ -694,6 +728,9 @@ EXISTS(SELECT 1 FROM outbox_advisory_evidence WHERE outbox_id=o.id)`+leasedRow,
 	if ctx.Err() != nil || !deadline.After(start) {
 		return
 	}
+	if expires < job.message.ExpiresAt.UnixNano() {
+		job.message.ExpiresAt = time.Unix(0, expires).UTC()
+	}
 	attempt, cancel := context.WithDeadline(ctx, deadline)
 	err = sender.Send(attempt, job.target, job.message)
 	cancel()
@@ -704,6 +741,13 @@ EXISTS(SELECT 1 FROM outbox_advisory_evidence WHERE outbox_id=o.id)`+leasedRow,
 	}
 	if err := s.resolve(ctx, job, err, time.Now()); err != nil && ctx.Err() == nil {
 		logger.Error("could not resolve push job", "job", job.id, "error", err)
+	}
+}
+
+func (s *Store) removeObsoletePush(ctx context.Context, logger *slog.Logger, job deliveryJob) {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM outbox WHERE id=? AND device_id=? AND lease_until=? AND done=0`,
+		job.id, job.deviceID, job.lease); err != nil && ctx.Err() == nil {
+		logger.Error("could not remove obsolete push", "job", job.id, "error", err)
 	}
 }
 

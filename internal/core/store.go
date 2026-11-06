@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(due, id) WHERE done = 0;
 CREATE INDEX IF NOT EXISTS outbox_by_device_flight ON outbox(device_id,flight_id,done,id);
+CREATE INDEX IF NOT EXISTS outbox_pending_by_flight ON outbox(flight_id) WHERE done = 0;
 CREATE TABLE IF NOT EXISTS live_wire_clocks (
   device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   flight_id TEXT NOT NULL REFERENCES flights(id) ON DELETE CASCADE, wire_epoch INTEGER NOT NULL,
@@ -560,28 +561,44 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 	}
 
 	events := make([]Event, 0, 8)
+	var predictionCleared bool
 	if prior.ID != "" {
 		events = changes(prior, flight)
 		var old *Prediction
 		if err := json.Unmarshal(oldPrediction, &old); err != nil {
 			return err
 		}
-		if predictionValue != nil && predictionValue.DelayMinutes >= 10 && (old == nil || predictionValue.DelayMinutes >= old.DelayMinutes+10 || !slices.Equal(predictionValue.Reasons, old.Reasons)) {
+		predictionCleared = old != nil && old.DelayMinutes >= flightDelayAlertMinutes &&
+			(predictionValue == nil || predictionValue.DelayMinutes < flightDelayAlertMinutes ||
+				old.DelayMinutes-predictionValue.DelayMinutes >= flightDelayAlertMinutes)
+		if predictionValue != nil && predictionValue.DelayMinutes >= flightDelayAlertMinutes &&
+			(old == nil || predictionValue.DelayMinutes >= old.DelayMinutes+flightDelayAlertMinutes || !slices.Equal(predictionValue.Reasons, old.Reasons)) {
 			events = append(events, Event{Kind: "delay_prediction", Title: "Departure delay predicted", Body: fmt.Sprintf("%s · %d min later", flight.Number, predictionValue.DelayMinutes),
 				At: flight.ObservedAt, validUntil: predictionValue.ValidUntil, advisoryEvidence: predictionValue.AdvisoryEvidence})
 		}
 	}
-	for _, a := range advisories {
-		if event, ok := advisoryEvent(flight, a, flight.ObservedAt); ok {
-			events = append(events, event)
+	if prior.ID != "" {
+		obsolete := supersededFlightAlertKinds(prior, flight, events)
+		if predictionCleared && !slices.Contains(obsolete, "delay_prediction") {
+			obsolete = append(obsolete, "delay_prediction")
+		}
+		if err := pruneSupersededFlightAlerts(ctx, tx, flight.ID, obsolete); err != nil {
+			return err
 		}
 	}
 	if err := queueCheckIn(ctx, tx, flight, flight.ObservedAt); err != nil {
 		return err
 	}
 	for _, event := range events {
-		if err := saveEvent(ctx, tx, flight.ID, event); err != nil {
+		if err := saveEvent(ctx, tx, flight.ID, event, flightAlertRelevant(event.Kind, flight)); err != nil {
 			return err
+		}
+	}
+	for _, a := range advisories {
+		if event, ok := advisoryEvent(flight, a, flight.ObservedAt); ok {
+			if err := saveEvent(ctx, tx, flight.ID, event, true); err != nil {
+				return err
+			}
 		}
 	}
 	if err := enqueueLive(ctx, tx, prior, flight); err != nil {
@@ -598,7 +615,7 @@ func optionalJSON[T any](values []T) (any, error) {
 	return string(raw), err
 }
 
-func saveEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event) error {
+func saveEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event, notify bool) error {
 	if event.ID == "" {
 		event.ID = hash(flightID + "\x00" + event.Kind + "\x00" + event.At.Format(time.RFC3339Nano))
 	}
@@ -610,10 +627,13 @@ func saveEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event) er
 	if err != nil {
 		return err
 	}
-	if n, err := res.RowsAffected(); err != nil || n == 0 {
+	if n, err := res.RowsAffected(); err != nil || n == 0 || !notify {
 		return err
 	}
 	expires := event.At.Add(2 * time.Hour)
+	if event.Kind == "boarding" && event.collapseID == "" {
+		expires = event.At.Add(boardingAlertLifetime)
+	}
 	if event.validUntil != nil {
 		expires = earliestTime(expires, *event.validUntil)
 	}
