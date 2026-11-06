@@ -23,6 +23,7 @@ function flightFixture(flightScreen) {
   const hooks = [];
   const effects = [];
   const timers = new Map();
+  const openedLinks = [];
   let index = 0;
   let now = start;
   let nextTimer = 0;
@@ -63,7 +64,10 @@ function flightFixture(flightScreen) {
     },
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@react-navigation/native': { useFocusEffect: (callback) => useEffect(callback, [callback]) },
-    'react-native': { Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles } },
+    'react-native': {
+      Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles },
+      Linking: { openURL: async (url) => { openedLinks.push(url); } },
+    },
     './flight': { formatDay: () => 'Nov 6', formatTime: () => '19:00', isFinished: () => false, errorText: (cause) => cause.message },
     './theme': { usePalette: () => ({ colors: {} }) },
     './pickup-links': { PickupLinks: 'PickupLinks' },
@@ -92,7 +96,7 @@ function flightFixture(flightScreen) {
     return nodes(tree);
   }
   return {
-    render,
+    render, openedLinks,
     async advance(ms) {
       now += ms;
       for (const [id, { callback, due }] of timers) {
@@ -158,4 +162,61 @@ test('an expiring METAR disappears before the next Flight Detail poll', async ()
   assert.ok(contains(await fixture.advance(4_999), 'Body', 'Low ceilings'));
   assert.ok(!contains(await fixture.advance(1), 'Heading', 'Delay outlook'));
   assert.equal(reads, 1);
+});
+
+test('Flight Detail attributes CASA fallback fields and keeps provider data first', async () => {
+  const registry = { source: 'australia_casa', model: '737-838', age: 12 };
+  let reads = 0;
+  const fixture = flightFixture(async () => ({
+    tracked: false, detail: { flight: {
+      ...flight, aircraftRegistry: registry,
+      ...(reads++ === 0 ? {} : { aircraftModel: 'Provider model', aircraftAge: 10 }),
+    } },
+  }));
+  const showsAircraft = (tree, text) => tree.some(({ type, props }) =>
+    type === 'Body' && Array.isArray(props.children) && props.children.join('') === text);
+  fixture.render();
+  await settle();
+  const fallback = fixture.render();
+  assert.ok(showsAircraft(fallback, 'Aircraft 737-838'));
+  assert.ok(showsAircraft(fallback, 'Aircraft age about 12 years'));
+  assert.ok(contains(fallback, 'Body', 'Aircraft data from Australia’s Civil Aviation Safety Authority (CASA).'));
+  assert.ok(contains(fallback, 'Body', 'Plano estimates age from the recorded year of manufacture.'));
+  for (const label of ['Open CASA aircraft register', 'View CC BY 4.0 licence']) {
+    fallback.find(({ type, props }) => type === 'Action' && props.label === label).props.onPress();
+  }
+  assert.deepEqual(fixture.openedLinks, [
+    'https://www.casa.gov.au/aircraft/aircraft-registration/data-files-registered-aircraft',
+    'https://creativecommons.org/licenses/by/4.0/',
+  ]);
+  const provider = await fixture.advance(30_000);
+  assert.ok(showsAircraft(provider, 'Aircraft Provider model'));
+  assert.ok(showsAircraft(provider, 'Aircraft age about 10 years'));
+  assert.ok(!provider.some(({ type, props }) => type === 'Action' && props.label === 'Open CASA aircraft register'));
+});
+
+test('offline flight details retain CASA fields and omit unknown registry sources', () => {
+  const { outputText: offlineCode } = ts.transpileModule(readFileSync(join(__dirname, '../src/offline-flights.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  });
+  const snapshot = JSON.stringify({ scope: 'fixture', details: ['australia_casa', 'unknown_registry'].map((source, index) => ({
+    savedAt: iso(), detail: { flight: { ...flight, id: `flight-${index}`, aircraftRegistry: { source, model: '737-838', age: 12 } } },
+  })) });
+  class File {
+    get size() { return Buffer.byteLength(snapshot); }
+    textSync() { return snapshot; }
+  }
+  const modules = {
+    'expo-crypto': {},
+    'expo-file-system': { File, Paths: { cache: 'fixture' } },
+    'react-native': { Platform: { OS: 'android' } },
+    './flight': { statuses: { scheduled: 'Scheduled' } },
+  };
+  const exports = {};
+  runInNewContext(offlineCode, { exports, require: (id) => modules[id], Date: class extends Date { static now() { return start; } } });
+  const restored = exports.readSavedFlight('fixture', 'flight-0').detail.flight.aircraftRegistry;
+  assert.equal(restored.source, 'australia_casa');
+  assert.equal(restored.model, '737-838');
+  assert.equal(restored.age, 12);
+  assert.equal(exports.readSavedFlight('fixture', 'flight-1').detail.flight.aircraftRegistry, undefined);
 });

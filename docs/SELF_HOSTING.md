@@ -159,6 +159,7 @@ published port if both projects run on the same host.
 | readsb ADS-B | Set `PLANO_ADSB_URL` to an operator receiver's `aircraft.json` endpoint. Coverage depends on the receiver. |
 | FAA aircraft registry | Set `PLANO_FAA_REGISTRY_FILE` to the mounted FAA release ZIP for US aircraft identity, model, and approximate age. An extracted `MASTER.txt` also supplies identity and age. |
 | Transport Canada aircraft registry | Set `PLANO_CCAR_REGISTRY_FILE` to the mounted `ccarcsdb.zip` for Canadian aircraft model, approximate age, and receiver matching. [Download and licence](https://wwwapps.tc.gc.ca/Saf-Sec-Sur/2/CCARCS-RIACC/DDZip.aspx) |
+| Australian aircraft registry | Set `PLANO_CASA_REGISTRY_FILE` to the mounted `acrftreg.csv` for Australian aircraft model and approximate age. [CASA register download](https://www.casa.gov.au/aircraft/aircraft-registration/data-files-registered-aircraft) |
 | Apple Push Notification service | Set `PLANO_APNS_TEAM_ID`, `PLANO_APNS_KEY_ID`, `PLANO_APNS_BUNDLE_ID`, and `PLANO_APNS_PRIVATE_KEY_FILE`. Set `PLANO_APNS_SANDBOX=true` for development tokens issued by the sandbox. |
 | Firebase Cloud Messaging | Set `PLANO_FCM_SERVICE_ACCOUNT_FILE` for the project registered by the Android build. `PLANO_FCM_PROJECT_ID` can override the project ID in that file. |
 
@@ -579,6 +580,21 @@ with the licence's distribution requirements in section 3.1.
 > OF THE DATA MADE AVAILABLE THROUGH THE GC OPEN DATA PORTAL AND EXPRESSLY
 > DISCLAIMS ANY IMPLIED WARRANTY OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR
 > PURPOSE OF THE DATA MADE AVAILABLE THROUGH THE GC OPEN DATA PORTAL.
+
+## Australian aircraft registry
+
+Download CASA's current `acrftreg.csv`, mount it read-only at a path such as
+`/data-import/acrftreg.csv`, and set `PLANO_CASA_REGISTRY_FILE` to that path.
+If you download the ZIP, extract the CSV before mounting it. Plano validates
+the file during `check-config` and loads it at live startup. Replace it with
+a current release and restart to refresh it. The FAA, Transport Canada, and
+CASA registers can run together. [CASA register download](https://www.casa.gov.au/aircraft/aircraft-registration/data-files-registered-aircraft)
+
+Plano uses the current VH registration, model, and year of manufacture for
+assigned aircraft on near-term flights. The date the aircraft was first
+registered in Australia is a lower bound on that lookup. Plano derives an
+approximate age for display and keeps the source attribution with the fields.
+The local index excludes owner, operator, and serial-number data. [CASA field definitions](https://www.casa.gov.au/aircraft/aircraft-registration/data-files-registered-aircraft/meaning-coded-fields-registered-aircraft) · [CASA copyright and licence](https://www.casa.gov.au/about-us/about-website/copyright)
 
 ## Local radar and sharing
 

@@ -167,3 +167,44 @@ func TestAircraftMetadataRetentionCarriesCanadianSourceWithCopiedData(t *testing
 		})
 	}
 }
+
+func TestRegistryMetadataCarryoverChecksCorrectedDepartureDay(t *testing.T) {
+	midnight := time.Date(2026, time.November, 6, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		offset  time.Duration
+		retains bool
+	}{
+		{"same registration day", 8 * time.Minute, true},
+		{"actual departure before registration day", -5 * time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			store, err := Open(filepath.Join(t.TempDir(), "registry-departure.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			prior := feeds.Flight{ID: "ACA7-live", Source: "flightaware_aeroapi", TailNumber: "C-FIVM",
+				Status: "scheduled", ScheduledDeparture: new(midnight.Add(5 * time.Minute)), ObservedAt: midnight.Add(-time.Minute),
+				AircraftRegistry: &feeds.RegistryAircraftDetails{Source: feeds.CCARRegistrySource, Model: "777-333ER", Age: new(18)}}
+			if err := store.Observe(ctx, prior, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			owner := friendInstallation(t, store)
+			if err := store.Track(ctx, owner, prior.ID, ""); err != nil {
+				t.Fatal(err)
+			}
+			next := prior
+			next.Status, next.ObservedAt = "airborne", midnight.Add(time.Hour)
+			next.ActualDeparture, next.AircraftRegistry = new(midnight.Add(tc.offset)), nil
+			if err := store.Observe(ctx, next, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			got, err := store.DetailsForInstallation(ctx, owner, prior.ID)
+			if err != nil || (got.Flight.AircraftRegistry != nil) != tc.retains {
+				t.Fatalf("carried registry metadata = %+v, error = %v", got.Flight.AircraftRegistry, err)
+			}
+		})
+	}
+}

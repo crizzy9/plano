@@ -63,6 +63,11 @@ address, and registration validity for current marks. Legacy `CF-ABC` and
 modern `C-FABC` marks remain distinct. A packed mark such as `CFABC` can
 match only when the current registry identifies a single aircraft. [Transport Canada download and licence](https://wwwapps.tc.gc.ca/Saf-Sec-Sur/2/CCARCS-RIACC/DDZip.aspx)
 
+The optional CASA adapter streams the current Australian `acrftreg.csv`.
+It indexes VH registrations and technical fields for model and approximate
+age, with published registration dates limiting applicability. The response
+attributes derived facts to `australia_casa` in `aircraftRegistry`. [CASA data and field definitions](https://www.casa.gov.au/aircraft/aircraft-registration/data-files-registered-aircraft)
+
 Flight responses place Canadian model and age data in `aircraftRegistry`
 with source `transport_canada_ccar`. The current client displays the registry
 notices with those fields. API consumers that reproduce the data must carry

@@ -232,6 +232,45 @@ func TestCheckConfigCanadianRegistry(t *testing.T) {
 	}
 }
 
+func TestCheckConfigAustralianRegistry(t *testing.T) {
+	const setting = "PLANO_CASA_REGISTRY_FILE"
+	const privateFixture = "registry-fixture-private-content"
+	const csv = "Mark,Model,Yearmanu,Datefirstreg,Regexpirydate,Suspendstatus,regholdName\n" +
+		"X2Q,Fixture 787,2015,06 July 2016,,,registry-fixture-private-content\n"
+	for _, tc := range []struct {
+		name, data, wantError string
+		demo                  bool
+	}{
+		{name: "live CSV", data: csv},
+		{name: "live missing file", wantError: "cannot open " + setting},
+		{name: "live malformed CSV", data: privateFixture, wantError: "invalid " + setting + " CSV"},
+		{name: "demo skips CSV", data: privateFixture, demo: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateStartupEnvironment(t)
+			t.Setenv("PLANO_DEMO", fmt.Sprint(tc.demo))
+			t.Setenv("PLANO_ENROLLMENT_CODE", "fixture-enrollment-code")
+			t.Setenv("PLANO_AEROAPI_KEY", "fixture-aeroapi-key")
+			t.Setenv("PLANO_ADDR", "127.0.0.1:0")
+			file := filepath.Join(t.TempDir(), privateFixture)
+			if tc.data != "" {
+				if err := os.WriteFile(file, []byte(tc.data), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(setting, file)
+			err := run(slog.New(slog.DiscardHandler), true)
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) || strings.Contains(err.Error(), privateFixture) {
+					t.Fatalf("expected redacted diagnostic %q, got %v", tc.wantError, err)
+				}
+			} else if err != nil {
+				t.Fatalf("check-config rejected registry: %v", err)
+			}
+		})
+	}
+}
+
 func TestCheckConfigFlightObservationKey(t *testing.T) {
 	key := strings.Repeat("fixture-key", 4)
 	for _, tc := range []struct {
@@ -324,7 +363,7 @@ func isolateStartupEnvironment(t *testing.T) {
 		"PLANO_AEROALERTS_KEY_FILE", "PLANO_ADVISORY_INGRESS_KEY_FILE", flightObservationKeyFile, swimPositionKeyFile, eurocontrolPositionKeyFile, "PLANO_AEROAPI_KEY_FILE",
 		"PLANO_METAR", "PLANO_TAF", "PLANO_AERO_SUBSCRIPTIONS", "PLANO_AERO_SUBSCRIPTIONS_INBOUND", "PLANO_AERO_SUBSCRIPTIONS_MAX", "PLANO_AERO_SUBSCRIPTIONS_INTERVAL",
 		"PLANO_TRIPIT_SYNC_KEY_FILE", "PLANO_RESERVATION_GATEWAY_URL",
-		"PLANO_FAA_NAS", "PLANO_SWIM_URL", "PLANO_EUROCONTROL_URL", "PLANO_ADSB_URL", "PLANO_FAA_REGISTRY_FILE", "PLANO_CCAR_REGISTRY_FILE",
+		"PLANO_FAA_NAS", "PLANO_SWIM_URL", "PLANO_EUROCONTROL_URL", "PLANO_ADSB_URL", "PLANO_FAA_REGISTRY_FILE", "PLANO_CCAR_REGISTRY_FILE", "PLANO_CASA_REGISTRY_FILE",
 		"PLANO_APNS_TEAM_ID", "PLANO_APNS_KEY_ID", "PLANO_APNS_BUNDLE_ID", "PLANO_APNS_PRIVATE_KEY_FILE", "PLANO_APNS_SANDBOX",
 		"PLANO_FCM_PROJECT_ID", "PLANO_FCM_SERVICE_ACCOUNT_FILE", "PLANO_FCM_BANDWIDTH_CONSTRAINED",
 		"PLANO_REFRESH_INTERVAL", "PLANO_DELAY_MODEL_FILE", "PLANO_EARLY_DELAY_MODEL_FILE", "PLANO_HISTORICAL_RISK_FILE", "PLANO_COLLECT_DELAY_SAMPLES",

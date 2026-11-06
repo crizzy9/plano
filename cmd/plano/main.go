@@ -389,6 +389,13 @@ func run(logger *slog.Logger, checkOnly bool) error {
 			}
 			registry = feeds.CombineAircraftRegistries(registry, ccar)
 		}
+		if path := os.Getenv("PLANO_CASA_REGISTRY_FILE"); path != "" {
+			casa, err := loadCASARegistryFile(path)
+			if err != nil {
+				return fmt.Errorf("load Australian registry: %w", err)
+			}
+			registry = feeds.CombineAircraftRegistries(registry, casa)
+		}
 		if registry != nil {
 			aeroAPI = aeroAPI.WithAircraftRegistry(registry)
 			flights = aeroAPI
@@ -575,6 +582,19 @@ func loadCCARRegistryFile(path string) (*feeds.Registry, error) {
 	registry, err := feeds.LoadCCARRegistryZIP(file, size)
 	if err != nil {
 		return nil, fmt.Errorf("invalid PLANO_CCAR_REGISTRY_FILE archive: %w", err)
+	}
+	return registry, nil
+}
+
+func loadCASARegistryFile(path string) (*feeds.Registry, error) {
+	file, _, err := openRegistryFile("PLANO_CASA_REGISTRY_FILE", path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	registry, err := feeds.LoadCASARegistry(file)
+	if err != nil {
+		return nil, fmt.Errorf("invalid PLANO_CASA_REGISTRY_FILE CSV: %w", err)
 	}
 	return registry, nil
 }

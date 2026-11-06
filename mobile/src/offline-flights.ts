@@ -68,7 +68,7 @@ function flightId(value: unknown) {
 
 function registrySnapshot(value: unknown): Flight['aircraftRegistry'] {
   const registry = object(value);
-  if (registry?.source !== 'transport_canada_ccar') return undefined;
+  if (registry?.source !== 'transport_canada_ccar' && registry?.source !== 'australia_casa') return undefined;
   const model = text(registry.model);
   const age = finite(registry.age);
   if (!model && age === undefined) return undefined;

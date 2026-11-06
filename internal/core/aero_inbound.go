@@ -211,6 +211,14 @@ func retainAircraftMetadata(next *feeds.Flight, previous feeds.Flight, previousP
 	if priorRegistry == nil {
 		return changed
 	}
+	// Registry validity is recorded by UTC date. A correction across days
+	// needs fresh registry evidence for the revised departure.
+	previousDeparture := firstTime(previous.ActualDeparture, previous.ActualTakeoff, previous.ScheduledDeparture)
+	nextDeparture := firstTime(next.ActualDeparture, next.ActualTakeoff, next.ScheduledDeparture)
+	if previousDeparture != nil && nextDeparture != nil &&
+		previousDeparture.UTC().Format(time.DateOnly) != nextDeparture.UTC().Format(time.DateOnly) {
+		return changed
+	}
 	registry := feeds.RegistryAircraftDetails{Source: priorRegistry.Source}
 	if next.AircraftRegistry != nil {
 		registry = *next.AircraftRegistry

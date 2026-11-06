@@ -340,7 +340,7 @@ func (a *AeroAPI) normalizeFlight(row aeroFlight, observedAt time.Time) Flight {
 	if flight.AircraftModel == "" {
 		model = entry.model
 	}
-	if entry.source == CCARRegistrySource {
+	if entry.source != "" {
 		if age != nil || model != "" {
 			flight.AircraftRegistry = &RegistryAircraftDetails{Source: entry.source, Model: model, Age: age}
 		}

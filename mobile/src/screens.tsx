@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { AccessibilityInfo, AppState, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
+import { AccessibilityInfo, AppState, Linking, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   saveServer, withActiveAndroidPushOrigin, type AirportWeatherForecast, type ATFMSlot, type Flight, type FlightNotice, type HistoricalDepartureRisk,
@@ -224,9 +224,11 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const [seat, setSeat] = useState('');
   const [pickupRevision, setPickupRevision] = useState(0);
   const flight = value?.detail.flight ?? (error && (result?.savedAt || initialSavedAt) ? undefined : initial);
-  const registry = flight?.aircraftRegistry?.source === 'transport_canada_ccar' ? flight.aircraftRegistry : undefined;
+  const registrySource = flight?.aircraftRegistry?.source;
+  const registry = registrySource === 'transport_canada_ccar' || registrySource === 'australia_casa' ? flight?.aircraftRegistry : undefined;
   const registryModel = flight?.aircraftModel ? undefined : registry?.model;
   const registryAge = flight?.aircraftAge == null ? registry?.age : undefined;
+  const usesRegistry = !!registryModel || registryAge != null;
   const aircraft = flight?.aircraftModel || registryModel || flight?.aircraftType;
   const aircraftAge = flight?.aircraftAge ?? registryAge;
   const detail = value?.detail;
@@ -395,7 +397,21 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
                 {aircraftAge != null && <Body>Aircraft age about {aircraftAge} years</Body>}
                 {flight.baggage && <Body>Baggage carousel {flight.baggage}</Body>}
               </View>
-              {(!!registryModel || registryAge != null) && <CanadianAircraftNotice />}
+              {usesRegistry && registrySource === 'transport_canada_ccar' && <CanadianAircraftNotice />}
+              {usesRegistry && registrySource === 'australia_casa' && (
+                <View style={styles.registryNotice}>
+                  <Body>Aircraft data from Australia’s Civil Aviation Safety Authority (CASA).</Body>
+                  {registryAge != null && <Body>Plano estimates age from the recorded year of manufacture.</Body>}
+                  <Action secondary label="Open CASA aircraft register" onPress={() => {
+                    void Linking.openURL('https://www.casa.gov.au/aircraft/aircraft-registration/data-files-registered-aircraft')
+                      .catch((cause: unknown) => setActionError(errorText(cause)));
+                  }} />
+                  <Action secondary label="View CC BY 4.0 licence" onPress={() => {
+                    void Linking.openURL('https://creativecommons.org/licenses/by/4.0/')
+                      .catch((cause: unknown) => setActionError(errorText(cause)));
+                  }} />
+                </View>
+              )}
             </View>
           )}
           {currentSlots.length > 0 && (

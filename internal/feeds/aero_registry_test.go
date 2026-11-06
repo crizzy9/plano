@@ -116,7 +116,7 @@ func TestAeroRegistryRequiresCurrentAssignment(t *testing.T) {
 	}
 }
 
-func TestAeroRegistryLabelsOnlyApplicableCanadianMetadata(t *testing.T) {
+func TestAeroRegistryLabelsOnlyApplicableAttributedMetadata(t *testing.T) {
 	now := instant(t, "2026-11-05T20:00:00Z")
 	ccar := &Registry{
 		key: strings.ToUpper,
@@ -127,13 +127,19 @@ func TestAeroRegistryLabelsOnlyApplicableCanadianMetadata(t *testing.T) {
 			"CFABC":  {ambiguous: true},
 		},
 	}
-	aero := NewAeroAPI("fixture-key", nil).WithAircraftRegistry(CombineAircraftRegistries(aeroRegistryFixture(t), ccar))
+	casa, err := LoadCASARegistry(strings.NewReader("Mark,Model,Yearmanu,Datefirstreg\nX2Q,787-9,2014,05 November 2026\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aero := NewAeroAPI("fixture-key", nil).WithAircraftRegistry(CombineAircraftRegistries(aeroRegistryFixture(t), ccar, casa))
 	for _, tc := range []struct {
 		name, tail, model, source string
 		when                      time.Duration
 		age                       int
 	}{
 		{name: "current Canadian", tail: "c-fivm", model: "777-333ER", source: CCARRegistrySource, age: 18},
+		{name: "current Australian", tail: "vhx2q", model: "787-9", source: CASARegistrySource, age: 12},
+		{name: "Australian departure before registration", tail: "VH-X2Q", when: -24 * time.Hour},
 		{name: "current FAA", tail: "N12AA", model: "BOEING 737-800", age: 16},
 		{name: "historic Canadian", tail: "C-FIVM", when: -72 * time.Hour},
 		{name: "future registration", tail: "C-FNEW"},
@@ -147,11 +153,11 @@ func TestAeroRegistryLabelsOnlyApplicableCanadianMetadata(t *testing.T) {
 			model, age := flight.AircraftModel, flight.AircraftAge
 			if tc.source != "" {
 				if flight.AircraftRegistry == nil || flight.AircraftRegistry.Source != tc.source || model != "" || age != nil {
-					t.Fatalf("expected attributed Canadian metadata only in the nested field: %+v", flight)
+					t.Fatalf("expected attributed metadata in the nested field: %+v", flight)
 				}
 				model, age = flight.AircraftRegistry.Model, flight.AircraftRegistry.Age
 			} else if flight.AircraftRegistry != nil {
-				t.Fatalf("unexpected Canadian metadata: %+v", flight.AircraftRegistry)
+				t.Fatalf("unexpected attributed metadata: %+v", flight.AircraftRegistry)
 			}
 			if flight.AircraftType != "B77W" || model != tc.model {
 				t.Fatalf("unexpected enrichment: type %q, model %q", flight.AircraftType, model)
