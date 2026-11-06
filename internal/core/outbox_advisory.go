@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"time"
+
+	"github.com/crizzy9/plano/internal/feeds"
 )
 
 const outboxAdvisorySchema = `
@@ -26,6 +28,16 @@ CREATE TABLE IF NOT EXISTS pushed_advisory_predecessors (
 func outboxAdvisoryRevised(ctx context.Context, db rowQueryer, jobID int64, now time.Time, requireCurrent bool) (bool, error) {
 	return advisoryEvidenceRevised(ctx, db, `SELECT source,advisory_id,observed_ns,state_hash,COALESCE(airport,'')
 FROM outbox_advisory_evidence LEFT JOIN outbox_advisory_scopes USING(outbox_id,source,advisory_id) WHERE outbox_id=?`, jobID, now, requireCurrent)
+}
+
+func tfmsOutboxOperationCancelled(ctx context.Context, db rowQueryer, jobID int64, target, now time.Time) (bool, error) {
+	var cancelled bool
+	operation := target.UnixNano()
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM outbox_advisory_evidence e
+JOIN tfms_program_cancellations c ON c.program_id=e.advisory_id
+WHERE e.outbox_id=? AND e.source=? AND c.observed_ns>e.observed_ns AND c.observed_ns<=?
+  AND c.starts_ns<=? AND c.ends_ns>?)`, jobID, feeds.FAASWIM, now.UnixNano(), operation, operation).Scan(&cancelled)
+	return cancelled, err
 }
 
 func linkOutboxAdvisories(ctx context.Context, tx *sql.Tx, jobs *sql.Rows, evidence []forecastAdvisory) error {

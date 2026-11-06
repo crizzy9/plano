@@ -18,7 +18,7 @@ const (
 	tfmsAdvisoryRetention   = feeds.TFMSAdvisoryMaxAge + time.Hour
 )
 
-func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, bool) {
+func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time, cancellations ...tfmsProgramCancellation) (Event, bool) {
 	if a.Kind == feeds.AdvisoryAirportNotice {
 		return Event{}, false
 	}
@@ -48,6 +48,13 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, 
 	if !pending {
 		return Event{}, false
 	}
+	var cancellation time.Time
+	if a.IsTFMSAirportProgram() {
+		cancellation = latestTFMSProgramCancellation(cancellations, a.ID, target)
+		if cancellation.After(a.ObservedAt) {
+			return Event{}, false
+		}
+	}
 	code, icao := flight.Origin, flight.OriginICAO
 	if arrivalProgram {
 		code, icao = flight.Destination, flight.DestinationICAO
@@ -67,6 +74,10 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, 
 	family := hash(flight.ID + "\x00advisory\x00" + a.Source + "\x00" + a.ID)
 	evidence := advisoryEvidence(original)
 	revision := family + "\x00" + evidence.StateHash
+	if !cancellation.IsZero() && cancellation.Before(a.ObservedAt) {
+		// A newer definition can restore the same state after a cancellation.
+		revision += "\x00tfms-restored\x00" + cancellation.UTC().Format(time.RFC3339Nano)
+	}
 	var window *push.AdvisoryWindow
 	if a.Kind == "airport_closure" && decoded.HasDailyClosure() {
 		body = "Published closure window ends " + a.EndsAt.UTC().Format("Jan 2 at 15:04 UTC") + "."
@@ -148,6 +159,15 @@ func (s *Store) PublishAdvisory(ctx context.Context, a feeds.Advisory, now time.
 		return err
 	}
 	defer tx.Rollback()
+	if a.Kind == feeds.AdvisoryTFMSCancellation {
+		if !a.IsTFMSProgramCancellation() {
+			return feeds.ErrInvalidQuery
+		}
+		if err := recordTFMSProgramCancellation(ctx, tx, a); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
 	future := a.ObservedAt.After(now)
 	if future {
 		// Older revisions, including withdrawals, can still become effective
@@ -209,6 +229,13 @@ WHERE source=? AND airport=? AND predecessor_id=? AND observed_ns BETWEEN ? AND 
 	if superseded {
 		return tx.Commit()
 	}
+	var cancellations []tfmsProgramCancellation
+	if a.IsTFMSAirportProgram() {
+		cancellations, err = loadTFMSProgramCancellations(ctx, tx, a.Airport, "", now)
+		if err != nil {
+			return err
+		}
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT f.snapshot FROM flights f WHERE EXISTS(SELECT 1 FROM tracked t WHERE t.flight_id=f.id)
 AND (? IN (json_extract(f.snapshot,'$.origin'),json_extract(f.snapshot,'$.originICAO'),json_extract(f.snapshot,'$.destination'),json_extract(f.snapshot,'$.destinationICAO')))`, a.Airport)
 	if err != nil {
@@ -231,7 +258,7 @@ AND (? IN (json_extract(f.snapshot,'$.origin'),json_extract(f.snapshot,'$.origin
 		if finished(f) {
 			continue
 		}
-		if event, ok := advisoryEvent(f, a, now); ok {
+		if event, ok := advisoryEvent(f, a, now, cancellations...); ok {
 			affected = append(affected, struct {
 				id    string
 				event Event

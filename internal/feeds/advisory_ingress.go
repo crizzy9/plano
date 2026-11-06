@@ -12,7 +12,8 @@ import (
 )
 
 const (
-	MaxAdvisoryIngressBytes = 64 << 10
+	MaxAdvisoryIngressBytes  = 64 << 10
+	AdvisoryTFMSCancellation = "tfms_cancellation"
 
 	// AdvisoryMaxAge bounds ordinary advisory observations, including withdrawals.
 	AdvisoryMaxAge = 6 * time.Hour
@@ -30,6 +31,7 @@ var (
 	bridgeAdvisoryKind = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$\z`)
 	bridgeAdvisoryID   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$\z`)
 	bridgeAreaID       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.:/+-]{0,127}$\z`)
+	tfmsAdvisorySerial = regexp.MustCompile(`^[0-9]{3}$\z`)
 )
 
 // IsTFMSAirportProgram identifies active FAA TFMS airport context with a
@@ -48,6 +50,27 @@ func (a Advisory) IsTFMSAirportProgram() bool {
 	default:
 		return false
 	}
+}
+
+// IsTFMSProgramCancellation validates a withdrawal limited to an operation window.
+func (a Advisory) IsTFMSProgramCancellation() bool {
+	if a.Kind != AdvisoryTFMSCancellation || a.Source != FAASWIM || !a.AirportContextOnly || a.Direction != "arrival" ||
+		!airportCode.MatchString(a.Airport) || a.SupersedesID != "" || a.DelayMinutes != nil || a.ObservedAt.IsZero() ||
+		a.StartsAt == nil || a.EndsAt == nil || !a.EndsAt.After(*a.StartsAt) {
+		return false
+	}
+	program, ok := strings.CutPrefix(a.TFMSProgramID, "tfms/")
+	family, airport, hasAirport := strings.Cut(program, "/")
+	if !ok || !hasAirport || (family != "gs" && family != "gdp") || airport != a.Airport {
+		return false
+	}
+	issueDate := a.ObservedAt.UTC().Truncate(24 * time.Hour)
+	if a.StartsAt.Before(issueDate.AddDate(0, 0, -2)) || !a.EndsAt.Before(issueDate.AddDate(0, 0, 3)) {
+		return false
+	}
+	prefix := "tfms/cnx/" + program + "/" + issueDate.Format("20060102") + "/"
+	serial, ok := strings.CutPrefix(a.ID, prefix)
+	return ok && tfmsAdvisorySerial.MatchString(serial)
 }
 
 // ObservationAllowed checks the original revision timestamp at signed ingress.
@@ -126,6 +149,9 @@ func normalizeBridgeAdvisory(row *Advisory, source string) bool {
 		}
 	}
 	row.Source = source
+	if row.TFMSProgramID != "" || row.Kind == AdvisoryTFMSCancellation {
+		return row.IsTFMSProgramCancellation()
+	}
 	return true
 }
 

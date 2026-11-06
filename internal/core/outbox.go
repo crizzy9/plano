@@ -801,10 +801,24 @@ CASE WHEN ? THEN (SELECT snapshot FROM flights WHERE id=o.flight_id) END`+leased
 				// Earlier outbox windows described recurring airport closures.
 				advisory.Kind = "airport_closure"
 			}
-			target, _, ok := advisoryAlertOperation(current, advisory, time.Now())
+			now := time.Now()
+			target, _, ok := advisoryAlertOperation(current, advisory, now)
 			if !ok || target.Before(window.StartsAt) || !target.Before(window.EndsAt) {
 				s.removeObsoletePush(ctx, logger, job)
 				return
+			}
+			if window.Kind == "ground_stop" || window.Kind == "ground_delay" {
+				cancelled, err := tfmsOutboxOperationCancelled(ctx, s.db, job.id, target, now)
+				if err != nil {
+					if ctx.Err() == nil {
+						logger.Error("could not validate TFMS cancellation window", "job", job.id, "error", err)
+					}
+					return
+				}
+				if cancelled {
+					s.removeObsoletePush(ctx, logger, job)
+					return
+				}
 			}
 			expires = min(expires, window.EndsAt.UnixNano())
 		}
@@ -900,6 +914,10 @@ EXISTS (SELECT 1 FROM advisory_supersessions newer WHERE newer.source=r.source A
 AND newer.predecessor_id=r.predecessor_id AND newer.successor_id=r.successor_id
 AND newer.observed_ns>r.observed_ns AND newer.observed_ns<=?)`,
 		now.Add(-advisorySupersessionRetention).UnixNano(), tfmsCutoff, now.UnixNano()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tfms_program_cancellations WHERE ends_ns<=? AND observed_ns<=?`,
+		now.UnixNano(), now.Add(-signedAdvisoryRetention).UnixNano()); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM live_wire_clocks WHERE wire_epoch<=?`, now.Add(-7*24*time.Hour).Unix()); err != nil {

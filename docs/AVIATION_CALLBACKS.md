@@ -80,8 +80,14 @@ and model training.
 The relay skips proposals and unrelated message types. An active definition
 with its published start and end can stay visible until that end, up to 48
 hours after the source update. A repeat of the same revision keeps its original
-update time. Forward withdrawals through the normalized bridge using the same
-key, such as `tfms/gs/ORD` or `tfms/gdp/ORD`, with a newer `observedAt` and
+update time. The same relay accepts `GADV` general advisories carrying the
+structured actual ATCSCC ground stop or ground delay program cancellation.
+Plano applies each cancellation to operations in its published cancellation
+interval when it is newer than the program definition. Proposals and free-form
+facility releases are outside this path. [FAA GS cancellation example](https://www.fly.faa.gov/adv/adv_otherdis?adv_date=09032026&advn=59) · [FAA GDP cancellation example](https://www.fly.faa.gov/adv/adv_otherdis?adv_date=11022026&advn=11)
+
+An operator bridge can still withdraw an entire definition using its key,
+such as `tfms/gs/ORD` or `tfms/gdp/ORD`, with a newer `observedAt` and
 kind `cancelled`. Submit withdrawals within six hours of their observation.
 Plano retains revision ordering for 49 hours to prevent older packets from
 restoring a withdrawn or shortened program. Upgrading SQLite extends eligible

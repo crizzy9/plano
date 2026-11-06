@@ -72,7 +72,7 @@ func advisoryOccurrence(a feeds.Advisory, decoded feeds.NOTAMSummary, operation,
 
 func advisoryCancelled(kind string) bool {
 	switch kind {
-	case "cancelled", "canceled", "cancellation", "notam_cancelled", "notam_canceled", "notam_cancellation":
+	case "cancelled", "canceled", "cancellation", "notam_cancelled", "notam_canceled", "notam_cancellation", feeds.AdvisoryTFMSCancellation:
 		return true
 	default:
 		return false

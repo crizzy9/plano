@@ -91,4 +91,6 @@ type Advisory struct {
 	RawReason    string     `json:"rawReason,omitempty"`
 	// AirportContextOnly identifies a reported program without flight membership.
 	AirportContextOnly bool `json:"airportContextOnly,omitempty"`
+	// TFMSProgramID is the target of a time-scoped FAA program cancellation.
+	TFMSProgramID string `json:"tfmsProgramId,omitempty"`
 }

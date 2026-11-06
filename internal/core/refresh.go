@@ -58,7 +58,9 @@ func (r Refresher) refresh(ctx context.Context) error {
 				if errors.Is(err, feeds.ErrInvalidQuery) {
 					continue
 				}
-				if slices.ContainsFunc(result, func(a feeds.Advisory) bool { return a.SupersedesID != "" }) {
+				if slices.ContainsFunc(result, func(a feeds.Advisory) bool {
+					return a.SupersedesID != "" || a.IsTFMSProgramCancellation()
+				}) {
 					return err
 				}
 			}

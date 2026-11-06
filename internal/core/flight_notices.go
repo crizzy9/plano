@@ -45,9 +45,19 @@ func (s *Store) cachePolledFlightNotices(ctx context.Context, source string, adv
 		Expires  int64          `json:"expires"`
 	}
 	entries := make([]entry, 0, min(len(advisories), maxPolledNotices))
+	var cancellations []feeds.Advisory
 	var linked bool
 	for _, a := range advisories {
+		if len(entries)+len(cancellations) == maxPolledNotices {
+			break
+		}
 		if a.Source != source || a.ID == "" || a.ObservedAt.IsZero() || s.ignoreLegacyTFMSReplay(a) {
+			continue
+		}
+		if a.Kind == feeds.AdvisoryTFMSCancellation {
+			if a.IsTFMSProgramCancellation() && a.ObservationAllowed(polledAt) {
+				cancellations = append(cancellations, a)
+			}
 			continue
 		}
 		if a.SupersedesID != "" && a.ObservedAt.After(polledAt.Add(advisorySupersessionLead)) {
@@ -56,9 +66,6 @@ func (s *Store) cachePolledFlightNotices(ctx context.Context, source string, adv
 		linked = linked || a.SupersedesID != ""
 		expires := earliestTime(a.Expiry(), polledAt.Add(polledNoticeMaxAge))
 		entries = append(entries, entry{a, a.ObservedAt.UnixNano(), expires.UnixNano()})
-		if len(entries) == maxPolledNotices {
-			break
-		}
 	}
 	payload, err := json.Marshal(entries)
 	if err != nil {
@@ -70,6 +77,11 @@ func (s *Store) cachePolledFlightNotices(ctx context.Context, source string, adv
 		return err
 	}
 	defer tx.Rollback()
+	for _, cancellation := range cancellations {
+		if err := recordTFMSProgramCancellation(ctx, tx, cancellation); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM polled_flight_notices WHERE source=? AND id NOT IN (
 SELECT json_extract(value,'$.data.id') FROM json_each(?))`, source, snapshot); err != nil {
 		return err
@@ -107,6 +119,10 @@ func (s *Store) FlightNotices(ctx context.Context, flight feeds.Flight, now time
 	groundStopDeparture := contextualGroundStopDeparture(flight)
 	if departure == nil && arrival == nil && groundStopDeparture == nil {
 		return notices, nil
+	}
+	cancellations, err := loadTFMSProgramCancellations(ctx, s.db, flight.Destination, flight.DestinationICAO, now)
+	if err != nil {
+		return nil, err
 	}
 	rows, err := currentFlightAdvisoryRows(ctx, s.db, flight, now)
 	if err != nil {
@@ -159,6 +175,13 @@ func (s *Store) FlightNotices(ctx context.Context, flight feeds.Flight, now time
 			}
 			occurrence, active := advisoryOccurrence(a, decoded, *at, now)
 			if !active || !flightNoticeAppliesAt(occurrence, at, now) {
+				continue
+			}
+			operationTime := *at
+			if operationTime.Before(now) {
+				operationTime = now
+			}
+			if a.IsTFMSAirportProgram() && latestTFMSProgramCancellation(cancellations, a.ID, operationTime).After(a.ObservedAt) {
 				continue
 			}
 			deadline := validUntil

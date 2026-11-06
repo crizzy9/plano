@@ -219,7 +219,7 @@ CREATE INDEX IF NOT EXISTS bookings_by_locator ON bookings(owner, locator_hash);
 CREATE TABLE IF NOT EXISTS shares (
   token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, flight_id TEXT NOT NULL, expires INTEGER NOT NULL,
   FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
-);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema + delayProviderSamplesSchema); err != nil {
+);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema + delayProviderSamplesSchema + tfmsProgramCancellationSchema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -704,8 +704,15 @@ ON CONFLICT(flight_id) DO UPDATE SET revision=flight_event_revisions.revision+1`
 			return err
 		}
 	}
+	var cancellations []tfmsProgramCancellation
+	if slices.ContainsFunc(advisories, feeds.Advisory.IsTFMSAirportProgram) {
+		cancellations, err = loadTFMSProgramCancellations(ctx, tx, flight.Destination, flight.DestinationICAO, flight.ObservedAt)
+		if err != nil {
+			return err
+		}
+	}
 	for _, a := range advisories {
-		if event, ok := advisoryEvent(flight, a, flight.ObservedAt); ok {
+		if event, ok := advisoryEvent(flight, a, flight.ObservedAt, cancellations...); ok {
 			if err := saveEvent(ctx, tx, flight.ID, event, true); err != nil {
 				return err
 			}
