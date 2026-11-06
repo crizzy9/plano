@@ -14,6 +14,9 @@ import (
 )
 
 func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, bool) {
+	if a.Kind == feeds.AdvisoryAirportNotice {
+		return Event{}, false
+	}
 	// Keep the original payload for dispatch-time revision checks, even when
 	// an older record needs its fixed NOTAM times supplied at this boundary.
 	original := a

@@ -149,6 +149,10 @@ Use HTTPS for bridges outside the Plano container. HTTP is accepted only at
 an IP loopback address, which resolves inside the container in Compose.
 The same endpoint rules apply to readsb. [Feed adapter guide](../internal/feeds/README.md)
 
+For signed delivery, run `plano forward-advisory` alongside your authorized
+subscriber. It accepts normalized JSON or supported AIXM Digital NOTAM XML.
+[Advisory relay setup](AVIATION_CALLBACKS.md#faa-swim-and-eurocontrol-bridges)
+
 Keep credential files outside the checkout. Compose reads the `*_FILE`
 values as paths **inside** the container. For each credential with both
 inputs, choose either the direct value or the file input. An optional

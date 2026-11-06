@@ -321,7 +321,7 @@ func expandNOTAMText(value string) string {
 
 func applyNOTAMSummary(row *Advisory) {
 	switch row.Kind {
-	case "notam", "airport_closure", "airport_restriction", "runway_closure", "taxiway_closure", "apron_closure", "airport_operations":
+	case "notam", AdvisoryAirportNotice, "airport_closure", "airport_restriction", "runway_closure", "taxiway_closure", "apron_closure", "airport_operations":
 	default:
 		return
 	}

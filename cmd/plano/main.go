@@ -30,9 +30,16 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "forward-email" {
 		if len(os.Args) != 2 {
 			fmt.Fprintln(os.Stderr, "usage: plano forward-email")
-			os.Exit(emailRelayConfigError)
+			os.Exit(relayConfigError)
 		}
 		status, err := forwardEmailFromEnv(context.Background(), os.Stdin)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		os.Exit(status)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "forward-advisory" {
+		status, err := runAdvisoryRelay(context.Background(), os.Stdin, os.Args[2:])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
@@ -73,13 +80,33 @@ func main() {
 	}
 	checkOnly := len(os.Args) == 2 && os.Args[1] == "check-config"
 	if len(os.Args) > 1 && !checkOnly {
-		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples|forward-email]")
+		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples|forward-email|forward-advisory]")
 		os.Exit(2)
 	}
 	if err := run(logger, checkOnly); err != nil {
 		logger.Error("plano stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+func runAdvisoryRelay(ctx context.Context, input io.Reader, args []string) (int, error) {
+	if len(args) == 0 {
+		return forwardAdvisoryFromEnv(ctx, input, nil)
+	}
+	if len(args) < 3 || len(args) > 4 || args[0] != "aixm-notam" || args[1] != feeds.FAASWIM && args[1] != feeds.Eurocontrol {
+		return relayConfigError, errors.New("usage: plano forward-advisory [aixm-notam <faa_swim|eurocontrol_nm> <publisher> [issued-at]]")
+	}
+	var issued time.Time
+	if len(args) == 4 {
+		var err error
+		issued, err = time.Parse(time.RFC3339Nano, args[3])
+		if err != nil || issued.IsZero() {
+			return relayConfigError, errors.New("issued-at must be the RFC 3339 publication timestamp")
+		}
+	}
+	return forwardAdvisoryFromEnv(ctx, input, func(body io.Reader) ([][]byte, error) {
+		return feeds.AIXMAdvisoryBodies(body, args[1], args[2], issued, time.Now())
+	})
 }
 
 func run(logger *slog.Logger, checkOnly bool) error {

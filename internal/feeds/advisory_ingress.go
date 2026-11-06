@@ -12,6 +12,12 @@ import (
 
 const MaxAdvisoryIngressBytes = 64 << 10
 
+type advisoryIngressEnvelope struct {
+	Version  int       `json:"version"`
+	Source   string    `json:"source"`
+	Advisory *Advisory `json:"advisory"`
+}
+
 var (
 	bridgeAdvisoryKind = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$\z`)
 	bridgeAdvisoryID   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$\z`)
@@ -29,11 +35,7 @@ func DecodeAdvisoryIngress(input io.Reader) (Advisory, error) {
 	if len(raw) > MaxAdvisoryIngressBytes {
 		return Advisory{}, fmt.Errorf("%w: advisory ingress exceeds %d bytes", ErrInvalidQuery, MaxAdvisoryIngressBytes)
 	}
-	var wire struct {
-		Version  int       `json:"version"`
-		Source   string    `json:"source"`
-		Advisory *Advisory `json:"advisory"`
-	}
+	var wire advisoryIngressEnvelope
 	if !utf8.Valid(raw) || json.Unmarshal(raw, &wire) != nil || wire.Version != 1 ||
 		wire.Source != FAASWIM && wire.Source != Eurocontrol || wire.Advisory == nil {
 		return Advisory{}, fmt.Errorf("%w: invalid advisory ingress envelope", ErrInvalidQuery)
