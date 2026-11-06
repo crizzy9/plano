@@ -419,19 +419,30 @@ type deliveryJob struct {
 }
 
 func (s *Store) claim(ctx context.Context, now time.Time, limit int) ([]deliveryJob, error) {
+	return s.claimForPlatform(ctx, now, limit, "")
+}
+
+func (s *Store) claimForPlatform(ctx context.Context, now time.Time, limit int, platform string) ([]deliveryJob, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 	t := now.UnixNano()
+	args := []any{t, t, t}
+	platformFilter := ""
+	if platform != "" {
+		platformFilter = " AND d.platform=?"
+		args = append(args, platform)
+	}
+	args = append(args, t, limit)
 	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.device_id,d.registered,o.attempts,d.platform,d.token,COALESCE(b.binding,''),o.message
 FROM outbox o JOIN devices d ON d.id=o.device_id LEFT JOIN device_bindings b ON b.device_id=d.id
-WHERE o.done=0 AND o.due<=? AND o.expires>? AND o.lease_until<=?
+WHERE o.done=0 AND o.due<=? AND o.expires>? AND o.lease_until<=?`+platformFilter+`
 AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
   SELECT 1 FROM outbox older WHERE older.device_id=o.device_id AND older.flight_id=o.flight_id AND older.id<o.id
   AND older.done=0 AND older.expires>? AND json_extract(older.message,'$.Kind') <> 'alert'
-)) ORDER BY o.due,o.id LIMIT ?`, t, t, t, t, limit)
+)) ORDER BY o.due,o.id LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -460,7 +471,10 @@ AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
 			return nil, err
 		}
 	}
-	return jobs, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return jobs, nil
 }
 
 func (s *Store) resolve(ctx context.Context, job deliveryJob, sent error, now time.Time) error {
@@ -524,27 +538,55 @@ func (s *Store) commitOutbox(tx *sql.Tx) error {
 	return nil
 }
 
-// RunDispatcher keeps independent sends in flight. A slow provider request
-// cannot stop ready work while a slot is available. The tick also recovers
+func dispatcherPlatforms(sender PushSender) []string {
+	if pointer, ok := sender.(*push.Sender); ok {
+		if pointer == nil {
+			return nil
+		}
+		sender = *pointer
+	}
+	if configured, ok := sender.(push.Sender); ok {
+		var platforms []string
+		if configured.APNs != nil {
+			platforms = append(platforms, "ios")
+		}
+		if configured.FCM != nil {
+			platforms = append(platforms, "android")
+		}
+		return platforms
+	}
+	return []string{"ios", "android"}
+}
+
+// RunDispatcher reserves send capacity for each provider. The tick recovers
 // persisted jobs and retries if a process-local wake was lost.
 func (s *Store) RunDispatcher(ctx context.Context, sender PushSender, logger *slog.Logger) {
 	const slots = 16
+	platforms := dispatcherPlatforms(sender)
+	if len(platforms) == 0 {
+		return
+	}
+	perPlatform := slots / len(platforms)
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
-	completed := make(chan struct{}, slots)
+	completed := make(chan int, slots)
 	var workers sync.WaitGroup
 	defer workers.Wait()
-	busy := 0
+	busy := make([]int, len(platforms))
 	for ctx.Err() == nil {
-		if busy < slots {
-			jobs, err := s.claim(ctx, time.Now(), slots-busy)
+		for lane, platform := range platforms {
+			available := perPlatform - busy[lane]
+			if available == 0 {
+				continue
+			}
+			jobs, err := s.claimForPlatform(ctx, time.Now(), available, platform)
 			if err != nil && ctx.Err() == nil {
-				logger.Error("push dispatcher failed", "error", err)
+				logger.Error("push dispatcher failed", "platform", platform, "error", err)
 			}
 			for _, job := range jobs {
-				busy++
+				busy[lane]++
 				workers.Go(func() {
-					defer func() { completed <- struct{}{} }()
+					defer func() { completed <- lane }()
 					s.deliver(ctx, sender, logger, job)
 				})
 			}
@@ -552,8 +594,8 @@ func (s *Store) RunDispatcher(ctx context.Context, sender PushSender, logger *sl
 		select {
 		case <-ctx.Done():
 			return
-		case <-completed:
-			busy--
+		case lane := <-completed:
+			busy[lane]--
 		case <-s.outboxWake:
 		case <-tick.C:
 		}
@@ -561,9 +603,24 @@ func (s *Store) RunDispatcher(ctx context.Context, sender PushSender, logger *sl
 }
 
 func (s *Store) deliver(ctx context.Context, sender PushSender, logger *slog.Logger, job deliveryJob) {
+	// Revoking a device or untracking a flight can remove a leased row. Check
+	// the lease again at the transport boundary without holding a transaction.
+	var expires int64
+	err := s.db.QueryRowContext(ctx, `SELECT expires FROM outbox WHERE id=? AND device_id=? AND lease_until=? AND done=0`,
+		job.id, job.deviceID, job.lease).Scan(&expires)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
+			logger.Error("could not validate push lease", "job", job.id, "error", err)
+		}
+		return
+	}
 	start := time.Now()
-	attempt, cancel := context.WithTimeout(ctx, 10*time.Second)
-	err := sender.Send(attempt, job.target, job.message)
+	deadline := time.Unix(0, min(job.lease, expires, start.Add(10*time.Second).UnixNano()))
+	if ctx.Err() != nil || !deadline.After(start) {
+		return
+	}
+	attempt, cancel := context.WithDeadline(ctx, deadline)
+	err = sender.Send(attempt, job.target, job.message)
 	cancel()
 	if err != nil {
 		logger.Warn("push delivery failed", "job", job.id, "platform", job.target.Platform)

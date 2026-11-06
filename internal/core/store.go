@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS outbox (
   lease_until INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(due, id) WHERE done = 0;
+CREATE INDEX IF NOT EXISTS outbox_by_device_flight ON outbox(device_id,flight_id,done,id);
 CREATE TABLE IF NOT EXISTS live_wire_clocks (
   device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   flight_id TEXT NOT NULL REFERENCES flights(id) ON DELETE CASCADE, wire_epoch INTEGER NOT NULL,
