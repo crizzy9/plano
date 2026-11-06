@@ -152,3 +152,49 @@ func TestAeroOutboundObservationDropsForecastWithoutCurrentEvidence(t *testing.T
 		t.Fatalf("authoritative callback kept forecast without current evidence: %+v, %v", got.Prediction, err)
 	}
 }
+
+func TestAeroForecastReachesGroundStopAfterInboundTurnaround(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(filepath.Join(t.TempDir(), "ground-stop-forecast.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC().Truncate(time.Second).Add(-2 * time.Second)
+	flight := feeds.Flight{
+		ID: "ground-stop-forecast", Number: "AA2", Source: "flightaware_aeroapi", Status: "scheduled",
+		Origin: "SFO", OriginICAO: "KSFO", Destination: "JFK", DestinationICAO: "KJFK", TailNumber: "N123AA",
+		InboundID: "ground-stop-inbound", ScheduledDeparture: new(now.Add(30 * time.Minute)), ObservedAt: now.Add(-time.Minute),
+	}
+	inbound := feeds.Flight{
+		ID: flight.InboundID, Number: "AA1", Source: flight.Source, Status: "airborne", DestinationICAO: flight.OriginICAO,
+		TailNumber: flight.TailNumber, EstimatedArrival: new(now.Add(40 * time.Minute)), ObservedAt: now.Add(-time.Minute),
+	}
+	if err := store.Observe(ctx, flight, nil, []feeds.Flight{inbound}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Track(ctx, friendInstallation(t, store), flight.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	stop := feeds.Advisory{ID: "stop", Source: feeds.FAASWIM, Airport: flight.DestinationICAO, Kind: "ground_stop", Direction: "arrival",
+		ObservedAt: now, StartsAt: new(now.Add(time.Hour)), EndsAt: new(now.Add(2 * time.Hour)), Reason: "thunderstorms"}
+	if err := store.PublishAdvisory(ctx, stop, now); err != nil {
+		t.Fatal(err)
+	}
+	flight.ObservedAt = now
+	if err := store.IngestAeroObservation(ctx, flight, now); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := store.Details(ctx, flight.ID)
+	if err != nil || detail.Prediction == nil || detail.Prediction.Departure == nil || !detail.Prediction.Departure.Equal(*stop.EndsAt) ||
+		detail.Prediction.DelayMinutes != 90 || !strings.Contains(strings.Join(detail.Prediction.Reasons, " "), "ground stop at KJFK") {
+		t.Fatalf("forecast should honor the destination stop after inbound turnaround: %+v, %v", detail.Prediction, err)
+	}
+	stop.Kind, stop.ObservedAt = "cancelled", now.Add(time.Second)
+	if err := store.PublishAdvisory(ctx, stop, stop.ObservedAt); err != nil {
+		t.Fatal(err)
+	}
+	if detail, err := store.Details(ctx, flight.ID); err != nil || detail.Prediction != nil {
+		t.Fatalf("forecast survived withdrawal of the stop it relied on: %+v, %v", detail.Prediction, err)
+	}
+}

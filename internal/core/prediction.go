@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	inboundForecastTTL   = 30 * time.Minute
-	inboundReasonPrefix  = "Inbound flight "
-	closureForecastLimit = 24 * time.Hour
+	inboundForecastTTL     = 30 * time.Minute
+	inboundReasonPrefix    = "Inbound flight "
+	departureForecastLimit = 24 * time.Hour
 )
 
 // Prediction preserves the official schedule and labels the inputs behind an estimate.
@@ -100,15 +100,17 @@ func predictWithTerminalWeather(model *predict.Model, flight feeds.Flight, rotat
 			reasons = append(reasons, "The flight was still awaiting gate-out at the last flight update.")
 		}
 	}
-	if closure := departureClosureFloor(flight, advisories, now, departure); !closure.end.IsZero() {
-		if closure.end.Sub(scheduled) > closureForecastLimit {
+	// Turnaround, model inference or an earlier closure can move the expected
+	// departure into a later operational hold.
+	if hold := departureHoldFloor(flight, advisories, now, departure); !hold.end.IsZero() {
+		if hold.end.Sub(scheduled) > departureForecastLimit {
 			return nil
 		}
-		departure = closure.end
-		forecast.ValidUntil = earliestValidity(forecast.ValidUntil, closure.validUntil)
-		forecast.AdvisoryEvidence = append(forecast.AdvisoryEvidence, closure.advisories...)
-		forecast.DelayMinutes = int(math.Ceil(closure.end.Sub(scheduled).Minutes()))
-		reasons = append(reasons, closure.reason)
+		departure = hold.end
+		forecast.ValidUntil = earliestValidity(forecast.ValidUntil, hold.validUntil)
+		forecast.AdvisoryEvidence = append(forecast.AdvisoryEvidence, hold.advisories...)
+		forecast.DelayMinutes = int(math.Ceil(hold.end.Sub(scheduled).Minutes()))
+		reasons = append(reasons, hold.reasons...)
 	}
 	if len(reasons) == 0 {
 		return nil
@@ -205,28 +207,42 @@ func flightBeforeDeparture(flight feeds.Flight) bool {
 	}
 }
 
-type closureAdjustment struct {
+type departureHoldAdjustment struct {
 	end, validUntil time.Time
-	reason          string
+	reasons         []string
 	advisories      []forecastAdvisory
 }
 
-func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now, departure time.Time) closureAdjustment {
-	type closureWindow struct {
+func departureHoldFloor(flight feeds.Flight, advisories []feeds.Advisory, now, departure time.Time) departureHoldAdjustment {
+	type holdWindow struct {
 		start, end, freshUntil time.Time
-		airport, source        string
+		kind, airport, source  string
+		reason                 string
 		evidence               forecastAdvisory
 	}
 	if departure.Before(now) {
 		departure = now
 	}
-	horizon := flight.ScheduledDeparture.Add(closureForecastLimit)
+	horizon := flight.ScheduledDeparture.Add(departureForecastLimit)
 	if horizon.Before(departure) {
 		horizon = departure
 	}
-	var closures []closureWindow
+	var windows []holdWindow
 	for _, a := range advisories {
-		if a.AirportContextOnly || a.Kind != "airport_closure" || a.Direction != "" && a.Direction != "departure" ||
+		if a.AirportContextOnly {
+			continue
+		}
+		if a.Kind == "ground_stop" {
+			freshUntil := advisoryForecastValidity(a, now)
+			if a.EndsAt == nil || advisoryTime(flight, a) == nil || !freshUntil.After(now) {
+				continue
+			}
+			start := firstTime(a.StartsAt, &a.ObservedAt)
+			windows = append(windows, holdWindow{start: *start, end: *a.EndsAt, freshUntil: freshUntil,
+				kind: a.Kind, airport: a.Airport, source: a.Source, reason: a.Reason, evidence: advisoryEvidence(a)})
+			continue
+		}
+		if a.Kind != "airport_closure" || a.Direction != "" && a.Direction != "departure" ||
 			a.Airport == "" || a.Airport != flight.Origin && a.Airport != flight.OriginICAO {
 			continue
 		}
@@ -248,7 +264,7 @@ func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now
 		if !freshUntil.After(now) || timed.EndsAt == nil {
 			continue
 		}
-		window := closureWindow{freshUntil: freshUntil, airport: a.Airport, source: a.Source, evidence: advisoryEvidence(a)}
+		window := holdWindow{freshUntil: freshUntil, kind: a.Kind, airport: a.Airport, source: a.Source, evidence: advisoryEvidence(a)}
 		if summary.HasDailyClosure() {
 			// Only expand occurrences that the closure chain can reach before
 			// the forecast limit, regardless of the full notice's duration.
@@ -259,7 +275,7 @@ func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now
 				}
 				window.start, window.end = start, end
 				window.freshUntil = earliestTime(freshUntil, end)
-				closures = append(closures, window)
+				windows = append(windows, window)
 				at = end
 			}
 			continue
@@ -272,30 +288,41 @@ func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now
 			continue
 		}
 		window.start, window.end = start, *timed.EndsAt
-		closures = append(closures, window)
+		windows = append(windows, window)
 	}
-	slices.SortStableFunc(closures, func(a, b closureWindow) int { return a.start.Compare(b.start) })
-	var last closureWindow
-	adjustment := closureAdjustment{validUntil: now.Add(advisoryForecastTTL)}
+	slices.SortStableFunc(windows, func(a, b holdWindow) int { return a.start.Compare(b.start) })
+	var lastClosure, lastStop holdWindow
+	adjustment := departureHoldAdjustment{validUntil: now.Add(advisoryForecastTTL)}
 	applied := make(map[forecastAdvisory]bool)
-	for _, closure := range closures {
-		if closure.start.After(departure) {
+	for _, window := range windows {
+		if window.start.After(departure) {
 			break
 		}
-		if closure.end.After(departure) {
-			departure, last = closure.end, closure
-			adjustment.validUntil = earliestTime(adjustment.validUntil, closure.freshUntil)
-			if !applied[closure.evidence] {
-				adjustment.advisories = append(adjustment.advisories, closure.evidence)
-				applied[closure.evidence] = true
+		if window.end.After(departure) {
+			departure, adjustment.end = window.end, window.end
+			adjustment.validUntil = earliestTime(adjustment.validUntil, window.freshUntil)
+			if window.kind == "ground_stop" {
+				lastStop = window
+			} else {
+				lastClosure = window
+			}
+			if !applied[window.evidence] {
+				adjustment.advisories = append(adjustment.advisories, window.evidence)
+				applied[window.evidence] = true
 			}
 		}
 	}
-	if last.end.IsZero() {
-		return closureAdjustment{}
+	if !lastClosure.end.IsZero() {
+		adjustment.reasons = append(adjustment.reasons, fmt.Sprintf("%s reports a full airport closure at %s. The estimate allows for the published closure window.",
+			advisorySourceName(lastClosure.source), lastClosure.airport))
 	}
-	adjustment.end = last.end
-	adjustment.reason = fmt.Sprintf("%s reports a full airport closure at %s. The estimate allows for the published closure window.", advisorySourceName(last.source), last.airport)
+	if !lastStop.end.IsZero() {
+		reason := fmt.Sprintf("%s reports a ground stop at %s", advisorySourceName(lastStop.source), lastStop.airport)
+		if lastStop.reason != "" {
+			reason += " due to " + lastStop.reason
+		}
+		adjustment.reasons = append(adjustment.reasons, reason+".")
+	}
 	return adjustment
 }
 

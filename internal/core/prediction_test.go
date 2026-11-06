@@ -244,10 +244,33 @@ func TestPredictionChainsDailyAndFixedClosures(t *testing.T) {
 	}
 }
 
+func TestPredictionChainsClosureAndGroundStop(t *testing.T) {
+	now := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)
+	scheduled := now.Add(20 * time.Minute)
+	flight := feeds.Flight{Status: "scheduled", Origin: "SFO", Destination: "JFK", ScheduledDeparture: &scheduled}
+	closure := feeds.Advisory{ID: "closure", Airport: "SFO", Kind: "airport_closure", Direction: "departure", Source: "faa_nas",
+		RawReason: "AD AP CLSD", ObservedAt: now, StartsAt: new(now.Add(15 * time.Minute)), EndsAt: new(now.Add(50 * time.Minute))}
+	stop := feeds.Advisory{ID: "stop", Airport: "JFK", Kind: "ground_stop", Direction: "arrival", Source: feeds.FAASWIM,
+		ObservedAt: now, StartsAt: new(now.Add(40 * time.Minute)), EndsAt: new(now.Add(70 * time.Minute))}
+	context := stop
+	context.ID, context.AirportContextOnly = "context", true
+	context.StartsAt, context.EndsAt = new(now.Add(time.Hour)), new(now.Add(90*time.Minute))
+	advisories := []feeds.Advisory{context, stop, closure}
+	got := Predict(flight, nil, advisories, now)
+	if got == nil || got.Departure == nil || !got.Departure.Equal(*stop.EndsAt) || got.DelayMinutes != 50 ||
+		!slices.Equal(got.AdvisoryEvidence, []forecastAdvisory{advisoryEvidence(closure), advisoryEvidence(stop)}) ||
+		len(got.Reasons) != 2 || !strings.Contains(got.Reasons[0], "full airport closure at SFO") || !strings.Contains(got.Reasons[1], "ground stop at JFK") {
+		t.Fatalf("forecast should follow both applicable holds and skip airport-only context: %+v", got)
+	}
+	if features, ok := ExtractDelayFeatures(flight, nil, advisories, now); !ok || features != (predict.Features{}) {
+		t.Fatalf("post-estimate holds changed the model features: %+v, %t", features, ok)
+	}
+}
+
 func TestPredictionChecksDailyClosureAtTheForecastLimit(t *testing.T) {
 	now := time.Date(2026, time.November, 6, 8, 0, 0, 0, time.UTC)
 	flight := feeds.Flight{Status: "scheduled", Origin: "SFO", OriginICAO: "KSFO", ScheduledDeparture: &now}
-	limit := now.Add(closureForecastLimit)
+	limit := now.Add(departureForecastLimit)
 	before := feeds.Advisory{ID: "before", Airport: "SFO", Kind: "airport_closure", Source: "faa_nas", RawReason: "AD AP CLSD",
 		ObservedAt: now, EndsAt: &limit}
 	daily := feeds.Advisory{ID: "daily", Airport: "KSFO", Kind: "airport_closure", Source: feeds.FAASWIM, ObservedAt: now,
