@@ -954,8 +954,9 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
         if (swim?.hasMore || eurocontrol?.hasMore) delay = radarPageInterval;
         const changedPrivateScope = (swim?.replace && knownSWIM.revision !== undefined && result.swimRevision !== undefined) ||
           (eurocontrol?.replace && knownEurocontrol.revision !== undefined && result.eurocontrolRevision !== undefined);
-        const refreshPrivateScope = changedPrivateScope && result.providerRevision && radarOrder(result.providerRevision, flight.observedAt) > 0;
-        if (refreshPrivateScope) setPrivateScopeObservedAt(result.providerRevision);
+        const snapshotObservedAt = result.flightObservedAt ?? result.providerRevision;
+        const refreshPrivateScope = changedPrivateScope && snapshotObservedAt && radarOrder(snapshotObservedAt, flight.observedAt) > 0;
+        if (refreshPrivateScope) setPrivateScopeObservedAt(snapshotObservedAt);
         if ((replaceReceiver && detailRevision !== nextReceiverRevision) || refreshPrivateScope) refreshFlight();
         consecutiveFailures = 0;
       } catch {

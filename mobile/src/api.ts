@@ -76,6 +76,7 @@ export interface RadarBatch {
   providerPositions?: Position[];
   providerCursor?: string;
   providerRevision?: string;
+  flightObservedAt?: string;
   swimPositions?: Position[];
   swimCursor?: string;
   swimRevision?: string;

@@ -10,7 +10,7 @@ const { outputText } = ts.transpileModule(source + '\nexport { FlightRadar };', 
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 });
 
-function completedRadar(radar, history) {
+function completedRadar(radar, history, refreshFlight = () => {}) {
   const timers = new Map();
   const hooks = [];
   let hookIndex = 0;
@@ -76,7 +76,7 @@ function completedRadar(radar, history) {
     },
     render() {
       hookIndex = 0;
-      return exports.FlightRadar({ api: { radar }, flight, history, tracked: true, detailRevision: '0', refreshFlight() {} });
+      return exports.FlightRadar({ api: { radar }, flight, history, tracked: true, detailRevision: '0', refreshFlight });
     },
     async retry() {
       assert.equal(timers.size, 1);
@@ -182,6 +182,38 @@ test('radar fetches the provider baseline even when detail has the same revision
   assert.equal(map.props.positions.length, 2);
   assert.equal(map.props.positions[0], early);
   assert.equal(map.props.positions[1], late);
+});
+
+test('a provider-track update leaves a private radar reset visible when flight status is current', async () => {
+  const flightObservedAt = '2025-06-01T20:01:00Z';
+  const first = { at: '2025-06-01T19:50:00Z', source: 'faa_swim', latitude: 40, longitude: -75 };
+  const provider = { at: '2025-06-01T19:53:00Z', source: 'flightaware_aeroapi', latitude: 40, longitude: -74.5 };
+  const latest = { at: '2025-06-01T19:55:00Z', source: 'faa_swim', latitude: 40, longitude: -74 };
+  let refreshes = 0;
+  const radar = completedRadar(async (_id, _after, knownProvider, _receiver, swim) => {
+    if (!swim.revision) {
+      return { positions: [], receiverRevision: '0', providerRevision: flightObservedAt,
+        flightObservedAt, swimRevision: '0', swimPositions: [first] };
+    }
+    assert.equal(knownProvider, flightObservedAt);
+    assert.equal(swim.revision, '0');
+    return { positions: [], receiverRevision: '0', providerRevision: '2025-06-01T20:01:00.000000001Z',
+      flightObservedAt, providerPositions: [provider], swimRevision: '1', swimPositions: [latest] };
+  }, undefined, () => { refreshes += 1; });
+  radar.render();
+  await radar.settle();
+  const [, previousTrack] = radar.render().props.children;
+  assert.equal(previousTrack.props.children[0].props.positions[0], first);
+
+  radar.setAppState('background');
+  radar.setAppState('active');
+  await radar.settle();
+  const [, track] = radar.render().props.children;
+  const [map, readout] = track.props.children;
+  assert.deepEqual(Array.from(map.props.positions), [provider, latest]);
+  assert.equal(readout.props.position, latest);
+  assert.equal(refreshes, 0);
+  assert.equal(radar.timers.size, 0);
 });
 
 const unavailable = async () => { throw new Error('unavailable'); };

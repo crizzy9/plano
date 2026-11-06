@@ -210,6 +210,7 @@ func TestRadarProviderPagesCachedPositionsIndependently(t *testing.T) {
 		ProviderPositions []feeds.Position `json:"providerPositions"`
 		ProviderCursor    string           `json:"providerCursor"`
 		ProviderRevision  string           `json:"providerRevision"`
+		FlightObservedAt  string           `json:"flightObservedAt"`
 	}
 	decode := func(raw string) page {
 		t.Helper()
@@ -222,7 +223,8 @@ func TestRadarProviderPagesCachedPositionsIndependently(t *testing.T) {
 	query := url.Values{"provider": {"1"}, "after": {now.Format(time.RFC3339Nano)}}
 	initial := decode(get(ownerToken, query))
 	if len(initial.ProviderPositions) != 256 || !initial.ProviderPositions[0].At.Equal(base.Add(4*time.Nanosecond)) ||
-		initial.ProviderCursor != base.Add(259*time.Nanosecond).Format(time.RFC3339Nano) || initial.ProviderRevision != now.Format(time.RFC3339Nano) ||
+		initial.ProviderCursor != base.Add(259*time.Nanosecond).Format(time.RFC3339Nano) ||
+		initial.ProviderRevision != now.Format(time.RFC3339Nano) || initial.FlightObservedAt != now.Format(time.RFC3339Nano) ||
 		len(initial.Positions) != 0 || initial.Cursor != "" {
 		t.Fatalf("unexpected initial radar page: %d provider positions, cursor %q, %d receiver positions, cursor %q",
 			len(initial.ProviderPositions), initial.ProviderCursor, len(initial.Positions), initial.Cursor)
@@ -251,13 +253,13 @@ func TestRadarProviderPagesCachedPositionsIndependently(t *testing.T) {
 		t.Fatalf("cursor advanced without a provider fix: %+v", empty)
 	}
 	query.Del("providerAfter")
-	if foreign := decode(get(foreignToken, query)); foreign.ProviderPositions == nil || len(foreign.ProviderPositions) != 0 || foreign.ProviderCursor != "" || foreign.ProviderRevision != "" {
+	if foreign := decode(get(foreignToken, query)); foreign.ProviderPositions == nil || len(foreign.ProviderPositions) != 0 || foreign.ProviderCursor != "" || foreign.ProviderRevision != "" || foreign.FlightObservedAt != "" {
 		t.Fatalf("foreign installation got provider fixes: %+v", foreign)
 	}
 	if err := service.Store.Untrack(t.Context(), owner, fixture.ID); err != nil {
 		t.Fatal(err)
 	}
-	if removed := decode(get(ownerToken, query)); removed.ProviderPositions == nil || len(removed.ProviderPositions) != 0 || removed.ProviderCursor != "" || removed.ProviderRevision != "" {
+	if removed := decode(get(ownerToken, query)); removed.ProviderPositions == nil || len(removed.ProviderPositions) != 0 || removed.ProviderCursor != "" || removed.ProviderRevision != "" || removed.FlightObservedAt != "" {
 		t.Fatalf("removed flight still returns provider fixes: %+v", removed)
 	}
 	for _, invalid := range []string{"provider=2", "provider=1&providerAfter=bad", "provider=1&providerRevision=bad", "provider=1&after=bad", "providerAfter=2026-01-01T00:00:00Z", "providerRevision=2026-01-01T00:00:00Z", "receiverRevision=0", "provider=1&receiverRevision=-1", "provider=1&receiverRevision=00", "provider=1&receiverRevision=bad"} {

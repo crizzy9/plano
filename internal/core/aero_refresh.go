@@ -118,6 +118,7 @@ type aeroObservationScope struct {
 	providerID            string
 	sameOrigin            bool
 	recoverRotationSuffix bool
+	providerTrackFetched  time.Time
 }
 
 func (s *Store) findAeroRefreshTargets(ctx context.Context, providerID string, now time.Time) (aeroRefreshTargets, error) {

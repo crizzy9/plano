@@ -15,6 +15,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -232,7 +233,7 @@ CREATE INDEX IF NOT EXISTS bookings_by_locator ON bookings(owner, locator_hash);
 CREATE TABLE IF NOT EXISTS shares (
   token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, flight_id TEXT NOT NULL, expires INTEGER NOT NULL,
   FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
-);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema + passportArchiveSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema + delayProviderSamplesSchema + delayEarlySamplesSchema + tfmsProgramCancellationSchema + calendarSyncSchema + atfmSlotSchema); err != nil {
+);` + radarSchema + providerTrackSchema + pickupSchema + friendSchema + airportCacheSchema + passportArchiveSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema + delayProviderSamplesSchema + delayEarlySamplesSchema + tfmsProgramCancellationSchema + calendarSyncSchema + atfmSlotSchema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -509,15 +510,24 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 	var prior feeds.Flight
 	var raw, oldInbound, oldPrediction, oldTrack []byte
 	var estimateAnchors estimateAlertAnchors
+	var radarState providerTrackState
 	var previousProvider, lastRadarTail string
-	var retainedDirect, providerChanged, receiverReset, refreshReceiver bool
+	var retainedDirect, providerChanged, receiverReset, refreshReceiver, providerScopeChanged bool
 	provider := flight.AeroProviderID()
+	observed := flight.ObservedAt.UnixNano()
+	fetched := scope.providerTrackFetched
+	if track != nil && provider != "" && mode != observationPoll {
+		fetched = flight.ObservedAt
+	}
 	err = tx.QueryRowContext(ctx, `SELECT snapshot,inbound,prediction,telemetry,
 COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id),''),
-COALESCE((SELECT last_tail FROM radar_receiver_revisions WHERE flight_id=flights.id),''), anchors.departure, anchors.arrival
+COALESCE((SELECT last_tail FROM radar_receiver_revisions WHERE flight_id=flights.id),''), anchors.departure, anchors.arrival,
+COALESCE(p.revision_ns,0),COALESCE(p.scope_ns,0),COALESCE(p.fetched_ns,0)
 FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flights.id
+LEFT JOIN radar_provider_revisions p ON p.flight_id=flights.id
 WHERE flights.id=? AND (NOT ? OR EXISTS(SELECT 1 FROM tracked WHERE flight_id=flights.id))`, flight.ID, mode == observationPoll).
-		Scan(&raw, &oldInbound, &oldPrediction, &oldTrack, &previousProvider, &lastRadarTail, &estimateAnchors.departure, &estimateAnchors.arrival)
+		Scan(&raw, &oldInbound, &oldPrediction, &oldTrack, &previousProvider, &lastRadarTail, &estimateAnchors.departure, &estimateAnchors.arrival,
+			&radarState.revision, &radarState.scope, &radarState.fetched)
 	// Tracking can change while the poll is waiting on the provider.
 	if mode == observationPoll && errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -525,17 +535,43 @@ WHERE flights.id=? AND (NOT ? OR EXISTS(SELECT 1 FROM tracked WHERE flight_id=fl
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	priorRadarState := radarState
 	if err == nil {
 		if err := json.Unmarshal(raw, &prior); err != nil {
 			return err
 		}
+		priorTrackProvider := previousProvider
+		if priorTrackProvider == "" {
+			priorTrackProvider = prior.AeroProviderID()
+		}
+		sameTrackIdentity := sameProviderTrackIdentity(prior, flight, priorTrackProvider, provider)
+		sameTakeoff := sameRadarInstant(prior.ActualTakeoff, flight.ActualTakeoff)
+		sameTrackScope := sameTrackIdentity && sameTakeoff && strings.EqualFold(prior.TailNumber, flight.TailNumber)
 		if !flight.ObservedAt.After(prior.ObservedAt) {
+			if mode == observationPoll && sameTrackScope {
+				return saveOverlappingProviderTrack(ctx, tx, prior, flight, track, oldTrack, radarState, fetched)
+			}
 			return nil
 		}
 		// A diversion continuation can reuse the original AeroAPI ID. A signed
 		// snapshot with a different origin cannot replace a tracked departure.
 		if scope.sameOrigin && flightAlertAirportChanged(prior.Origin, prior.OriginICAO, flight.Origin, flight.OriginICAO) {
 			return nil
+		}
+		providerScopeChanged = (priorTrackProvider != "" || provider != "") && !sameTrackScope
+		if providerScopeChanged {
+			radarState.scope, radarState.fetched = observed, 0
+			// A tail withdrawal fences pending writes while the known
+			// provider path survives. Route and takeoff scope changes retire it.
+			if priorTrackProvider != "" && prior.Source == "flightaware_aeroapi" && (!sameTrackIdentity || !sameTakeoff) {
+				if track == nil {
+					track = make([]feeds.Position, 0)
+				}
+				oldTrack = nil
+			}
+		} else if mode == observationPoll && !fetched.IsZero() && fetched.UnixNano() <= radarState.fetched {
+			// The status can still advance independently of a superseded track fetch.
+			track = nil
 		}
 		providerChanged = previousProvider != "" && provider != "" && provider != previousProvider
 		if providerChanged || flight.TailNumber != prior.TailNumber || flight.InboundID != prior.InboundID {
@@ -722,9 +758,20 @@ WHERE flights.id=? AND (NOT ? OR EXISTS(SELECT 1 FROM tracked WHERE flight_id=fl
 	_, err = tx.ExecContext(ctx, `INSERT INTO flights(id,snapshot,observed_ns,telemetry,inbound,prediction)
 VALUES(?,?,?,COALESCE(?,'[]'),COALESCE(?,'[]'),?) ON CONFLICT(id) DO UPDATE SET
 snapshot=excluded.snapshot, observed_ns=excluded.observed_ns, telemetry=COALESCE(?,flights.telemetry), inbound=COALESCE(?,flights.inbound),prediction=excluded.prediction`,
-		flight.ID, string(snapshot), flight.ObservedAt.UnixNano(), telemetry, rotation, string(prediction), telemetry, rotation)
+		flight.ID, string(snapshot), observed, telemetry, rotation, string(prediction), telemetry, rotation)
 	if err != nil {
 		return err
+	}
+	if telemetry != nil && !fetched.IsZero() && fetched.UnixNano() > radarState.fetched {
+		radarState.fetched = fetched.UnixNano()
+	}
+	if radarState.revision >= observed && (providerScopeChanged || telemetry != nil && telemetry != string(oldTrack)) {
+		radarState.revision++
+	}
+	if radarState != priorRadarState {
+		if err := radarState.save(ctx, tx, flight.ID); err != nil {
+			return err
+		}
 	}
 
 	if provider != "" {

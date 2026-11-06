@@ -124,19 +124,23 @@ func (r Refresher) refreshFlight(ctx context.Context, prior feeds.Flight, adviso
 		return nil
 	}
 	var positions []feeds.Position
+	var scope aeroObservationScope
 	if (flight.ActualDeparture != nil || flight.ActualTakeoff != nil || flight.Status == "airborne") &&
 		(!finished(prior) || prior.ActualArrival == nil) {
-		trackID := flight.AeroProviderID()
+		provider := flight.AeroProviderID()
+		trackID := provider
 		if trackID == "" {
 			trackID = flight.ID
 		}
+		started := time.Now()
 		positions, err = r.Flights.Track(ctx, trackID)
 		if err != nil {
 			r.Logger.Warn("flight track refresh failed", "id", flight.ID, "error", err)
+		} else if provider != "" {
+			scope.providerTrackFetched = started
 		}
 	}
 	var inbound []feeds.Flight
-	var scope aeroObservationScope
 	if flightBeforeDeparture(flight) && (flight.InboundID != "" || flight.TailNumber != "") {
 		rotationCtx, cancel := context.WithTimeout(ctx, pollRotationTimeout)
 		inbound, err = r.Flights.Rotation(rotationCtx, flight)

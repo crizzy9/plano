@@ -78,6 +78,9 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 		if page.ProviderRevision != nil {
 			result["providerRevision"] = page.ProviderRevision.Format(time.RFC3339Nano)
 		}
+		if page.FlightObservedAt != nil {
+			result["flightObservedAt"] = page.FlightObservedAt.Format(time.RFC3339Nano)
+		}
 		if len(page.ProviderPositions) > 0 {
 			result["providerCursor"] = page.ProviderPositions[len(page.ProviderPositions)-1].At.UTC().Format(time.RFC3339Nano)
 		}

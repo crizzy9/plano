@@ -56,6 +56,7 @@ type RadarPage struct {
 	ReceiverRevision     *int64
 	ProviderPositions    []feeds.Position
 	ProviderRevision     *time.Time
+	FlightObservedAt     *time.Time
 	SWIMPositions        []feeds.Position
 	SWIMRevision         *int64
 	EurocontrolPositions []feeds.Position
@@ -324,6 +325,7 @@ func (s *Store) RadarProviderPositions(ctx context.Context, owner, id string, af
 }
 
 func readRadarProviderPositions(ctx context.Context, db rowQueryer, owner, id string, after, knownRevision *time.Time, limit, snapshotLimit int) ([]feeds.Position, *time.Time, error) {
+	const providerRevision = `MAX(f.observed_ns,COALESCE(p.revision_ns,0))`
 	var knownNS any
 	if knownRevision != nil {
 		knownNS = knownRevision.UnixNano()
@@ -331,9 +333,10 @@ func readRadarProviderPositions(ctx context.Context, db rowQueryer, owner, id st
 	var telemetry []byte
 	var revision sql.NullInt64
 	err := db.QueryRowContext(ctx, `SELECT
-  CASE WHEN t.owner IS NOT NULL THEN f.observed_ns END,
-  CASE WHEN t.owner IS NOT NULL AND f.observed_ns IS NOT ? THEN f.telemetry END
+  CASE WHEN t.owner IS NOT NULL THEN `+providerRevision+` END,
+  CASE WHEN t.owner IS NOT NULL AND `+providerRevision+` IS NOT ? THEN f.telemetry END
 FROM flights f LEFT JOIN tracked t ON t.owner=? AND t.flight_id=f.id
+LEFT JOIN radar_provider_revisions p ON p.flight_id=f.id
 WHERE f.id=?`, knownNS, owner, id).Scan(&revision, &telemetry)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrNotFound
@@ -407,10 +410,11 @@ func (s *Store) RadarPageWithTraffic(ctx context.Context, owner, id string, rece
 		return RadarPage{}, err
 	}
 	defer tx.Rollback()
-	var revision sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT CASE WHEN t.owner IS NOT NULL THEN COALESCE(r.revision_ns,0) END
+	var revision, flightObserved sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT CASE WHEN t.owner IS NOT NULL THEN COALESCE(r.revision_ns,0) END,
+CASE WHEN t.owner IS NOT NULL THEN f.observed_ns END
 FROM flights f LEFT JOIN tracked t ON t.owner=? AND t.flight_id=f.id
-LEFT JOIN radar_receiver_revisions r ON r.flight_id=f.id WHERE f.id=?`, owner, id).Scan(&revision)
+LEFT JOIN radar_receiver_revisions r ON r.flight_id=f.id WHERE f.id=?`, owner, id).Scan(&revision, &flightObserved)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RadarPage{}, ErrNotFound
 	}
@@ -427,7 +431,8 @@ LEFT JOIN radar_receiver_revisions r ON r.flight_id=f.id WHERE f.id=?`, owner, i
 		}
 		return page, nil
 	}
-	page := RadarPage{ReceiverRevision: &revision.Int64}
+	observedAt := time.Unix(0, flightObserved.Int64).UTC()
+	page := RadarPage{ReceiverRevision: &revision.Int64, FlightObservedAt: &observedAt}
 	if receiverKnown != nil && *receiverKnown != revision.Int64 {
 		receiverAfter = nil
 	}
