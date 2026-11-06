@@ -314,7 +314,9 @@ func (s *Store) Untrack(ctx context.Context, owner, id string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE flight_id = ? AND device_id IN (SELECT id FROM devices WHERE owner = ?)`, id, owner); err != nil {
+	// Incoming Friends alerts are authorized by the sharer's grant, independently of this tracking row.
+	if _, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE flight_id = ? AND device_id IN (SELECT id FROM devices WHERE owner = ?)
+AND NOT EXISTS (SELECT 1 FROM outbox_friend_jobs WHERE outbox_id=outbox.id)`, id, owner); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM check_in_queued WHERE flight_id=? AND device_id IN (SELECT id FROM devices WHERE owner=?)`, id, owner); err != nil {

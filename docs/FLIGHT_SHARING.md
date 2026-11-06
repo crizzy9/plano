@@ -4,7 +4,7 @@
 
 Both installations use the same Plano server. Under **Trip tools → Friends**, the sender creates an invitation with the name they want the recipient to see. Share the code with the intended recipient. The recipient uses it within 24 hours and chooses their own display name.
 
-The connection shares no flights initially. The sender enables each flight separately. The recipient can see the shared flight's current provider status. Untracking the flight, revoking its grant, or removing the connection ends the share. Either participant can remove the connection. Sharing in the other direction uses a separate invitation.
+The connection shares no flights initially. The sender enables each flight separately. The recipient can see the shared flight's current provider status. The share ends if the sender untracks the flight or revokes its grant, or if either participant removes the connection. Sharing in the other direction uses a separate invitation.
 
 The Friends response carries flight information and display names. It leaves seats, bookings, device data, and local receiver tracks in their own installation scopes. A revoked share does not affect ordinary flight search for public provider status.
 
@@ -12,7 +12,7 @@ The Friends response carries flight information and display names. It leaves sea
 
 Under **Shared with you**, choose the alert level for each friend. Alerts start off. **Arrivals** sends landing and gate arrival updates. **All updates** also sends flight status changes such as gate changes, delays, takeoff, and baggage. Enable Plano notifications on the device to receive alerts. [Push setup](SELF_HOSTING.md#enable-live-data-and-push)
 
-Alerts apply to new events on flights your friend has shared. A shared flight stays out of your Passport unless you track it yourself. Plano queues one alert per device and event even if you already track the flight or multiple friends share it. Changing your preference or revoking a share removes its authorization for queued alerts. Alerts already submitted to a push provider can still arrive.
+Alerts apply to new events on flights your friend has shared. A shared flight stays out of your Passport unless you track it yourself. Plano queues one alert per device and event even if you already track the flight or multiple friends share it. Removing your own tracking keeps alerts queued through an active incoming share. Changing your preference or revoking a share removes its authorization for queued alerts. Alerts already submitted to a push provider can still arrive.
 
 ## Public pickup links
 

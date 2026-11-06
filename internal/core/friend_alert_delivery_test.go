@@ -94,10 +94,29 @@ func TestFriendAlertsFollowOriginalGrantsAndPreferences(t *testing.T) {
 	if err := store.RevokeFriendFlight(ctx, sharer, first.ID, flightID); err != nil {
 		t.Fatal(err)
 	}
-	assertSends(jobs, "Departure gate", "all-fixture", "owner-fixture", "personal-fixture")
+	if err := store.Track(ctx, all, flightID, ""); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := store.Untrack(ctx, all, flightID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Untrack(ctx, personal, flightID); err != nil {
+		t.Fatal(err)
+	}
+	assertSends(jobs, "Departure gate", "all-fixture", "owner-fixture")
+	if err := store.Track(ctx, personal, flightID, ""); err != nil {
+		t.Fatal(err)
+	}
 
 	jobs = gateChange("C3")
-	if err := store.RevokeFriendFlight(ctx, otherSharer, second.ID, flightID); err != nil {
+	// Untracking as a sharer revokes the original outgoing grant. Sharing again
+	// cannot restore that grant's authorization on an already leased alert.
+	if err := store.Untrack(ctx, otherSharer, flightID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Track(ctx, otherSharer, flightID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.GrantFriendFlight(ctx, otherSharer, second.ID, flightID); err != nil {
