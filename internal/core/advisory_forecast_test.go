@@ -20,7 +20,7 @@ func TestAdvisoryForecastUsesEarliestApplicableValidity(t *testing.T) {
 		{ID: "undated", Kind: "departure_delay", Airport: "SFO", Direction: "departure", Reason: "weather", DelayMinutes: new(18), ObservedAt: now.Add(-25 * time.Minute)},
 		{ID: "ended", Kind: "departure_delay", Airport: "SFO", Direction: "departure", Reason: "ended", DelayMinutes: new(99), ObservedAt: now.Add(-time.Hour), EndsAt: new(now)},
 		{ID: "old", Kind: "departure_delay", Airport: "SFO", Direction: "departure", Reason: "too old", DelayMinutes: new(99), ObservedAt: now.Add(-advisoryForecastTTL)},
-		{ID: "old-end", Kind: "departure_delay", Airport: "SFO", Direction: "departure", Reason: "too old", DelayMinutes: new(99), ObservedAt: now.Add(-maxNoticeAge), EndsAt: new(now.Add(time.Hour))},
+		{ID: "old-end", Kind: "departure_delay", Airport: "SFO", Direction: "departure", Reason: "too old", DelayMinutes: new(99), ObservedAt: now.Add(-feeds.AdvisoryMaxAge), EndsAt: new(now.Add(time.Hour))},
 		{ID: "future", Kind: "departure_delay", Airport: "SFO", Direction: "departure", Reason: "future", DelayMinutes: new(99), ObservedAt: now.Add(time.Second)},
 		{ID: "unknown", Kind: "departure_delay", Airport: "SFO", Direction: "departure", Reason: "unknown time", DelayMinutes: new(99)},
 		{ID: "withdrawn", Kind: "cancelled", Airport: "SFO", Reason: "cancelled", DelayMinutes: new(99), ObservedAt: now},

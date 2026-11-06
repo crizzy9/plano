@@ -26,12 +26,13 @@ import (
 var ErrNotFound = errors.New("record not found")
 
 type Store struct {
-	db                  *sql.DB
-	delayModel          *predict.Model
-	collectDelaySamples bool
-	outboxWake          chan struct{}
-	refreshWake         chan struct{}
-	apnsFlightAlerts    sync.Map
+	db                     *sql.DB
+	delayModel             *predict.Model
+	collectDelaySamples    bool
+	tfmsLegacyReplayCutoff int64
+	outboxWake             chan struct{}
+	refreshWake            chan struct{}
+	apnsFlightAlerts       sync.Map
 }
 
 type Details struct {
@@ -80,6 +81,11 @@ func OpenWithOptions(path string, options StoreOptions) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	var legacyAdvisories bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='pushed_advisories')`).Scan(&legacyAdvisories); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if _, err = db.Exec(`
 CREATE TABLE IF NOT EXISTS installations (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS flights (
@@ -217,7 +223,15 @@ CREATE TABLE IF NOT EXISTS shares (
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db, delayModel: options.DelayModel, collectDelaySamples: options.CollectDelaySamples, outboxWake: make(chan struct{}, 1), refreshWake: make(chan struct{}, 1)}, nil
+	tfmsLegacyReplayCutoff, err := upgradeTFMSAdvisoryDeadlines(db, time.Now(), legacyAdvisories)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &Store{
+		db: db, delayModel: options.DelayModel, collectDelaySamples: options.CollectDelaySamples,
+		tfmsLegacyReplayCutoff: tfmsLegacyReplayCutoff, outboxWake: make(chan struct{}, 1), refreshWake: make(chan struct{}, 1),
+	}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

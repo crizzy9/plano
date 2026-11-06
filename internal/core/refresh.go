@@ -66,7 +66,11 @@ func (r Refresher) refresh(ctx context.Context) error {
 		if advisories == nil {
 			advisories = make([]feeds.Advisory, 0)
 		}
-		advisories = append(advisories, result...)
+		for _, advisory := range result {
+			if !r.Store.ignoreLegacyTFMSReplay(advisory) {
+				advisories = append(advisories, advisory)
+			}
+		}
 	}
 	advisoryNow := time.Now()
 	pushed, err := r.Store.pushedAdvisories(ctx, advisoryNow)

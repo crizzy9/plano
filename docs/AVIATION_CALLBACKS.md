@@ -24,7 +24,7 @@ A subscription can also deliver an update for a direct inbound flight that AeroA
 
 Set `PLANO_ADVISORY_INGRESS_KEY_FILE` to a different mounted random secret of at least 32 bytes. Authorized operator bridges can send normalized observations to `POST /v1/webhooks/advisory` as `application/json`.
 
-The bridge must set `X-Plano-Timestamp` to the decimal Unix time in seconds and `X-Plano-Signature` to the hexadecimal HMAC-SHA256 of the exact UTF-8 timestamp, a single period, and the exact request body bytes. Sign with the key's UTF-8 bytes after trimming leading and trailing whitespace, as configured by Plano. The request clock must be within five minutes of Plano. A provider observation must be within the past six hours and at most 30 seconds ahead of Plano's clock.
+The bridge must set `X-Plano-Timestamp` to the decimal Unix time in seconds and `X-Plano-Signature` to the hexadecimal HMAC-SHA256 of the exact UTF-8 timestamp, a single period, and the exact request body bytes. Sign with the key's UTF-8 bytes after trimming leading and trailing whitespace, as configured by Plano. The request clock must be within five minutes of Plano. A provider observation can be at most 30 seconds ahead of Plano's clock. The observation age limit is six hours for ordinary advisories and 48 hours for eligible FAA airport program definitions described below.
 
 The Plano binary can sign and forward a normalized JSON envelope from stdin.
 It can also normalize AIXM 5.1 and 5.1.1 Event NOTAM notifications supplied by
@@ -77,11 +77,19 @@ and appears in flight details. Before sending an alert, Plano checks the
 latest flight against the program window. Flight-specific effects require
 membership evidence, so these definitions stay out of flight-delay estimates
 and model training.
-The relay skips proposals and unrelated message types. Programs expire at
-their published deadline or Plano's six-hour observation age limit, whichever
-comes first. Forward withdrawals through the normalized bridge using the same key,
-such as `tfms/gs/ORD` or `tfms/gdp/ORD`, with a newer `observedAt` and kind
-`cancelled`.
+The relay skips proposals and unrelated message types. An active definition
+with its published start and end can stay visible until that end, up to 48
+hours after the source update. A repeat of the same revision keeps its original
+update time. Forward withdrawals through the normalized bridge using the same
+key, such as `tfms/gs/ORD` or `tfms/gdp/ORD`, with a newer `observedAt` and
+kind `cancelled`. Submit withdrawals within six hours of their observation.
+Plano retains revision ordering for 49 hours to prevent older packets from
+restoring a withdrawn or shortened program. Upgrading SQLite extends eligible
+saved definitions. The first upgraded startup records a cutoff seven hours
+before that startup. Incoming definitions dated at or
+before the cutoff have no effect. This prevents older packets from restoring
+programs whose withdrawals an earlier release pruned. Fresh databases can
+accept eligible definitions within the 48-hour age limit.
 
 The subscriber owns FAA access, broker acknowledgement, and retry. Verify the
 message format against the schema for your subscription before forwarding it.
@@ -116,7 +124,7 @@ Plano retires predecessor observations at or before the replacement's observatio
 
 Before dispatching an advisory or delay-prediction alert, Plano checks the recorded evidence against the latest known eligible revisions. A superseding change or explicit withdrawal drops the queued warning, and an unchanged observation keeps its retry. Plano retains the ordered sequence of accepted future-dated revisions until each can take effect. Queued alerts expire at their evidence deadline. A daily closure alert also requires current source evidence and a pending flight operation in the same occurrence. Other programs that disappear from a poll and jobs queued by older versions generally rely on their original expiry.
 
-Recognized NOTAM text is expanded for passenger context. The original notice is retained with its scope, exceptions, and schedules. Tracked flight details show up to eight recent airport notices that match the departure or arrival window. A successful poll refreshes the cache for up to 30 minutes. Both polled and signed notices expire by six hours after observation or their earlier published end. [FAA movement-area notices](https://www.faa.gov/air_traffic/publications/atpubs/notam_html/chap5_section_1.html) · [FAA international format](https://www.faa.gov/air_traffic/publications/atpubs/notam_html/chap8_section_1.html)
+Recognized NOTAM text is expanded for passenger context. The original notice is retained with its scope, exceptions, and schedules. Tracked flight details show up to eight recent airport notices that match the departure or arrival window. A successful poll refreshes the cache for up to 30 minutes. Ordinary polled and signed notices expire by six hours after observation or their earlier published end. [FAA movement-area notices](https://www.faa.gov/air_traffic/publications/atpubs/notam_html/chap5_section_1.html) · [FAA international format](https://www.faa.gov/air_traffic/publications/atpubs/notam_html/chap8_section_1.html)
 
 A verified full closure at the departure airport can move Plano's earliest departure estimate to the published reopening time. This requires a fresh notice, a matching airport, and a definite end. Plano reads fixed UTC validity from the FAA date range or ICAO items B and C. A definite published window can supply missing bridge times, and both sources must agree when the bridge supplies a time. For a single daily UTC window (`DLY HHMM-HHMM`), Plano uses the occurrence that overlaps the flight, including overnight windows. The occurrence is clipped to the published dates. More complex schedules, partial closures, estimated ends, and conflicting times remain airport context. Use the airline for current flight status. [FAA NOTAM validity and schedules](https://www.faa.gov/air_traffic/publications/atpubs/notam_html/chap4_section_2.html) · [EUROCONTROL operating procedures](https://www.eurocontrol.int/publication/eurocontrol-guidelines-operating-procedures-ais-dynamic-data-opadd)
 

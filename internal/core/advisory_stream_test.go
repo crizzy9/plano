@@ -31,12 +31,14 @@ func TestAirportProgramContextAlertsWithoutAttributingAFlightDelay(t *testing.T)
 	program := feeds.Advisory{
 		ID: "tfms/gs/EWR", Source: feeds.FAASWIM, Airport: "EWR", Kind: "ground_stop", Direction: "arrival",
 		Reason:   "FAA reports a ground stop for selected flights due to thunderstorms. Check with your airline.",
-		StartsAt: &now, EndsAt: new(now.Add(time.Hour)), ObservedAt: now, AirportContextOnly: true,
+		StartsAt: new(now.Add(-8 * time.Hour)), EndsAt: new(now.Add(time.Hour)),
+		ObservedAt: now.Add(-8 * time.Hour), AirportContextOnly: true,
 	}
 	publishDispatchAdvisory(t, store, program, now)
 	publishDispatchAdvisory(t, store, program, now)
 	notices, err := store.FlightNotices(ctx, flight, now)
-	if err != nil || len(notices) != 1 || notices[0].Operation != "arrival" || notices[0].Summary != program.Reason {
+	if err != nil || len(notices) != 1 || notices[0].Operation != "arrival" || notices[0].Summary != program.Reason ||
+		!notices[0].ObservedAt.Equal(program.ObservedAt) || !notices[0].ValidUntil.Equal(*program.EndsAt) {
 		t.Fatalf("airport program notices = %+v, error = %v", notices, err)
 	}
 	taxi := flight
@@ -65,6 +67,9 @@ func TestAirportProgramContextAlertsWithoutAttributingAFlightDelay(t *testing.T)
 	for _, job := range jobs {
 		store.deliver(ctx, pushFunc(func(_ context.Context, _ push.Target, msg push.Message) error {
 			if msg.Title == "EWR · ground stop" && msg.Body == program.Reason {
+				if !msg.ExpiresAt.Equal(now.Add(advisoryForecastTTL)) {
+					t.Fatalf("airport alert expiry = %s, want independent push freshness limit", msg.ExpiresAt)
+				}
 				sent++
 			}
 			return nil
@@ -88,6 +93,85 @@ func TestAirportProgramContextAlertsWithoutAttributingAFlightDelay(t *testing.T)
 		t.Fatal("ground stop reached transport after the flight moved outside the hold window")
 		return nil
 	}), slog.New(slog.DiscardHandler), jobs[0])
+}
+
+func TestTFMSProgramRevisionOrderingSurvivesPrune(t *testing.T) {
+	for _, revision := range []string{"withdrawal", "linked withdrawal", "polled linked withdrawal", "shortened end"} {
+		t.Run(revision, func(t *testing.T) {
+			ctx := t.Context()
+			store, _, _ := dispatcherFixture(t)
+			now := time.Now().UTC()
+			program := feeds.Advisory{ID: "tfms/gdp/EWR", Source: feeds.FAASWIM, Kind: "ground_delay", Airport: "EWR",
+				Direction: "arrival", AirportContextOnly: true, ObservedAt: now.Add(-10 * time.Hour),
+				StartsAt: new(now.Add(-10 * time.Hour)), EndsAt: new(now.Add(3 * time.Hour))}
+			changed := feeds.Advisory{ID: program.ID, Source: program.Source, Airport: program.Airport,
+				Kind: "cancelled", ObservedAt: now.Add(-8 * time.Hour)}
+			switch revision {
+			case "linked withdrawal", "polled linked withdrawal":
+				changed.ID, changed.SupersedesID = "withdrawal/fixture", program.ID
+			case "shortened end":
+				changed = program
+				changed.ObservedAt, changed.EndsAt = now.Add(-8*time.Hour), new(now.Add(-9*time.Hour))
+			}
+			publishDispatchAdvisory(t, store, program, program.ObservedAt)
+			if revision == "polled linked withdrawal" {
+				if err := store.cachePolledFlightNotices(ctx, program.Source, []feeds.Advisory{changed}, now); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.cachePolledFlightNotices(ctx, program.Source, nil, now); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				publishDispatchAdvisory(t, store, changed, changed.ObservedAt)
+			}
+			if err := store.Prune(ctx, now); err != nil {
+				t.Fatal(err)
+			}
+			publishDispatchAdvisory(t, store, program, now)
+			if notices, err := store.FlightNotices(ctx, noticeFlight(now), now); err != nil || len(notices) != 0 {
+				t.Fatalf("stale program resurfaced in flight details: %+v, error = %v", notices, err)
+			}
+			rows, err := store.pushedAdvisories(ctx, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			merged, err := store.filterSupersededAdvisories(ctx, mergeAdvisories([]feeds.Advisory{program}, rows, now), now)
+			if err != nil || len(merged) != 0 {
+				t.Fatalf("stale program resurfaced in merged advisories: %+v, error = %v", merged, err)
+			}
+			if err := store.Prune(ctx, now.Add(tfmsAdvisoryRetention)); err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			if err := store.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM pushed_advisories)+(SELECT COUNT(*) FROM advisory_supersessions)`).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("expired ordering markers = %d, error = %v", count, err)
+			}
+		})
+	}
+}
+
+func TestTFMSLegacyCutoffDoesNotAdmitUnseenOldProgram(t *testing.T) {
+	ctx := t.Context()
+	store, _, _ := dispatcherFixture(t)
+	now := time.Now().UTC()
+	cutoff := now.Add(-signedAdvisoryRetention)
+	store.tfmsLegacyReplayCutoff = cutoff.UnixNano()
+	program := feeds.Advisory{ID: "tfms/gdp/EWR", Source: feeds.FAASWIM, Kind: "ground_delay", Airport: "EWR",
+		Direction: "arrival", AirportContextOnly: true, ObservedAt: cutoff,
+		StartsAt: &cutoff, EndsAt: new(now.Add(3 * time.Hour))}
+	publishDispatchAdvisory(t, store, program, now)
+	if err := store.cachePolledFlightNotices(ctx, program.Source, []feeds.Advisory{program}, now); err != nil {
+		t.Fatal(err)
+	}
+	if notices, err := store.FlightNotices(ctx, noticeFlight(now), now); err != nil || len(notices) != 0 {
+		t.Fatalf("unknown program from before cutover entered notices: %+v, error = %v", notices, err)
+	}
+	program.ObservedAt = cutoff.Add(time.Nanosecond)
+	publishDispatchAdvisory(t, store, program, now)
+	if notices, err := store.FlightNotices(ctx, noticeFlight(now), now); err != nil || len(notices) != 1 ||
+		!notices[0].ObservedAt.Equal(program.ObservedAt) {
+		t.Fatalf("newer program past legacy boundary did not enter notices: %+v, error = %v", notices, err)
+	}
 }
 
 func TestAdvisoryEventChecksPublishedNOTAMWindow(t *testing.T) {

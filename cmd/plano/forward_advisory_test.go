@@ -175,8 +175,8 @@ func TestForwardAdvisoryTFMSFlowSignsAirportProgramAndIgnoresOtherMessages(t *te
 	if status, err := runAdvisoryRelay(t.Context(), strings.NewReader(""), []string{"tfms-flow", "unexpected"}); status != relayConfigError || err == nil {
 		t.Fatalf("extra operand returned exit %d, error %v", status, err)
 	}
-	observed := time.Now().UTC().Truncate(time.Second)
-	start, end := observed.Add(time.Minute), observed.Add(time.Hour)
+	observed := time.Now().UTC().Truncate(time.Second).Add(-8 * time.Hour)
+	start, end := observed.Add(time.Minute), observed.Add(9*time.Hour)
 	document := func(kind, payload string) *strings.Reader {
 		return strings.NewReader(fmt.Sprintf(`
 <ds:tfmDataService xmlns:ds="urn:us:gov:dot:faa:atm:tfm:tfmdataservice"
@@ -190,13 +190,13 @@ func TestForwardAdvisoryTFMSFlowSignsAirportProgramAndIgnoresOtherMessages(t *te
   </ds:fiOutput>
 </ds:tfmDataService>`, kind, observed.Format(time.RFC3339), payload))
 	}
-	program := fmt.Sprintf(`<fi:gsAdvisory>
+	program := fmt.Sprintf(`<fi:gdpAdvisory>
   <fcm:updateTime>%s</fcm:updateTime><fcm:tmiStatus>ACTUAL</fcm:tmiStatus>
   <fcm:airportId>ORD</fcm:airportId><fcm:center>ZAU</fcm:center>
   <fcm:pgmExpTime>%s</fcm:pgmExpTime><fcm:elementType>APT</fcm:elementType>
-  <fcm:groundStopPeriod><fce:startTime>%s</fce:startTime><fce:endTime>%s</fce:endTime></fcm:groundStopPeriod>
+  <fcm:arrivalsEstimatedFor><fce:startTime>%s</fce:startTime><fce:endTime>%s</fce:endTime></fcm:arrivalsEstimatedFor>
   <fcm:impactingCondition>EQUIPMENT</fcm:impactingCondition>
-</fi:gsAdvisory>`, observed.Format(time.RFC3339), end.Format(time.RFC3339), start.Format(time.RFC3339), end.Format(time.RFC3339))
+</fi:gdpAdvisory>`, observed.Format(time.RFC3339), end.Format(time.RFC3339), start.Format(time.RFC3339), end.Format(time.RFC3339))
 	key := bytes.Repeat([]byte("k"), 32)
 	requests := 0
 	transport := relayTransport(func(r *http.Request) (*http.Response, error) {
@@ -207,8 +207,8 @@ func TestForwardAdvisoryTFMSFlowSignsAirportProgramAndIgnoresOtherMessages(t *te
 			t.Fatal(err)
 		}
 		a, err := feeds.DecodeAdvisoryIngress(bytes.NewReader(raw))
-		if err != nil || a.ID != "tfms/gs/ORD" || a.Source != feeds.FAASWIM || a.Airport != "ORD" ||
-			a.Kind != "ground_stop" || a.Direction != "arrival" || !a.AirportContextOnly || a.DelayMinutes != nil ||
+		if err != nil || a.ID != "tfms/gdp/ORD" || a.Source != feeds.FAASWIM || a.Airport != "ORD" ||
+			a.Kind != "ground_delay" || a.Direction != "arrival" || !a.AirportContextOnly || a.DelayMinutes != nil ||
 			!a.ObservedAt.Equal(observed) || a.StartsAt == nil || !a.StartsAt.Equal(start) || a.EndsAt == nil || !a.EndsAt.Equal(end) {
 			t.Fatalf("unexpected normalized program %+v, error %v", a, err)
 		}
@@ -223,8 +223,8 @@ func TestForwardAdvisoryTFMSFlowSignsAirportProgramAndIgnoresOtherMessages(t *te
 		}
 		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}, nil
 	})
-	if status, err := forwardAdvisory(t.Context(), document("GS", program), advisoryRelayFixtureURL, key, convert, transport); status != 0 || err != nil || requests != 1 {
-		t.Fatalf("ground stop returned exit %d, error %v and %d requests", status, err, requests)
+	if status, err := forwardAdvisory(t.Context(), document("GDP", program), advisoryRelayFixtureURL, key, convert, transport); status != 0 || err != nil || requests != 1 {
+		t.Fatalf("ground delay program returned exit %d, error %v and %d requests", status, err, requests)
 	}
 	other := document("GADV", "<fi:generalAdvisory/>")
 	if status, err := forwardAdvisory(t.Context(), other, advisoryRelayFixtureURL, key, convert, transport); status != 0 || err != nil || requests != 1 {

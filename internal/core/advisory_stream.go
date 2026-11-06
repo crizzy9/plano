@@ -13,6 +13,11 @@ import (
 	"github.com/crizzy9/plano/internal/push"
 )
 
+const (
+	signedAdvisoryRetention = feeds.AdvisoryMaxAge + time.Hour
+	tfmsAdvisoryRetention   = feeds.TFMSAdvisoryMaxAge + time.Hour
+)
+
 func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, bool) {
 	if a.Kind == feeds.AdvisoryAirportNotice {
 		return Event{}, false
@@ -121,17 +126,23 @@ func contextualGroundStopDeparture(flight feeds.Flight) *time.Time {
 	return effectiveDeparture(flight)
 }
 
+func (s *Store) ignoreLegacyTFMSReplay(a feeds.Advisory) bool {
+	// Saved definitions are upgraded at startup. Older installations may have
+	// already pruned a newer withdrawal for an incoming pre-cutoff definition.
+	return s.tfmsLegacyReplayCutoff != 0 && a.ObservedAt.UnixNano() <= s.tfmsLegacyReplayCutoff && a.IsTFMSAirportProgram()
+}
+
 // PublishAdvisory commits the normalized program and affected flight alert
 // jobs together. A repeated or earlier program observation cannot add work.
 func (s *Store) PublishAdvisory(ctx context.Context, a feeds.Advisory, now time.Time) error {
+	if s.ignoreLegacyTFMSReplay(a) {
+		return nil
+	}
 	payload, err := json.Marshal(a)
 	if err != nil {
 		return err
 	}
-	expires := a.ObservedAt.Add(6 * time.Hour)
-	if a.EndsAt != nil && a.EndsAt.Before(expires) {
-		expires = *a.EndsAt
-	}
+	expires := a.Expiry()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -271,7 +282,8 @@ WHERE source=q.source AND id=q.id AND observed_ns<=?)`
 func (s *Store) pushedAdvisories(ctx context.Context, now time.Time) ([]advisoryRevision, error) {
 	t := now.UnixNano()
 	rows, err := s.db.QueryContext(ctx, `SELECT data,expires_ns FROM (`+currentPushedAdvisories+`)
-WHERE expires_ns>? OR observed_ns>? ORDER BY source,id`, t, t, t, t, now.Add(-7*time.Hour).UnixNano())
+WHERE expires_ns>? OR observed_ns>? OR (observed_ns>? AND `+tfmsAdvisoryFamilySQL+`)
+ORDER BY source,id`, t, t, t, t, now.Add(-signedAdvisoryRetention).UnixNano(), now.Add(-tfmsAdvisoryRetention).UnixNano())
 	if err != nil {
 		return nil, err
 	}

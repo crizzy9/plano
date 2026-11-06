@@ -15,7 +15,6 @@ import (
 const (
 	maxFlightNotices   = 8
 	maxPolledNotices   = 4096
-	maxNoticeAge       = 6 * time.Hour
 	polledNoticeMaxAge = 30 * time.Minute
 )
 
@@ -48,20 +47,14 @@ func (s *Store) cachePolledFlightNotices(ctx context.Context, source string, adv
 	entries := make([]entry, 0, min(len(advisories), maxPolledNotices))
 	var linked bool
 	for _, a := range advisories {
-		if a.Source != source || a.ID == "" || a.ObservedAt.IsZero() {
+		if a.Source != source || a.ID == "" || a.ObservedAt.IsZero() || s.ignoreLegacyTFMSReplay(a) {
 			continue
 		}
 		if a.SupersedesID != "" && a.ObservedAt.After(polledAt.Add(advisorySupersessionLead)) {
 			return fmt.Errorf("%w: advisory replacement observation is too far ahead", feeds.ErrInvalidQuery)
 		}
 		linked = linked || a.SupersedesID != ""
-		expires := a.ObservedAt.Add(maxNoticeAge)
-		if pollExpiry := polledAt.Add(polledNoticeMaxAge); pollExpiry.Before(expires) {
-			expires = pollExpiry
-		}
-		if a.EndsAt != nil && a.EndsAt.Before(expires) {
-			expires = *a.EndsAt
-		}
+		expires := earliestTime(a.Expiry(), polledAt.Add(polledNoticeMaxAge))
 		entries = append(entries, entry{a, a.ObservedAt.UnixNano(), expires.UnixNano()})
 		if len(entries) == maxPolledNotices {
 			break
@@ -92,9 +85,11 @@ WHERE excluded.observed_ns>=polled_flight_notices.observed_ns`, source, snapshot
 	}
 	if linked {
 		if err := storeAdvisorySupersessions(ctx, tx, `SELECT source,airport,json_extract(data,'$.supersedesId'),observed_ns,id FROM polled_flight_notices
-WHERE source=? AND airport<>'' AND observed_ns BETWEEN ? AND ?
+WHERE source=? AND airport<>'' AND observed_ns<=? AND (observed_ns>=? OR
+(observed_ns>=? AND source='faa_swim' AND (json_extract(data,'$.supersedesId') GLOB 'tfms/gs/*' OR json_extract(data,'$.supersedesId') GLOB 'tfms/gdp/*')))
 AND json_extract(data,'$.supersedesId') NOT IN ('',id)`, source,
-			polledAt.Add(-advisorySupersessionRetention).UnixNano(), polledAt.Add(advisorySupersessionLead).UnixNano()); err != nil {
+			polledAt.Add(advisorySupersessionLead).UnixNano(), polledAt.Add(-advisorySupersessionRetention).UnixNano(),
+			polledAt.Add(-tfmsAdvisoryRetention).UnixNano()); err != nil {
 			return err
 		}
 	}
@@ -268,7 +263,7 @@ func flightNoticeAppliesAt(a feeds.Advisory, at *time.Time, now time.Time) bool 
 	if operation.Before(now) {
 		operation = now
 	}
-	end := a.ObservedAt.Add(maxNoticeAge)
+	end := a.ObservedAt.Add(feeds.AdvisoryMaxAge)
 	if a.EndsAt != nil {
 		end = *a.EndsAt
 	}

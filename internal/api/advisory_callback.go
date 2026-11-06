@@ -42,7 +42,7 @@ func (s Server) advisoryCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	advisory, err := feeds.DecodeAdvisoryIngress(bytes.NewReader(body))
-	if err != nil || advisory.ObservedAt.After(now.Add(30*time.Second)) || advisory.ObservedAt.Before(now.Add(-6*time.Hour)) {
+	if err != nil || !advisory.ObservationAllowed(now) {
 		s.failure(w, errInvalid)
 		return
 	}

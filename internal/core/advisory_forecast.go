@@ -49,7 +49,7 @@ func advisoryForecastValidity(advisory feeds.Advisory, now time.Time) time.Time 
 	if advisory.StartsAt != nil && !advisory.EndsAt.After(*advisory.StartsAt) {
 		return time.Time{}
 	}
-	return earliestTime(now.Add(advisoryForecastTTL), earliestTime(*advisory.EndsAt, advisory.ObservedAt.Add(maxNoticeAge)))
+	return earliestTime(now.Add(advisoryForecastTTL), advisory.Expiry())
 }
 
 // advisoryOccurrence narrows a verified recurring closure to the published

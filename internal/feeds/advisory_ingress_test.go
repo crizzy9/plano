@@ -8,6 +8,83 @@ import (
 	"time"
 )
 
+func TestAdvisoryTFMSObservationWindow(t *testing.T) {
+	now := time.Date(2026, time.November, 6, 22, 0, 0, 0, time.UTC)
+	program := Advisory{
+		ID: "tfms/gdp/ORD", Source: FAASWIM, Airport: "ORD", Kind: "ground_delay", Direction: "arrival", AirportContextOnly: true,
+		ObservedAt: now.Add(-8 * time.Hour), StartsAt: new(now.Add(-7 * time.Hour)), EndsAt: new(now.Add(time.Hour)),
+	}
+	if !program.IsTFMSAirportProgram() || !program.ObservationAllowed(now) || !program.Expiry().Equal(*program.EndsAt) {
+		t.Fatalf("eight-hour TFMS observation did not retain its published end: %+v", program)
+	}
+	ended := program
+	ended.EndsAt = new(now.Add(-time.Minute))
+	if !ended.ObservationAllowed(now) || !ended.Expiry().Equal(*ended.EndsAt) {
+		t.Fatalf("ended TFMS revision did not retain its ordering timestamp and expiry: %+v", ended)
+	}
+	stop := program
+	stop.ID, stop.Kind = "tfms/gs/ORD", "ground_stop"
+	if !stop.IsTFMSAirportProgram() {
+		t.Fatalf("canonical ground stop did not qualify: %+v", stop)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*Advisory)
+	}{
+		{"noncanonical key", func(a *Advisory) { a.ID = "tfms/gdp/KORD" }},
+		{"other source", func(a *Advisory) { a.Source = Eurocontrol }},
+		{"invalid airport", func(a *Advisory) { a.Airport, a.ID = "ord", "tfms/gdp/ord" }},
+		{"flight context", func(a *Advisory) { a.AirportContextOnly = false }},
+		{"departure direction", func(a *Advisory) { a.Direction = "departure" }},
+		{"missing start", func(a *Advisory) { a.StartsAt = nil }},
+		{"zero start", func(a *Advisory) { a.StartsAt = new(time.Time{}) }},
+		{"missing end", func(a *Advisory) { a.EndsAt = nil }},
+		{"unordered period", func(a *Advisory) { a.EndsAt = a.StartsAt }},
+		{"linked predecessor", func(a *Advisory) { a.SupersedesID = "other" }},
+		{"assigned delay", func(a *Advisory) { a.DelayMinutes = new(0) }},
+		{"withdrawal", func(a *Advisory) { a.Kind = "cancelled" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ordinary := program
+			tc.change(&ordinary)
+			if ordinary.IsTFMSAirportProgram() || ordinary.ObservationAllowed(now) {
+				t.Fatalf("ineligible revision received extended lifetime: %+v", ordinary)
+			}
+		})
+	}
+
+	program.EndsAt = new(now.Add(72 * time.Hour))
+	if want := program.ObservedAt.Add(TFMSAdvisoryMaxAge); !program.Expiry().Equal(want) {
+		t.Fatalf("extended expiry = %v, want %v", program.Expiry(), want)
+	}
+	for _, tc := range []struct {
+		name string
+		row  Advisory
+		age  time.Duration
+	}{
+		{"TFMS", program, TFMSAdvisoryMaxAge},
+		{"ordinary", Advisory{Source: FAASWIM, ID: "GS-1"}, AdvisoryMaxAge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, bound := range []struct {
+				offset time.Duration
+				allow  bool
+			}{
+				{-tc.age, true},
+				{-tc.age - time.Nanosecond, false},
+				{30 * time.Second, true},
+				{30*time.Second + time.Nanosecond, false},
+			} {
+				row := tc.row
+				row.ObservedAt = now.Add(bound.offset)
+				if got := row.ObservationAllowed(now); got != bound.allow {
+					t.Errorf("observation at offset %v allowed = %t, want %t", bound.offset, got, bound.allow)
+				}
+			}
+		})
+	}
+}
+
 func TestBridgeAdvisorySupersedesID(t *testing.T) {
 	const id = `"id":"EGTT:A1234/26"`
 	const airport = `"airport":"EGLL"`

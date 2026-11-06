@@ -882,7 +882,11 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM shares WHERE expires<=?`, now.UnixNano()); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM pushed_advisories WHERE expires_ns<=? AND observed_ns<=?`, now.UnixNano(), now.Add(-7*time.Hour).UnixNano()); err != nil {
+	// A withdrawn or shortened TFMS revision must outlive every older packet
+	// still eligible for admission, even when the revision itself has expired.
+	tfmsCutoff := now.Add(-tfmsAdvisoryRetention).UnixNano()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pushed_advisories WHERE expires_ns<=? AND observed_ns<=?
+AND (observed_ns<=? OR NOT `+tfmsAdvisoryFamilySQL+`)`, now.UnixNano(), now.Add(-signedAdvisoryRetention).UnixNano(), tfmsCutoff); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pushed_advisory_predecessors WHERE EXISTS (
@@ -890,11 +894,12 @@ SELECT 1 FROM pushed_advisories a WHERE a.source=pushed_advisory_predecessors.so
 AND a.observed_ns<=?)`, now.UnixNano()); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM advisory_supersessions AS r WHERE observed_ns<? OR
+	if _, err := tx.ExecContext(ctx, `DELETE FROM advisory_supersessions AS r WHERE (observed_ns<? AND
+(observed_ns<? OR NOT (source='faa_swim' AND (predecessor_id GLOB 'tfms/gs/*' OR predecessor_id GLOB 'tfms/gdp/*')))) OR
 EXISTS (SELECT 1 FROM advisory_supersessions newer WHERE newer.source=r.source AND newer.airport=r.airport
 AND newer.predecessor_id=r.predecessor_id AND newer.successor_id=r.successor_id
 AND newer.observed_ns>r.observed_ns AND newer.observed_ns<=?)`,
-		now.Add(-advisorySupersessionRetention).UnixNano(), now.UnixNano()); err != nil {
+		now.Add(-advisorySupersessionRetention).UnixNano(), tfmsCutoff, now.UnixNano()); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM live_wire_clocks WHERE wire_epoch<=?`, now.Add(-7*24*time.Hour).Unix()); err != nil {

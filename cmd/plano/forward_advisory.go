@@ -79,7 +79,7 @@ func forwardAdvisory(ctx context.Context, input io.Reader, endpoint string, key 
 		if err != nil {
 			return relayDataError, errors.New("standard input did not yield a valid advisory envelope")
 		}
-		if advisory.ObservedAt.After(now.Add(30*time.Second)) || advisory.ObservedAt.Before(now.Add(-6*time.Hour)) {
+		if !advisory.ObservationAllowed(now) {
 			return relayDataError, errors.New("advisory observation is outside the ingress time window")
 		}
 	}

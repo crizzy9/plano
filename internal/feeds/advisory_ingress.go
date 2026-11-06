@@ -6,11 +6,19 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
 
-const MaxAdvisoryIngressBytes = 64 << 10
+const (
+	MaxAdvisoryIngressBytes = 64 << 10
+
+	// AdvisoryMaxAge bounds ordinary advisory observations, including withdrawals.
+	AdvisoryMaxAge = 6 * time.Hour
+	// TFMSAdvisoryMaxAge bounds canonical FAA airport program observations.
+	TFMSAdvisoryMaxAge = 48 * time.Hour
+)
 
 type advisoryIngressEnvelope struct {
 	Version  int       `json:"version"`
@@ -23,6 +31,46 @@ var (
 	bridgeAdvisoryID   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$\z`)
 	bridgeAreaID       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.:/+-]{0,127}$\z`)
 )
+
+// IsTFMSAirportProgram identifies active FAA TFMS airport context with a
+// published program window. A revision can qualify after that window ends.
+func (a Advisory) IsTFMSAirportProgram() bool {
+	if a.Source != FAASWIM || !a.AirportContextOnly || a.Direction != "arrival" ||
+		!airportCode.MatchString(a.Airport) || a.SupersedesID != "" || a.DelayMinutes != nil ||
+		a.StartsAt == nil || a.StartsAt.IsZero() || a.EndsAt == nil || a.EndsAt.IsZero() || !a.EndsAt.After(*a.StartsAt) {
+		return false
+	}
+	switch a.Kind {
+	case "ground_stop":
+		return a.ID == "tfms/gs/"+a.Airport
+	case "ground_delay":
+		return a.ID == "tfms/gdp/"+a.Airport
+	default:
+		return false
+	}
+}
+
+// ObservationAllowed checks the original revision timestamp at signed ingress.
+func (a Advisory) ObservationAllowed(now time.Time) bool {
+	return !a.ObservedAt.IsZero() && !a.ObservedAt.After(now.Add(30*time.Second)) &&
+		!a.ObservedAt.Before(now.Add(-a.observationMaxAge()))
+}
+
+// Expiry returns the earlier of the published end and the observation age limit.
+func (a Advisory) Expiry() time.Time {
+	deadline := a.ObservedAt.Add(a.observationMaxAge())
+	if a.EndsAt != nil && a.EndsAt.Before(deadline) {
+		return *a.EndsAt
+	}
+	return deadline
+}
+
+func (a Advisory) observationMaxAge() time.Duration {
+	if a.IsTFMSAirportProgram() {
+		return TFMSAdvisoryMaxAge
+	}
+	return AdvisoryMaxAge
+}
 
 // DecodeAdvisoryIngress reads one normalized Plano bridge advisory. The caller
 // authenticates the operator bridge separately and decides replay and freshness.
