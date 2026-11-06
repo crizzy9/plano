@@ -9,12 +9,14 @@ import (
 
 // Event is a user-visible change in a flight, separate from its latest snapshot.
 type Event struct {
-	ID         string    `json:"id"`
-	Kind       string    `json:"kind"`
-	Title      string    `json:"title"`
-	Body       string    `json:"body"`
-	At         time.Time `json:"at"`
-	validUntil *time.Time
+	ID               string    `json:"id"`
+	Kind             string    `json:"kind"`
+	Title            string    `json:"title"`
+	Body             string    `json:"body"`
+	At               time.Time `json:"at"`
+	validUntil       *time.Time
+	collapseID       string
+	advisoryEvidence []forecastAdvisory
 }
 
 func changes(before, after feeds.Flight) []Event {

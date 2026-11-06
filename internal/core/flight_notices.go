@@ -99,20 +99,22 @@ func (s *Store) FlightNotices(ctx context.Context, flight feeds.Flight, now time
 	}
 	// Compare revisions before checking freshness or applicability. An expired
 	// or cancelled revision can supersede an earlier notice that still matches.
-	rows, err := s.db.QueryContext(ctx, `SELECT source,id,observed_ns,expires_ns,data FROM (
+	t := now.UnixNano()
+	rows, err := s.db.QueryContext(ctx, `WITH current_signed AS NOT MATERIALIZED (`+currentPushedAdvisories+`)
+SELECT source,id,observed_ns,expires_ns,data FROM (
   SELECT p.source,p.id,p.observed_ns,p.expires_ns,p.data FROM polled_flight_notices p
   WHERE p.airport IN (?,?,?,?) AND p.airport<>'' AND p.expires_ns>? AND p.observed_ns<=?
-    AND NOT EXISTS (SELECT 1 FROM pushed_advisories a WHERE a.source=p.source AND a.id=p.id
-                    AND a.observed_ns>=p.observed_ns AND a.observed_ns<=?)
+    AND NOT EXISTS (SELECT 1 FROM current_signed a WHERE a.source=p.source AND a.id=p.id AND a.observed_ns>=p.observed_ns)
   UNION ALL
-  SELECT a.source,a.id,a.observed_ns,a.expires_ns,a.data FROM pushed_advisories a
+  SELECT a.source,a.id,a.observed_ns,a.expires_ns,a.data FROM current_signed a
   WHERE json_extract(a.data,'$.airport') IN (?,?,?,?) AND json_extract(a.data,'$.airport')<>''
-    AND a.expires_ns>? AND a.observed_ns<=?
+    AND a.expires_ns>?
     AND NOT EXISTS (SELECT 1 FROM polled_flight_notices p WHERE p.source=a.source AND p.id=a.id
                     AND p.observed_ns>a.observed_ns AND p.observed_ns<=?)
 ) ORDER BY observed_ns DESC,source,id`,
-		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, now.UnixNano(), now.UnixNano(), now.UnixNano(),
-		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, now.UnixNano(), now.UnixNano(), now.UnixNano())
+		t, t, t,
+		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t,
+		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t)
 	if err != nil {
 		return nil, err
 	}

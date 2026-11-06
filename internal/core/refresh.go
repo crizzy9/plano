@@ -61,11 +61,12 @@ func (r Refresher) refresh(ctx context.Context) error {
 		}
 		advisories = append(advisories, result...)
 	}
-	pushed, err := r.Store.pushedAdvisories(ctx, now)
+	advisoryNow := time.Now()
+	pushed, err := r.Store.pushedAdvisories(ctx, advisoryNow)
 	if err != nil {
 		return err
 	}
-	advisories = mergeAdvisories(advisories, pushed, now)
+	advisories = mergeAdvisories(advisories, pushed, advisoryNow)
 	for _, prior := range active {
 		if ctx.Err() != nil {
 			return ctx.Err()

@@ -402,13 +402,25 @@ RETURNING wire_epoch`, flightID, msg.Timestamp.Unix(), deviceID).Scan(&epoch)
 }
 
 func enqueue(ctx context.Context, tx *sql.Tx, flightID string, msg push.Message, recipientsSQL string, args ...any) error {
+	return enqueueWithAdvisories(ctx, tx, flightID, msg, nil, recipientsSQL, args...)
+}
+
+func enqueueWithAdvisories(ctx context.Context, tx *sql.Tx, flightID string, msg push.Message, evidence []forecastAdvisory, recipientsSQL string, args ...any) error {
 	raw, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
 	values := append([]any{flightID, string(raw), msg.Timestamp.UnixNano(), msg.ExpiresAt.UnixNano()}, args...)
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox(device_id,flight_id,message,due,expires) SELECT id,?,?,?,? FROM (`+recipientsSQL+`) AS recipients`, values...)
-	return err
+	query := `INSERT INTO outbox(device_id,flight_id,message,due,expires) SELECT id,?,?,?,? FROM (` + recipientsSQL + `) AS recipients`
+	if len(evidence) == 0 {
+		_, err := tx.ExecContext(ctx, query, values...)
+		return err
+	}
+	jobs, err := tx.QueryContext(ctx, query+` RETURNING id`, values...)
+	if err != nil {
+		return err
+	}
+	return linkOutboxAdvisories(ctx, tx, jobs, evidence)
 }
 
 type deliveryJob struct {
@@ -606,10 +618,11 @@ func (s *Store) deliver(ctx context.Context, sender PushSender, logger *slog.Log
 	// Revoking a device or untracking a flight can remove a leased row. Check
 	// the lease again at the transport boundary without holding a transaction.
 	var expires int64
-	var connectionDirty bool
-	err := s.db.QueryRowContext(ctx, `SELECT o.expires, `+dirtyConnectionAlert+`
-FROM outbox o WHERE o.id=? AND o.device_id=? AND o.lease_until=? AND o.done=0`,
-		job.id, job.deviceID, job.lease).Scan(&expires, &connectionDirty)
+	var connectionDirty, hasAdvisoryEvidence bool
+	const leasedRow = ` FROM outbox o WHERE o.id=? AND o.device_id=? AND o.lease_until=? AND o.done=0`
+	err := s.db.QueryRowContext(ctx, `SELECT o.expires, `+dirtyConnectionAlert+`,
+EXISTS(SELECT 1 FROM outbox_advisory_evidence WHERE outbox_id=o.id)`+leasedRow,
+		job.id, job.deviceID, job.lease).Scan(&expires, &connectionDirty, &hasAdvisoryEvidence)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
 			logger.Error("could not validate push lease", "job", job.id, "error", err)
@@ -624,6 +637,31 @@ FROM outbox o WHERE o.id=? AND o.device_id=? AND o.lease_until=? AND o.done=0`,
 			logger.Error("could not release connection push lease", "job", job.id, "error", err)
 		}
 		return
+	}
+	if hasAdvisoryEvidence {
+		revised, err := outboxAdvisoryRevised(ctx, s.db, job.id, time.Now())
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.Error("could not validate advisory push evidence", "job", job.id, "error", err)
+			}
+			return
+		}
+		if revised {
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM outbox WHERE id=? AND device_id=? AND lease_until=? AND done=0`,
+				job.id, job.deviceID, job.lease); err != nil && ctx.Err() == nil {
+				logger.Error("could not remove obsolete advisory push", "job", job.id, "error", err)
+			}
+			return
+		}
+		// Revocation can cascade the evidence rows while they are being checked.
+		// A missing reference is not enough to establish the lease still exists.
+		if err := s.db.QueryRowContext(ctx, `SELECT o.expires`+leasedRow,
+			job.id, job.deviceID, job.lease).Scan(&expires); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
+				logger.Error("could not revalidate advisory push lease", "job", job.id, "error", err)
+			}
+			return
+		}
 	}
 	start := time.Now()
 	deadline := time.Unix(0, min(job.lease, expires, start.Add(10*time.Second).UnixNano()))
@@ -659,6 +697,11 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pushed_advisories WHERE expires_ns<=? AND observed_ns<=?`, now.UnixNano(), now.Add(-7*time.Hour).UnixNano()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pushed_advisory_predecessors WHERE EXISTS (
+SELECT 1 FROM pushed_advisories a WHERE a.source=pushed_advisory_predecessors.source AND a.id=pushed_advisory_predecessors.id
+AND a.observed_ns<=?)`, now.UnixNano()); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM live_wire_clocks WHERE wire_epoch<=?`, now.Add(-7*24*time.Hour).Unix()); err != nil {

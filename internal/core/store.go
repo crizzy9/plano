@@ -185,7 +185,7 @@ CREATE INDEX IF NOT EXISTS bookings_by_locator ON bookings(owner, locator_hash);
 CREATE TABLE IF NOT EXISTS shares (
   token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, flight_id TEXT NOT NULL, expires INTEGER NOT NULL,
   FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
-);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema); err != nil {
+);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -567,7 +567,8 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 			return err
 		}
 		if predictionValue != nil && predictionValue.DelayMinutes >= 10 && (old == nil || predictionValue.DelayMinutes >= old.DelayMinutes+10 || !slices.Equal(predictionValue.Reasons, old.Reasons)) {
-			events = append(events, Event{Kind: "delay_prediction", Title: "Departure delay predicted", Body: fmt.Sprintf("%s · %d min later", flight.Number, predictionValue.DelayMinutes), At: flight.ObservedAt, validUntil: predictionValue.ValidUntil})
+			events = append(events, Event{Kind: "delay_prediction", Title: "Departure delay predicted", Body: fmt.Sprintf("%s · %d min later", flight.Number, predictionValue.DelayMinutes),
+				At: flight.ObservedAt, validUntil: predictionValue.ValidUntil, advisoryEvidence: predictionValue.AdvisoryEvidence})
 		}
 	}
 	for _, a := range advisories {
@@ -619,8 +620,12 @@ func saveEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event) er
 	if !expires.After(event.At) {
 		return nil
 	}
-	msg := push.Message{Kind: push.Alert, FlightID: flightID, Title: event.Title, Body: truncate(event.Body, 180), Timestamp: event.At, ExpiresAt: expires, CollapseID: event.ID}
-	return enqueue(ctx, tx, flightID, msg, `SELECT d.id FROM devices d JOIN tracked t ON t.owner=d.owner WHERE t.flight_id=? AND d.kind='alert'`, flightID)
+	collapseID := event.collapseID
+	if collapseID == "" {
+		collapseID = event.ID
+	}
+	msg := push.Message{Kind: push.Alert, FlightID: flightID, Title: event.Title, Body: truncate(event.Body, 180), Timestamp: event.At, ExpiresAt: expires, CollapseID: collapseID}
+	return enqueueWithAdvisories(ctx, tx, flightID, msg, event.advisoryEvidence, `SELECT d.id FROM devices d JOIN tracked t ON t.owner=d.owner WHERE t.flight_id=? AND d.kind='alert'`, flightID)
 }
 
 func truncate(s string, n int) string {
