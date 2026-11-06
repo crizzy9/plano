@@ -117,18 +117,24 @@ func (e *DeliveryError) Error() string {
 }
 
 func (s Sender) Send(ctx context.Context, target Target, m Message) error {
+	return s.SendAuthorized(ctx, target, m, nil)
+}
+
+// SendAuthorized checks authorization immediately before each message request,
+// after credentials are ready. A failed check ends the send before transport.
+func (s Sender) SendAuthorized(ctx context.Context, target Target, m Message, authorize func(context.Context) error) error {
 	m.binding = target.Binding
 	switch target.Platform {
 	case "ios":
 		if s.APNs == nil {
 			return &DeliveryError{Provider: "APNs", Code: "NotConfigured", Retryable: true}
 		}
-		return s.APNs.Send(ctx, target.Token, m)
+		return s.APNs.send(ctx, target.Token, m, authorize)
 	case "android":
 		if s.FCM == nil {
 			return &DeliveryError{Provider: "FCM", Code: "NotConfigured", Retryable: true}
 		}
-		return s.FCM.Send(ctx, target.Token, m)
+		return s.FCM.send(ctx, target.Token, m, authorize)
 	default:
 		return errors.New("unsupported push target platform")
 	}
@@ -259,12 +265,17 @@ type providerResponse struct {
 	retryAfter time.Duration
 }
 
-func post(ctx context.Context, client *http.Client, provider, endpoint string, headers http.Header, body []byte) (providerResponse, error) {
+func post(ctx context.Context, client *http.Client, provider, endpoint string, headers http.Header, body []byte, authorize func(context.Context) error) (providerResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return providerResponse{}, &DeliveryError{Provider: provider, Code: "InvalidEndpoint"}
 	}
 	req.Header = headers
+	if authorize != nil {
+		if err := authorize(ctx); err != nil {
+			return providerResponse{}, err
+		}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		// Transport errors may contain device tokens in URLs.

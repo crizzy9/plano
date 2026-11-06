@@ -319,7 +319,8 @@ func (s *Store) Untrack(ctx context.Context, owner, id string) error {
 		return err
 	}
 	defer tx.Rollback()
-	// Incoming Friends alerts are authorized by the sharer's grant, independently of this tracking row.
+	// Preserve Friends jobs for their original grants. Deleting the tracking row
+	// below removes the personal authorization from any dual-authorized jobs.
 	if _, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE flight_id = ? AND device_id IN (SELECT id FROM devices WHERE owner = ?)
 AND NOT EXISTS (SELECT 1 FROM outbox_friend_jobs WHERE outbox_id=outbox.id)`, id, owner); err != nil {
 		return err
@@ -947,13 +948,7 @@ func saveEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event, no
 	}
 	msg := push.Message{Kind: push.Alert, FlightID: flightID, Title: event.Title, Body: truncate(event.Body, 180),
 		Timestamp: event.At, ExpiresAt: expires, CollapseID: collapseID, AdvisoryWindow: event.advisoryWindow, InboundLegID: event.inboundLegID}
-	if err := enqueueWithAdvisories(ctx, tx, flightID, msg, event.advisoryEvidence, `SELECT d.id FROM devices d JOIN tracked t ON t.owner=d.owner WHERE t.flight_id=? AND d.kind='alert'`, flightID); err != nil {
-		return err
-	}
-	if event.inboundLegID != "" {
-		return nil
-	}
-	return enqueueFriendFlightAlert(ctx, tx, flightID, msg, event)
+	return enqueueFlightAlert(ctx, tx, flightID, msg, event)
 }
 
 func truncate(s string, n int) string {

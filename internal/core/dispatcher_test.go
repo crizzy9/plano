@@ -20,6 +20,73 @@ func (fn pushFunc) Send(ctx context.Context, target push.Target, message push.Me
 	return fn(ctx, target, message)
 }
 
+type friendGuardFixture struct {
+	pushFunc
+	beforeSubmit func(context.Context)
+}
+
+func (s friendGuardFixture) SendAuthorized(ctx context.Context, target push.Target, message push.Message, authorize func(context.Context) error) error {
+	s.beforeSubmit(ctx)
+	if err := authorize(ctx); err != nil {
+		return err
+	}
+	return s.Send(ctx, target, message)
+}
+
+func TestDispatcherChecksFriendAuthorizationAtProviderSubmission(t *testing.T) {
+	store, sharer, id := dispatcherFixture(t)
+	ctx := t.Context()
+	viewer := friendInstallation(t, store)
+	if err := store.Track(ctx, sharer, id, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Register(ctx, viewer, Device{Platform: "android", Kind: "alert", Token: "friend-device"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	invite, err := store.CreateFriendInvite(ctx, sharer, "Sharer", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	friend, err := store.AcceptFriendInvite(ctx, viewer, invite.Code, "Viewer", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.GrantFriendFlight(ctx, sharer, friend.ID, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetFriendAlertMode(ctx, viewer, friend.ID, FriendAlertAll); err != nil {
+		t.Fatal(err)
+	}
+	flight, err := store.Flight(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flight.DepartureGate = "B12"
+	observeFlightAlertFixture(t, store, &flight)
+	job := claimFlightAlertJobs(t, store, 1)[0]
+	guardCalled := false
+	sender := friendGuardFixture{
+		pushFunc: func(context.Context, push.Target, push.Message) error {
+			t.Fatal("revoked friend alert reached provider transport")
+			return nil
+		},
+		beforeSubmit: func(attempt context.Context) {
+			guardCalled = true
+			if err := store.RevokeFriendFlight(attempt, sharer, friend.ID, id); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.GrantFriendFlight(attempt, sharer, friend.ID, id); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	store.deliver(ctx, sender, slog.New(slog.DiscardHandler), job)
+	var jobs int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE id=?`, job.id).Scan(&jobs); err != nil || !guardCalled || jobs != 0 {
+		t.Fatalf("provider guard reached = %t, retired jobs remaining = %d, error = %v", guardCalled, jobs, err)
+	}
+}
+
 func TestDispatcherContinuesWhileAProviderSendIsSlow(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "dispatcher.db"))
 	if err != nil {

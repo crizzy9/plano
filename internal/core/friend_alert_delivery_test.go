@@ -59,7 +59,7 @@ func TestFriendAlertsFollowOriginalGrantsAndPreferences(t *testing.T) {
 	first := share(sharer, all, FriendAlertAll)
 	second := share(otherSharer, all, FriendAlertAll)
 	share(sharer, arrival, FriendAlertArrival)
-	share(sharer, personal, FriendAlertAll)
+	personalShare := share(sharer, personal, FriendAlertAll)
 	share(sharer, muted, "")
 
 	assertSends := func(jobs []deliveryJob, title string, want ...string) {
@@ -105,7 +105,7 @@ func TestFriendAlertsFollowOriginalGrantsAndPreferences(t *testing.T) {
 	if err := store.Untrack(ctx, personal, flightID); err != nil {
 		t.Fatal(err)
 	}
-	assertSends(jobs, "Departure gate", "all-fixture", "owner-fixture")
+	assertSends(jobs, "Departure gate", "all-fixture", "owner-fixture", "personal-fixture")
 	if err := store.Track(ctx, personal, flightID, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,14 @@ func TestFriendAlertsFollowOriginalGrantsAndPreferences(t *testing.T) {
 	if err := store.GrantFriendFlight(ctx, otherSharer, second.ID, flightID); err != nil {
 		t.Fatal(err)
 	}
+	// The original personal tracking still authorizes this job.
+	if err := store.RevokeFriendFlight(ctx, sharer, personalShare.ID, flightID); err != nil {
+		t.Fatal(err)
+	}
 	assertSends(jobs, "Departure gate changed", "owner-fixture", "personal-fixture")
+	if err := store.GrantFriendFlight(ctx, sharer, personalShare.ID, flightID); err != nil {
+		t.Fatal(err)
+	}
 
 	jobs = gateChange("D4")
 	for _, mode := range []string{FriendAlertOff, FriendAlertAll} {
@@ -130,7 +137,19 @@ func TestFriendAlertsFollowOriginalGrantsAndPreferences(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	assertSends(jobs, "Departure gate changed", "owner-fixture", "personal-fixture")
+	if err := store.Untrack(ctx, personal, flightID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Track(ctx, personal, flightID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeFriendFlight(ctx, sharer, personalShare.ID, flightID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.GrantFriendFlight(ctx, sharer, personalShare.ID, flightID); err != nil {
+		t.Fatal(err)
+	}
+	assertSends(jobs, "Departure gate changed", "owner-fixture")
 
 	flight.Status = "landed"
 	observeFlightAlertFixture(t, store, &flight)

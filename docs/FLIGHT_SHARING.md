@@ -12,7 +12,7 @@ The Friends response carries flight information and display names. It leaves sea
 
 Under **Shared with you**, choose the alert level for each friend. Alerts start off. **Arrivals** sends landing and gate arrival updates. **All updates** also sends flight status changes such as gate changes, delays, takeoff, and baggage. Enable Plano notifications on the device to receive alerts. [Push setup](SELF_HOSTING.md#enable-live-data-and-push)
 
-Alerts apply to new events on flights your friend has shared. A shared flight stays out of your Passport unless you track it yourself. Plano queues one alert per device and event even if you already track the flight or multiple friends share it. Removing your own tracking keeps alerts queued through an active incoming share. Changing your preference or revoking a share removes its authorization for queued alerts. Alerts already submitted to a push provider can still arrive.
+Alerts apply to new events on flights your friend has shared. A shared flight stays out of your Passport unless you track it yourself. Plano queues one alert per device and event even if you already track the flight or multiple friends share it. A queued alert keeps each permission it had when it was created. Untracking removes its personal permission. Changing your preference or revoking a share removes that share’s permission. Plano checks the remaining permissions after preparing provider credentials and before submitting the alert. Alerts already submitted to a push provider can still arrive.
 
 ## Public pickup links
 

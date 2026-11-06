@@ -43,6 +43,12 @@ CREATE TABLE IF NOT EXISTS friend_alert_preferences (
 CREATE TABLE IF NOT EXISTS outbox_friend_jobs (
   outbox_id INTEGER PRIMARY KEY REFERENCES outbox(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS outbox_friend_personal (
+  outbox_id INTEGER PRIMARY KEY REFERENCES outbox_friend_jobs(outbox_id) ON DELETE CASCADE,
+  owner TEXT NOT NULL, flight_id TEXT NOT NULL,
+  FOREIGN KEY(owner,flight_id) REFERENCES tracked(owner,flight_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS outbox_friend_personal_by_tracking ON outbox_friend_personal(owner,flight_id);
 CREATE TABLE IF NOT EXISTS outbox_friend_grants (
   outbox_id INTEGER NOT NULL REFERENCES outbox_friend_jobs(outbox_id) ON DELETE CASCADE,
   friend_id TEXT NOT NULL, flight_id TEXT NOT NULL,

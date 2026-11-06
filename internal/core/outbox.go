@@ -745,6 +745,12 @@ type PushSender interface {
 	Send(context.Context, push.Target, push.Message) error
 }
 
+type guardedPushSender interface {
+	SendAuthorized(context.Context, push.Target, push.Message, func(context.Context) error) error
+}
+
+type friendPushGuardError struct{ error }
+
 // commitOutbox publishes a coalescing wake only after SQLite has committed.
 func (s *Store) commitOutbox(tx *sql.Tx) error {
 	if err := tx.Commit(); err != nil {
@@ -1060,20 +1066,6 @@ CASE WHEN ? THEN EXISTS(SELECT 1 FROM flights f WHERE f.id=o.flight_id
 			return
 		}
 	}
-	if friendAlert {
-		var revoked bool
-		err := s.db.QueryRowContext(attempt, `SELECT `+revokedFriendAlert+leasedRow, job.id, job.deviceID, job.lease).Scan(&revoked)
-		if err != nil {
-			if !errors.Is(err, sql.ErrNoRows) && attempt.Err() == nil {
-				logger.Error("could not authorize friend push", "job", job.id, "error", err)
-			}
-			return
-		}
-		if revoked {
-			s.removeObsoletePush(ctx, logger, job)
-			return
-		}
-	}
 	if job.message.ATFMRevision != "" {
 		if job.target.Platform == "ios" {
 			key := hash("atfm-slot\x00" + strings.ToLower(job.target.Token) + "\x00" + job.message.APNsCollapseID)
@@ -1122,7 +1114,36 @@ CASE WHEN ? THEN EXISTS(SELECT 1 FROM flights f WHERE f.id=o.flight_id
 			return
 		}
 	}
-	err = sender.Send(attempt, job.target, job.message)
+	if friendAlert {
+		authorize := func(ctx context.Context) error {
+			var revoked bool
+			err := s.db.QueryRowContext(ctx, `SELECT `+revokedFriendAlert+leasedRow,
+				job.id, job.deviceID, job.lease).Scan(&revoked)
+			if revoked || errors.Is(err, sql.ErrNoRows) {
+				return friendPushGuardError{ErrNotFound}
+			}
+			if err != nil {
+				return friendPushGuardError{err}
+			}
+			return nil
+		}
+		if guarded, ok := sender.(guardedPushSender); ok {
+			err = guarded.SendAuthorized(attempt, job.target, job.message, authorize)
+		} else if err = authorize(attempt); err == nil {
+			err = sender.Send(attempt, job.target, job.message)
+		}
+		var guardError friendPushGuardError
+		if errors.As(err, &guardError) {
+			if errors.Is(guardError.error, ErrNotFound) {
+				s.removeObsoletePush(ctx, logger, job)
+			} else if attempt.Err() == nil {
+				logger.Error("could not authorize friend push", "job", job.id, "error", guardError)
+			}
+			return
+		}
+	} else {
+		err = sender.Send(attempt, job.target, job.message)
+	}
 	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
 		// Shutdown interrupted transport without a provider result. Keep the
 		// existing lease so a later dispatcher can recover the job.

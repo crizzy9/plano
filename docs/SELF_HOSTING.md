@@ -332,6 +332,10 @@ pending push from the backup. Use demo mode and a separate port for a restore
 drill, then check health and open a tracked flight using an existing
 installation before putting the restored instance into service.
 
+The restored database contains pickup links and Friends grants as of the
+backup. An unexpired pickup link or a Friends grant revoked after the backup
+can become valid again when the restored database serves the original origin.
+
 An installation created after the backup may need to reconnect. Open Plano
 Settings, enter the same server address and its current enrollment code if
 required, then tap **Connect to server**. If the restored server rejects the

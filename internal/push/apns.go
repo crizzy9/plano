@@ -229,6 +229,10 @@ func (a *APNs) request(m Message) ([]byte, http.Header, error) {
 }
 
 func (a *APNs) Send(ctx context.Context, deviceToken string, message Message) error {
+	return a.send(ctx, deviceToken, message, nil)
+}
+
+func (a *APNs) send(ctx context.Context, deviceToken string, message Message, authorize func(context.Context) error) error {
 	if len(deviceToken) == 0 || len(deviceToken) > 512 || len(deviceToken)%2 != 0 {
 		return &DeliveryError{Provider: "APNs", Code: "MalformedDeviceToken", InvalidToken: true}
 	}
@@ -251,7 +255,7 @@ func (a *APNs) Send(ctx context.Context, deviceToken string, message Message) er
 			return err
 		}
 		headers.Set("Authorization", "bearer "+token)
-		response, err := post(ctx, a.client, "APNs", a.endpoint+"/3/device/"+deviceToken, headers, payload)
+		response, err := post(ctx, a.client, "APNs", a.endpoint+"/3/device/"+deviceToken, headers, payload, authorize)
 		if err != nil {
 			return err
 		}

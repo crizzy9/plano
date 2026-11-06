@@ -214,7 +214,7 @@ func (f *FCM) exchangeToken(ctx context.Context) (string, time.Time, error) {
 	}
 	headers := http.Header{}
 	headers.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := post(ctx, f.client, "FCM OAuth", f.tokenEndpoint, headers, []byte(body.Encode()))
+	response, err := post(ctx, f.client, "FCM OAuth", f.tokenEndpoint, headers, []byte(body.Encode()), nil)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -365,6 +365,10 @@ func (f *FCM) request(m Message, deviceToken string, now time.Time) (fcmRequest,
 }
 
 func (f *FCM) Send(ctx context.Context, deviceToken string, message Message) error {
+	return f.send(ctx, deviceToken, message, nil)
+}
+
+func (f *FCM) send(ctx context.Context, deviceToken string, message Message, authorize func(context.Context) error) error {
 	if !validFCMToken(deviceToken) || strings.ContainsFunc(deviceToken, unicode.IsSpace) {
 		return &DeliveryError{Provider: "FCM", Code: "MalformedDeviceToken", InvalidToken: true}
 	}
@@ -395,7 +399,7 @@ func (f *FCM) Send(ctx context.Context, deviceToken string, message Message) err
 	headers := http.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("Authorization", "Bearer "+token)
-	response, err := post(ctx, f.client, "FCM", f.endpoint, headers, body)
+	response, err := post(ctx, f.client, "FCM", f.endpoint, headers, body, authorize)
 	if err != nil {
 		if failure, ok := err.(*DeliveryError); ok && failure.Retryable {
 			failure.RetryAfter = 10 * time.Second

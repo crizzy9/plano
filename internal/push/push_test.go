@@ -317,6 +317,32 @@ func TestAPNsRefreshesRejectedCachedProviderTokenOnce(t *testing.T) {
 	}
 }
 
+func TestAPNsRechecksAuthorizationBeforeRetry(t *testing.T) {
+	client := fixtureAPNs(t, "")
+	now := time.Now()
+	if _, err := client.providerToken(now.Add(-30 * time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var requests int
+	revoked := errors.New("fixture alert revoked")
+	client.client = &http.Client{Transport: fixtureTransport(func(*http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			return fixtureResponse(http.StatusForbidden, `{"reason":"ExpiredProviderToken"}`, nil)
+		}
+		return fixtureResponse(http.StatusOK, "", nil)
+	})}
+	err := (Sender{APNs: client}).SendAuthorized(t.Context(), Target{Platform: "ios", Token: "abcdef"}, fixtureAlert(now), func(context.Context) error {
+		if requests != 0 {
+			return revoked
+		}
+		return nil
+	})
+	if !errors.Is(err, revoked) || requests != 1 {
+		t.Fatalf("APNs retry after revocation: requests=%d, error=%v", requests, err)
+	}
+}
+
 func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -486,6 +512,78 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 	}
 	if sends != len(messages) || exchanges != 2 {
 		t.Fatalf("OAuth cache / invalidation: sends=%d, exchanges=%d", sends, exchanges)
+	}
+}
+
+func TestFCMRechecksAuthorizationAfterOAuth(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finishExchange := sync.OnceFunc(func() { close(release) })
+	defer finishExchange()
+	const endpoint = "https://fcm.googleapis.com/v1/projects/fixture-project/messages:send"
+	var exchanges, submissions atomic.Int32
+	client := &FCM{
+		key: key, email: "plano@fixture-project.iam.gserviceaccount.com", tokenEndpoint: googleOAuthEndpoint,
+		endpoint: endpoint,
+		client: &http.Client{Timeout: 5 * time.Second, Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.String() {
+			case googleOAuthEndpoint:
+				if exchanges.Add(1) == 1 {
+					close(started)
+				}
+				select {
+				case <-release:
+					return fixtureResponse(http.StatusOK, `{"access_token":"fixture-fresh","token_type":"Bearer","expires_in":3600}`, nil)
+				case <-r.Context().Done():
+					return nil, r.Context().Err()
+				}
+			case endpoint:
+				submissions.Add(1)
+				return fixtureResponse(http.StatusOK, `{}`, nil)
+			default:
+				return nil, errors.New("unexpected fixture endpoint")
+			}
+		})},
+	}
+	var revoked atomic.Bool
+	revocation := errors.New("fixture alert revoked")
+	send := func() error {
+		return (Sender{FCM: client}).SendAuthorized(ctx, Target{Platform: "android", Token: "fixture:android-registration"}, fixtureAlert(time.Now()), func(context.Context) error {
+			if revoked.Load() {
+				return revocation
+			}
+			return nil
+		})
+	}
+	result := make(chan error, 1)
+	go func() { result <- send() }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("OAuth exchange did not start")
+	}
+	revoked.Store(true)
+	finishExchange()
+	select {
+	case err := <-result:
+		if got := submissions.Load(); !errors.Is(err, revocation) || got != 0 {
+			t.Fatalf("FCM send after revocation: submissions=%d, error=%v", got, err)
+		}
+	case <-ctx.Done():
+		t.Fatal("FCM send did not complete after OAuth")
+	}
+	revoked.Store(false)
+	if err := send(); err != nil {
+		t.Fatalf("authorized FCM send failed: %v", err)
+	}
+	if sent, exchanged := submissions.Load(), exchanges.Load(); sent != 1 || exchanged != 1 {
+		t.Fatalf("FCM requests after the authorized send: submissions=%d, exchanges=%d", sent, exchanged)
 	}
 }
 
