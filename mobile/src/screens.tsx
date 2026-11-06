@@ -686,9 +686,9 @@ function radarInstant(value: string) {
   return { millis: Date.parse(isoMillis), nanos: Number(digits.slice(3)) };
 }
 
-function radarAfter(next: string, previous: string) {
+function radarOrder(next: string, previous: string) {
   const a = radarInstant(next), b = radarInstant(previous);
-  return a.millis > b.millis || a.millis === b.millis && a.nanos > b.nanos;
+  return a.millis === b.millis ? a.nanos - b.nanos : a.millis - b.millis;
 }
 
 export function mergeRadarPositions(...groups: (readonly Position[] | undefined)[]) {
@@ -712,8 +712,30 @@ export function mergeRadarPositions(...groups: (readonly Position[] | undefined)
       } : point });
     }
   }
-  return [...byTime.values()].sort((a, b) => a.millis - b.millis || a.nanos - b.nanos)
-    .slice(-radarMaxPoints).map(({ point }) => point);
+  const ordered = [...byTime.values()].sort((a, b) => a.millis - b.millis || a.nanos - b.nanos);
+  if (ordered.length <= radarMaxPoints) return ordered.map(({ point }) => point);
+
+  // Retain the trajectory endpoints and spread the rest across observation
+  // time so a dense stream of new fixes does not crowd out the early flight.
+  const first = ordered[0]!;
+  const last = ordered[ordered.length - 1]!;
+  const elapsedNanos = ({ millis, nanos }: typeof first) => (millis - first.millis) * 1_000_000 + nanos - first.nanos;
+  const span = elapsedNanos(last);
+  const bucketCount = radarMaxPoints - 2;
+  // Double the bucket width only when needed. As the flight grows, existing
+  // buckets stay aligned so repeated polling does not thin older segments.
+  const bucketWidth = 2 ** Math.ceil(Math.log2(span / bucketCount));
+  const sampled = [first.point];
+  let previousBucket = -1;
+  for (let index = 1; index < ordered.length - 1; index += 1) {
+    const sample = ordered[index]!;
+    const bucket = Math.min(bucketCount - 1, Math.floor(elapsedNanos(sample) / bucketWidth));
+    if (bucket === previousBucket) sampled[sampled.length - 1] = sample.point;
+    else sampled.push(sample.point);
+    previousBucket = bucket;
+  }
+  sampled.push(last.point);
+  return sampled;
 }
 
 function privateRadarUpdate(known: RadarCursor, revision?: string, cursor?: string, positions?: Position[]) {
@@ -787,17 +809,21 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
   const [stream, setStream] = useState<'ready' | 'unavailable' | 'interrupted'>();
   const [checkedAt, setCheckedAt] = useState(0);
   const replacingAircraft = receiver.revision !== undefined && detailRevision !== receiver.revision;
-  const waitingForPrivateScope = privateScopeObservedAt !== undefined && radarAfter(privateScopeObservedAt, flight.observedAt);
+  const waitingForPrivateScope = privateScopeObservedAt !== undefined && radarOrder(privateScopeObservedAt, flight.observedAt) > 0;
   const points = useMemo(() => {
     if (replacingAircraft) return [];
     const eurocontrol = waitingForPrivateScope ? undefined : eurocontrolPositions;
     const swim = waitingForPrivateScope ? undefined : swimPositions;
-    if (provider && radarAfter(provider.revision, flight.observedAt)) {
+    const providerOrder = provider ? radarOrder(provider.revision, flight.observedAt) : NaN;
+    if (provider && providerOrder > 0) {
       // A newer provider snapshot can correct or remove an earlier fix.
       const localHistory = history?.filter((point) => point.source === 'operator_readsb');
       return mergeRadarPositions(eurocontrol, swim, provider.positions, localHistory, receiver.positions);
     }
-    return mergeRadarPositions(eurocontrol, swim, history, receiver.positions);
+    // Flight detail can trim early provider fixes when its receiver track is
+    // dense. Supplement it with the separately fetched same-revision track.
+    const providerHistory = providerOrder === 0 ? provider?.positions : undefined;
+    return mergeRadarPositions(eurocontrol, swim, providerHistory, history, receiver.positions);
   }, [provider, flight.observedAt, history, receiver.positions, swimPositions, eurocontrolPositions, replacingAircraft, waitingForPrivateScope]);
 
   useFocusEffect(useCallback(() => {
@@ -813,12 +839,10 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
       inProgress = true;
       let delay = radarInterval;
       try {
-        const knownRevision = providerRevision.current;
-        const revision = knownRevision && radarAfter(knownRevision, flight.observedAt) ? knownRevision : flight.observedAt;
         const knownReceiver = receiverCursor.current;
         const knownSWIM = swimCursor.current;
         const knownEurocontrol = eurocontrolCursor.current;
-        const result = await api.radar(id, knownReceiver.after, revision, knownReceiver.revision, knownSWIM, knownEurocontrol);
+        const result = await api.radar(id, knownReceiver.after, providerRevision.current, knownReceiver.revision, knownSWIM, knownEurocontrol);
         if (!focused || !foreground) return;
         setCheckedAt(Date.now());
         if (!result) {
@@ -861,7 +885,7 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
         if (swim?.hasMore || eurocontrol?.hasMore) delay = radarPageInterval;
         const changedPrivateScope = (swim?.replace && knownSWIM.revision !== undefined && result.swimRevision !== undefined) ||
           (eurocontrol?.replace && knownEurocontrol.revision !== undefined && result.eurocontrolRevision !== undefined);
-        const refreshPrivateScope = changedPrivateScope && result.providerRevision && radarAfter(result.providerRevision, flight.observedAt);
+        const refreshPrivateScope = changedPrivateScope && result.providerRevision && radarOrder(result.providerRevision, flight.observedAt) > 0;
         if (refreshPrivateScope) setPrivateScopeObservedAt(result.providerRevision);
         if ((replaceReceiver && detailRevision !== nextReceiverRevision) || refreshPrivateScope) refreshFlight();
         consecutiveFailures = 0;

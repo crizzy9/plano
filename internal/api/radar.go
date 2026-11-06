@@ -20,6 +20,14 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 	if (provider != "" || query.Get("providerAfter") != "" || query.Get("providerRevision") != "" || query.Get("receiverRevision") != "") && provider != "1" {
 		return errInvalid
 	}
+	const pageSize, snapshotSize = 256, 512
+	snapshotLimit := 0
+	if values, present := query["snapshot"]; present {
+		if provider != "1" || len(values) != 1 || values[0] != "1" {
+			return errInvalid
+		}
+		snapshotLimit = snapshotSize
+	}
 	after, err := parseRadarCursor(query.Get("after"))
 	if err != nil {
 		return err
@@ -50,16 +58,15 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 	if s.Demo || len(s.EurocontrolPositionKey) < 32 {
 		eurocontrol = nil
 	}
-	const pageSize = 256
 	result := make(map[string]any)
 	var positions []feeds.Position
 	if provider == "1" {
 		providerLimit := pageSize
 		if providerRevision != nil {
 			// A replacement can fill the client's entire visible history.
-			providerLimit = 512
+			providerLimit = snapshotSize
 		}
-		page, err := s.Store.RadarPageWithTraffic(r.Context(), owner, id, after, receiverRevision, providerAfter, providerRevision, pageSize, providerLimit, swim, eurocontrol)
+		page, err := s.Store.RadarPageWithTraffic(r.Context(), owner, id, after, receiverRevision, providerAfter, providerRevision, pageSize, providerLimit, snapshotLimit, swim, eurocontrol)
 		if err != nil {
 			return err
 		}

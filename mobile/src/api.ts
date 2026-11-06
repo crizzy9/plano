@@ -882,7 +882,7 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
     },
     async radar(id: string, after?: string, providerRevision?: string, receiverRevision?: string,
       swim?: RadarCursor, eurocontrol?: RadarCursor) {
-      const query = new URLSearchParams({ provider: '1', swim: '1', eurocontrol: '1' });
+      const query = new URLSearchParams({ provider: '1', swim: '1', eurocontrol: '1', snapshot: '1' });
       if (after) query.set('after', after);
       if (receiverRevision !== undefined) query.set('receiverRevision', receiverRevision);
       if (providerRevision) query.set('providerRevision', providerRevision);

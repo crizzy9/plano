@@ -1,14 +1,173 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/crizzy9/plano/internal/core"
 	"github.com/crizzy9/plano/internal/feeds"
 )
+
+func TestRadarSnapshotSamplesAllRetainedStreams(t *testing.T) {
+	ctx := t.Context()
+	dbPath := filepath.Join(t.TempDir(), "radar.db")
+	store, err := core.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	service := Server{Store: store, Logger: slog.New(slog.DiscardHandler),
+		SWIMPositionKey: make([]byte, 32), EurocontrolPositionKey: make([]byte, 32)}
+	token, owner := newImportTestInstallation(t, store)
+	otherToken, _ := newImportTestInstallation(t, store)
+	now := time.Now().UTC().Truncate(time.Second)
+	base := now.Add(-time.Minute)
+	flight := feeds.Flight{ID: "radar-combined-snapshot", Number: "XY123", Source: "flightaware_aeroapi",
+		OriginICAO: "KSFO", DestinationICAO: "KEWR", TailNumber: "N1AA", Status: "airborne",
+		ScheduledDeparture: new(now.Add(-time.Hour)), ActualTakeoff: new(now.Add(-50 * time.Minute)), ObservedAt: now}
+	type stream struct {
+		source, positions, cursor, after, revision string
+		fixes                                      []feeds.Position
+	}
+	streams := []stream{
+		{source: "operator_readsb", positions: "positions", cursor: "cursor", after: "after", revision: "receiverRevision"},
+		{source: "flightaware_aeroapi", positions: "providerPositions", cursor: "providerCursor", after: "providerAfter", revision: "providerRevision"},
+		{source: feeds.FAASWIM, positions: "swimPositions", cursor: "swimCursor", after: "swimAfter", revision: "swimRevision"},
+		{source: feeds.Eurocontrol, positions: "eurocontrolPositions", cursor: "eurocontrolCursor", after: "eurocontrolAfter", revision: "eurocontrolRevision"},
+	}
+	const fixCount = 520
+	for i := range streams {
+		for j := range fixCount {
+			at := base.Add(time.Duration(j)*time.Millisecond + time.Duration(i)*time.Microsecond)
+			streams[i].fixes = append(streams[i].fixes, feeds.Position{At: at, Latitude: 32, Longitude: -95, Source: streams[i].source})
+		}
+	}
+	if err := store.Observe(ctx, flight, streams[1].fixes, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Track(ctx, owner, flight.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	seedRadarReceiverFixes(t, dbPath, flight.ID, streams[0].fixes)
+	report := feeds.RadarPositionReport{ProviderFlightID: flight.ID, OriginICAO: flight.OriginICAO,
+		DestinationICAO: flight.DestinationICAO, ScheduledDeparture: *flight.ScheduledDeparture, ActualTakeoff: *flight.ActualTakeoff}
+	for batch := range slices.Chunk(streams[2].fixes, 32) {
+		report.Positions = batch
+		if err := store.RecordSWIMPositions(ctx, report, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for batch := range slices.Chunk(streams[3].fixes, 32) {
+		report.Positions = batch
+		if err := store.RecordEurocontrolPositions(ctx, report, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	handler := service.Handler()
+	path := "/v1/flights/" + flight.ID + "/radar"
+	query := url.Values{"provider": {"1"}, "swim": {"1"}, "eurocontrol": {"1"}}
+	read := func(credential string) map[string]json.RawMessage {
+		t.Helper()
+		raw := importTestRequest(t, handler, http.MethodGet, path+"?"+query.Encode(), credential, "", http.StatusOK)
+		var result map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	assertPage := func(page map[string]json.RawMessage, s stream, first, count int, spanning bool) {
+		t.Helper()
+		var got []feeds.Position
+		if err := json.Unmarshal(page[s.positions], &got); err != nil || len(got) != count {
+			t.Fatalf("%s: got %d fixes, want %d, decode error %v", s.positions, len(got), count, err)
+		}
+		for i, fix := range got {
+			index := first + i
+			if spanning {
+				index = (i*(fixCount-1) + count - 2) / (count - 1)
+			}
+			if want := s.fixes[index]; !fix.At.Equal(want.At) || fix.Source != s.source {
+				t.Fatalf("%s[%d]: got %v from %s, want %v from %s", s.positions, i, fix.At, fix.Source, want.At, s.source)
+			}
+		}
+		var cursor string
+		if err := json.Unmarshal(page[s.cursor], &cursor); err != nil || cursor != got[len(got)-1].At.Format(time.RFC3339Nano) {
+			t.Fatalf("%s: cursor %q, decode error %v", s.positions, cursor, err)
+		}
+	}
+
+	legacy := read(token)
+	query.Set("snapshot", "1")
+	initial := read(token)
+	foreign := read(otherToken)
+	for i, s := range streams {
+		assertPage(legacy, s, fixCount-256, 256, false)
+		assertPage(initial, s, 0, 512, true)
+		if string(foreign[s.positions]) != "[]" || foreign[s.revision] != nil || foreign[s.cursor] != nil {
+			t.Fatalf("untracked installation received %s data", s.positions)
+		}
+		query.Set(s.after, s.fixes[i].At.Format(time.RFC3339Nano))
+		if i != 1 {
+			query.Set(s.revision, "0")
+		}
+	}
+	forward := read(token)
+	for i, s := range streams {
+		assertPage(forward, s, i+1, 256, false)
+	}
+	query.Set("receiverRevision", "1")
+	query.Set("providerRevision", now.Add(-time.Second).Format(time.RFC3339Nano))
+	query.Set("eurocontrolRevision", "1")
+	mixed := read(token)
+	for i, s := range streams {
+		if s.source == feeds.FAASWIM {
+			assertPage(mixed, s, i+1, 256, false)
+		} else {
+			assertPage(mixed, s, 0, 512, true)
+		}
+	}
+	query.Set("swimRevision", "1")
+	assertPage(read(token), streams[2], 0, 512, true)
+
+	for _, invalid := range []string{"snapshot=1", "provider=1&snapshot=", "provider=1&snapshot=2", "provider=1&snapshot=1&snapshot=0"} {
+		importTestRequest(t, handler, http.MethodGet, path+"?"+invalid, token, "", http.StatusBadRequest)
+	}
+}
+
+func seedRadarReceiverFixes(t *testing.T, path, id string, fixes []feeds.Position) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	for _, fix := range fixes {
+		raw, err := json.Marshal(fix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(t.Context(), "INSERT INTO radar_positions(flight_id,at_ns,data) VALUES(?,?,?)",
+			id, fix.At.UnixNano(), string(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestRadarProviderPagesCachedPositionsIndependently(t *testing.T) {
 	service := newImportTestServer(t)

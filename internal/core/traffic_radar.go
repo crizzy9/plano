@@ -171,7 +171,7 @@ type RadarCursor struct {
 	Revision *int64
 }
 
-func readTrafficRadarPositions(ctx context.Context, tx *sql.Tx, id string, cursor RadarCursor, limit int, stream trafficRadarStream) ([]feeds.Position, *int64, error) {
+func readTrafficRadarPositions(ctx context.Context, tx *sql.Tx, id string, cursor RadarCursor, limit, snapshotLimit int, stream trafficRadarStream) ([]feeds.Position, *int64, error) {
 	// The combined page has already checked tracking in this transaction.
 	var revision int64
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT revision_ns FROM `+stream.revisions+` WHERE flight_id=?),0)`, id).Scan(&revision); err != nil {
@@ -181,8 +181,8 @@ func readTrafficRadarPositions(ctx context.Context, tx *sql.Tx, id string, curso
 		cursor.After = nil
 	}
 	cutoff := time.Now().Add(-trafficRadarRetention).UnixNano()
-	positions, err := readRadarFixPage(ctx, tx, `SELECT p.data FROM `+stream.positions+` p WHERE p.flight_id=? AND p.at_ns>?`,
-		[]any{id, cutoff}, cursor.After, limit)
+	positions, err := readRadarFixPage(ctx, tx, stream.positions, `WHERE p.flight_id=? AND p.at_ns>?`,
+		[]any{id, cutoff}, cursor.After, limit, snapshotLimit)
 	return positions, &revision, err
 }
 

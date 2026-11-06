@@ -249,33 +249,49 @@ func (s *Store) RadarPositions(ctx context.Context, owner, id string, after *tim
 	if _, err := s.Flight(ctx, id); err != nil {
 		return nil, err
 	}
-	return readRadarPositions(ctx, s.db, owner, id, after, nil, limit)
+	return readRadarPositions(ctx, s.db, owner, id, after, nil, limit, 0)
 }
 
 type radarRowsQueryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
-func readRadarPositions(ctx context.Context, db radarRowsQueryer, owner, id string, after *time.Time, observedNS *int64, limit int) ([]feeds.Position, error) {
-	query := `SELECT p.data FROM radar_positions p JOIN flights f ON f.id=p.flight_id
+func readRadarPositions(ctx context.Context, db radarRowsQueryer, owner, id string, after *time.Time, observedNS *int64, limit, snapshotLimit int) ([]feeds.Position, error) {
+	scope := `JOIN flights f ON f.id=p.flight_id
 WHERE p.flight_id=? AND EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=p.flight_id)
 AND COALESCE(json_extract(f.snapshot,'$.tailNumber'),'')<>''`
 	args := []any{id, owner}
 	if observedNS != nil {
-		query += ` AND f.observed_ns=?`
+		scope += ` AND f.observed_ns=?`
 		args = append(args, *observedNS)
 	}
-	return readRadarFixPage(ctx, db, query, args, after, limit)
+	return readRadarFixPage(ctx, db, "radar_positions", scope, args, after, limit, snapshotLimit)
 }
 
-func readRadarFixPage(ctx context.Context, db radarRowsQueryer, query string, args []any, after *time.Time, limit int) ([]feeds.Position, error) {
-	if after == nil {
-		query += ` ORDER BY p.at_ns DESC LIMIT ?`
-	} else {
+func readRadarFixPage(ctx context.Context, db radarRowsQueryer, table, scope string, args []any, after *time.Time, limit, snapshotLimit int) ([]feeds.Position, error) {
+	from := ` FROM ` + table + ` p ` + scope
+	query := `SELECT p.data` + from
+	newest := after == nil && snapshotLimit == 0
+	switch {
+	case after != nil:
 		query += ` AND p.at_ns>? ORDER BY p.at_ns ASC LIMIT ?`
-		args = append(args, after.UnixNano())
+		args = append(args, after.UnixNano(), limit)
+	case newest:
+		query += ` ORDER BY p.at_ns DESC LIMIT ?`
+		args = append(args, limit)
+	default:
+		// Rank the scoped keys and fetch payloads only for selected fixes. The
+		// integer quotient advances evenly from zero at the first fix to
+		// snapshotLimit-1 at the last, selecting the whole span.
+		query = `WITH ranked AS (
+ SELECT p.flight_id,p.at_ns,ROW_NUMBER() OVER (ORDER BY p.at_ns) AS fix,(SELECT COUNT(*)` + from + `) AS total` + from + `
+) SELECT p.data FROM ranked r JOIN ` + table + ` p USING(flight_id,at_ns)
+WHERE r.fix=1 OR (r.fix-1)*?/(r.total-1) > (r.fix-2)*?/(r.total-1)
+ORDER BY r.at_ns`
+		args = append(args, args...)
+		args = append(args, snapshotLimit-1, snapshotLimit-1)
 	}
-	rows, err := db.QueryContext(ctx, query, append(args, limit)...)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +308,7 @@ func readRadarFixPage(ctx context.Context, db radarRowsQueryer, query string, ar
 		}
 		positions = append(positions, p)
 	}
-	if after == nil {
+	if newest {
 		slices.Reverse(positions)
 	}
 	return positions, rows.Err()
@@ -304,10 +320,10 @@ func (s *Store) RadarProviderPositions(ctx context.Context, owner, id string, af
 	if limit < 1 || limit > 2000 {
 		return nil, nil, errors.New("invalid radar page size")
 	}
-	return readRadarProviderPositions(ctx, s.db, owner, id, after, knownRevision, limit)
+	return readRadarProviderPositions(ctx, s.db, owner, id, after, knownRevision, limit, 0)
 }
 
-func readRadarProviderPositions(ctx context.Context, db rowQueryer, owner, id string, after, knownRevision *time.Time, limit int) ([]feeds.Position, *time.Time, error) {
+func readRadarProviderPositions(ctx context.Context, db rowQueryer, owner, id string, after, knownRevision *time.Time, limit, snapshotLimit int) ([]feeds.Position, *time.Time, error) {
 	var knownNS any
 	if knownRevision != nil {
 		knownNS = knownRevision.UnixNano()
@@ -352,8 +368,18 @@ WHERE f.id=?`, knownNS, owner, id).Scan(&revision, &telemetry)
 	// splits simultaneous positions between pages.
 	slices.SortStableFunc(positions, func(a, b feeds.Position) int { return a.At.Compare(b.At) })
 	positions = slices.CompactFunc(positions, func(a, b feeds.Position) bool { return a.At.Equal(b.At) })
+	span := after == nil && snapshotLimit != 0
+	if span {
+		limit = snapshotLimit
+	}
 	if len(positions) > limit {
-		if after == nil {
+		if span {
+			last, steps := len(positions)-1, limit-1
+			for i := 1; i < limit; i++ {
+				positions[i] = positions[(i*last+steps-1)/steps]
+			}
+			positions = positions[:limit]
+		} else if after == nil {
 			positions = positions[len(positions)-limit:]
 		} else {
 			positions = positions[:limit]
@@ -365,13 +391,15 @@ WHERE f.id=?`, knownNS, owner, id).Scan(&revision, &telemetry)
 // RadarPage reads both feeds from one snapshot so a receiver reset cannot
 // pair fixes from the previous aircraft with a newer provider revision.
 func (s *Store) RadarPage(ctx context.Context, owner, id string, receiverAfter *time.Time, receiverKnown *int64, providerAfter, providerKnown *time.Time, receiverLimit, providerLimit int) (RadarPage, error) {
-	return s.RadarPageWithTraffic(ctx, owner, id, receiverAfter, receiverKnown, providerAfter, providerKnown, receiverLimit, providerLimit, nil, nil)
+	return s.RadarPageWithTraffic(ctx, owner, id, receiverAfter, receiverKnown, providerAfter, providerKnown, receiverLimit, providerLimit, 0, nil, nil)
 }
 
 // RadarPageWithTraffic also reads each requested surveillance stream, using
 // a separate cursor and revision for each in the same database snapshot.
-func (s *Store) RadarPageWithTraffic(ctx context.Context, owner, id string, receiverAfter *time.Time, receiverKnown *int64, providerAfter, providerKnown *time.Time, receiverLimit, providerLimit int, swim, eurocontrol *RadarCursor) (RadarPage, error) {
-	if receiverLimit < 1 || receiverLimit > 2000 || providerLimit < 1 || providerLimit > 2000 {
+// A nonzero snapshot limit samples the retained span when a stream has no effective cursor.
+func (s *Store) RadarPageWithTraffic(ctx context.Context, owner, id string, receiverAfter *time.Time, receiverKnown *int64, providerAfter, providerKnown *time.Time, receiverLimit, providerLimit, snapshotLimit int, swim, eurocontrol *RadarCursor) (RadarPage, error) {
+	if receiverLimit < 1 || receiverLimit > 2000 || providerLimit < 1 || providerLimit > 2000 ||
+		snapshotLimit < 0 || snapshotLimit > 2000 || snapshotLimit == 1 {
 		return RadarPage{}, errors.New("invalid radar page size")
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
@@ -403,22 +431,22 @@ LEFT JOIN radar_receiver_revisions r ON r.flight_id=f.id WHERE f.id=?`, owner, i
 	if receiverKnown != nil && *receiverKnown != revision.Int64 {
 		receiverAfter = nil
 	}
-	page.Positions, err = readRadarPositions(ctx, tx, owner, id, receiverAfter, nil, receiverLimit)
+	page.Positions, err = readRadarPositions(ctx, tx, owner, id, receiverAfter, nil, receiverLimit, snapshotLimit)
 	if err != nil {
 		return RadarPage{}, err
 	}
-	page.ProviderPositions, page.ProviderRevision, err = readRadarProviderPositions(ctx, tx, owner, id, providerAfter, providerKnown, providerLimit)
+	page.ProviderPositions, page.ProviderRevision, err = readRadarProviderPositions(ctx, tx, owner, id, providerAfter, providerKnown, providerLimit, snapshotLimit)
 	if err != nil {
 		return RadarPage{}, err
 	}
 	if swim != nil {
-		page.SWIMPositions, page.SWIMRevision, err = readTrafficRadarPositions(ctx, tx, id, *swim, receiverLimit, swimRadarStream)
+		page.SWIMPositions, page.SWIMRevision, err = readTrafficRadarPositions(ctx, tx, id, *swim, receiverLimit, snapshotLimit, swimRadarStream)
 		if err != nil {
 			return RadarPage{}, err
 		}
 	}
 	if eurocontrol != nil {
-		page.EurocontrolPositions, page.EurocontrolRevision, err = readTrafficRadarPositions(ctx, tx, id, *eurocontrol, receiverLimit, eurocontrolRadarStream)
+		page.EurocontrolPositions, page.EurocontrolRevision, err = readTrafficRadarPositions(ctx, tx, id, *eurocontrol, receiverLimit, snapshotLimit, eurocontrolRadarStream)
 		if err != nil {
 			return RadarPage{}, err
 		}

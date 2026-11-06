@@ -600,10 +600,13 @@ verify the aircraft and your onward flight is still tracked. Receiver fixes
 remain available during a provider track outage while the inbound observation
 is fresh.
 
+When opening a tracked flight or refreshing a replaced track, the app requests
+a bounded sample across the retained radar history. The map and charts show
+up to 512 fixes across that time range, including the first and latest fixes.
 The map uses bundled Natural Earth coastlines. The latest position identifies
 its source and UTC observation time. Altitude, ground speed and vertical motion
 appear when the source reports them. The map and charts break the track when
-more than five minutes pass between reports. Isolated reports remain visible.
+displayed fixes are more than five minutes apart. Isolated fixes remain visible.
 Altitude and speed graphs use elapsed time between reports. Tracking an
 airborne demo flight shows simulated positions after the next refresh.
 

@@ -458,7 +458,7 @@ ORDER BY e.at_ns DESC,e.id LIMIT 200`, id, eventRevision, d.Tracked)
 	if d.Tracked && d.Flight.TailNumber != "" {
 		// A concurrent observation can reset the receiver track after the detail
 		// snapshot has been read. Keep newer fixes out of the older response.
-		local, err := readRadarPositions(ctx, s.db, owner, id, nil, &observedNS, 2000)
+		local, err := readRadarPositions(ctx, s.db, owner, id, nil, &observedNS, 2000, 0)
 		if err != nil {
 			return d, err
 		}

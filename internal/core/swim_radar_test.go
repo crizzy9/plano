@@ -270,7 +270,7 @@ func recordSWIMRadarFixture(t *testing.T, s *Store, report feeds.RadarPositionRe
 
 func readSWIMRadarFixture(t *testing.T, s *Store, owner, id string, after *time.Time, known *int64) RadarPage {
 	t.Helper()
-	page, err := s.RadarPageWithTraffic(t.Context(), owner, id, nil, nil, nil, nil, 256, 256, &RadarCursor{After: after, Revision: known}, nil)
+	page, err := s.RadarPageWithTraffic(t.Context(), owner, id, nil, nil, nil, nil, 256, 256, 0, &RadarCursor{After: after, Revision: known}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -170,7 +170,7 @@ func TestRadarPageResetsAcrossMissingTailAndAircraftChange(t *testing.T) {
 		len(replacement.Positions) != 1 || !replacement.Positions[0].At.Equal(fresh.At) || len(replacement.ProviderPositions) != 0 {
 		t.Fatalf("new aircraft should replace both cached paths: %+v", replacement)
 	}
-	staleDetails, err := readRadarPositions(ctx, s.db, owner, flight.ID, nil, new(previous.ObservedAt.UnixNano()), 256)
+	staleDetails, err := readRadarPositions(ctx, s.db, owner, flight.ID, nil, new(previous.ObservedAt.UnixNano()), 256, 0)
 	if err != nil || len(staleDetails) != 0 {
 		t.Fatalf("new receiver fix leaked into older detail snapshot: %+v, %v", staleDetails, err)
 	}

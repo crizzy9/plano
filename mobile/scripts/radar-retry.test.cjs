@@ -10,7 +10,7 @@ const { outputText } = ts.transpileModule(source + '\nexport { FlightRadar };', 
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 });
 
-function completedRadar(radar) {
+function completedRadar(radar, history) {
   const timers = new Map();
   const hooks = [];
   let hookIndex = 0;
@@ -62,7 +62,7 @@ function completedRadar(radar) {
     settle,
     render() {
       hookIndex = 0;
-      return exports.FlightRadar({ api: { radar }, flight, tracked: true, detailRevision: '0', refreshFlight() {} });
+      return exports.FlightRadar({ api: { radar }, flight, history, tracked: true, detailRevision: '0', refreshFlight() {} });
     },
     async retry() {
       assert.equal(timers.size, 1);
@@ -91,6 +91,50 @@ test('completed flight retries radar and shows private telemetry after a transie
   assert.equal(map.props.positions[0], position);
   assert.equal(readout.props.position, position);
   assert.equal(radar.timers.size, 0);
+});
+
+test('a dense recorded track spans its first and latest fixes within the display cap', async () => {
+  const start = Date.parse('2025-06-01T15:00:00Z');
+  const positions = Array.from({ length: 700 }, (_, index) => ({
+    at: new Date(start + index * 5_000).toISOString(),
+    source: index % 2 ? 'faa_swim' : 'eurocontrol_nm',
+    latitude: 40, longitude: -74 - index / 1_000,
+  }));
+  const radar = completedRadar(async () => ({
+    positions: [], receiverRevision: '0',
+    swimRevision: '0', swimPositions: positions.filter(({ source }) => source === 'faa_swim'),
+    eurocontrolRevision: '0', eurocontrolPositions: positions.filter(({ source }) => source === 'eurocontrol_nm'),
+  }));
+  radar.render();
+  await radar.settle();
+  const [, track] = radar.render().props.children;
+  const [map, readout] = track.props.children;
+  assert.ok(map.props.positions.length > 256 && map.props.positions.length <= 512);
+  assert.equal(map.props.positions[0], positions[0]);
+  assert.equal(map.props.positions.at(-1), positions.at(-1));
+  assert.equal(readout.props.position, positions.at(-1));
+  assert.equal(radar.timers.size, 0);
+});
+
+test('radar fetches the provider baseline even when detail has the same revision', async () => {
+  const early = { at: '2025-06-01T15:00:00Z', source: 'flightaware_aeroapi', latitude: 38, longitude: -121 };
+  const late = { at: '2025-06-01T19:55:00Z', source: 'operator_readsb', latitude: 40, longitude: -74 };
+  let knownRevision;
+  const radar = completedRadar(async (_id, _after, providerRevision) => {
+    knownRevision = providerRevision;
+    return {
+      positions: [], receiverRevision: '0',
+      providerRevision: '2025-06-01T16:01:00-04:00', providerPositions: [early],
+    };
+  }, [late]);
+  radar.render();
+  await radar.settle();
+  assert.equal(knownRevision, undefined);
+  const [, track] = radar.render().props.children;
+  const [map] = track.props.children;
+  assert.equal(map.props.positions.length, 2);
+  assert.equal(map.props.positions[0], early);
+  assert.equal(map.props.positions[1], late);
 });
 
 const unavailable = async () => { throw new Error('unavailable'); };

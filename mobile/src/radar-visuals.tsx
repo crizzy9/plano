@@ -91,7 +91,7 @@ export function RadarRouteMap({ positions, label }: { positions: readonly Positi
   return (
     <View style={styles.figure}>
       <View accessible accessibilityRole="image"
-        accessibilityLabel={geometry.hasGaps ? `${label}, with gaps between position reports` : label}
+        accessibilityLabel={geometry.hasGaps ? `${label}, with gaps between displayed fixes` : label}
         style={[styles.map, { backgroundColor: colors.route }]}>
         <Svg width="100%" height="100%" viewBox={`0 0 ${mapWidth} ${mapHeight}`} accessible={false}>
           <Defs>
@@ -109,7 +109,7 @@ export function RadarRouteMap({ positions, label }: { positions: readonly Positi
           </G>
         </Svg>
       </View>
-      {geometry.hasGaps && <Text style={[styles.caption, { color: colors.muted }]}>Gaps between position reports</Text>}
+      {geometry.hasGaps && <Text style={[styles.caption, { color: colors.muted }]}>Gaps between displayed fixes</Text>}
       <Text style={[styles.caption, { color: colors.muted }]}>Map data from Natural Earth</Text>
     </View>
   );

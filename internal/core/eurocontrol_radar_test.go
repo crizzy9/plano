@@ -16,7 +16,7 @@ func TestEurocontrolRadarIndependentPagingAndReplayFloor(t *testing.T) {
 	owner := trackSWIMRadarFixture(t, s, flight.ID)
 	read := func(reader string, swim, eurocontrol *RadarCursor) RadarPage {
 		t.Helper()
-		page, err := s.RadarPageWithTraffic(ctx, reader, flight.ID, nil, nil, nil, nil, 256, 256, swim, eurocontrol)
+		page, err := s.RadarPageWithTraffic(ctx, reader, flight.ID, nil, nil, nil, nil, 256, 256, 0, swim, eurocontrol)
 		if err != nil {
 			t.Fatal(err)
 		}
