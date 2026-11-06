@@ -1,0 +1,96 @@
+package api_test
+
+import (
+	"context"
+	"encoding/json"
+	"github.com/crizzy9/plano/internal/feeds"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/crizzy9/plano/internal/api"
+	"github.com/crizzy9/plano/internal/core"
+	"github.com/crizzy9/plano/internal/demodata"
+)
+
+type evolvingImportSource struct {
+	demodata.Source
+	secondLeg bool
+}
+
+func (s *evolvingImportSource) Search(ctx context.Context, number string, date time.Time) ([]feeds.Flight, error) {
+	if number == "UA456" && !s.secondLeg {
+		return []feeds.Flight{}, nil
+	}
+	return s.Source.Search(ctx, number, date)
+}
+
+func TestRelayReplayRevocationAndPrivateBookingLookup(t *testing.T) {
+	store, err := core.Open(filepath.Join(t.TempDir(), "plano.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	source := &evolvingImportSource{}
+	h := api.Server{Store: store, Source: source, PublicURL: "https://plano.example.org", BookingKey: []byte(strings.Repeat("f", 32)), Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Demo: true}.Handler()
+	request := func(method, path, token, kind, body string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		r.Header.Set("Content-Type", kind)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("%s %s: status %d want %d (%s)", method, path, w.Code, want, w.Body)
+		}
+		return w
+	}
+	token := func(w *httptest.ResponseRecorder) string {
+		t.Helper()
+		var fields struct{ Token string }
+		if err := json.Unmarshal(w.Body.Bytes(), &fields); err != nil || fields.Token == "" {
+			t.Fatalf("invalid response token: %v", err)
+		}
+		return fields.Token
+	}
+	const jsonType = "application/json"
+	owner := token(request(http.MethodPost, "/v1/installations", "", jsonType, `{}`, 201))
+	other := token(request(http.MethodPost, "/v1/installations", "", jsonType, `{}`, 201))
+	relay := token(request(http.MethodPost, "/v1/import/email-relay", owner, jsonType, `{}`, 201))
+	const body = "Subject: itinerary\r\nContent-Type: text/plain\r\n\r\nUA123 2027-01-05\r\nUA456 2027-01-07\r\nBooking reference: ZXC12B\r\n"
+	request(http.MethodPost, "/v1/webhooks/email", owner, "message/rfc822", body, 401)
+	request(http.MethodGet, "/v1/tracked", relay, jsonType, "", 401)
+	partial := request(http.MethodPost, "/v1/webhooks/email", relay, "message/rfc822", body, 503)
+	if partial.Header().Get("Retry-After") != "300" {
+		t.Fatal("partial import is not retryable")
+	}
+	tracked := request(http.MethodGet, "/v1/tracked", owner, jsonType, "", 200).Body.String()
+	if !strings.Contains(tracked, "demo-UA123") || strings.Contains(tracked, "demo-UA456") {
+		t.Fatal(tracked)
+	}
+	source.secondLeg = true
+	request(http.MethodPost, "/v1/webhooks/email", relay, "message/rfc822", body, 204)
+	request(http.MethodPost, "/v1/webhooks/email", relay, "message/rfc822", body, 204)
+	own := request(http.MethodPost, "/v1/bookings/lookup", owner, jsonType, `{"locator":"zxc12b"}`, 200).Body.String()
+	if !strings.Contains(own, "demo-UA123-2027-01-05") || !strings.Contains(own, "demo-UA456-2027-01-07") || strings.Contains(own, "ZXC12B") {
+		t.Fatal(own)
+	}
+	foreign := request(http.MethodPost, "/v1/bookings/lookup", other, jsonType, `{"locator":"ZXC12B"}`, 200).Body.String()
+	if !strings.Contains(foreign, `"flights":[]`) {
+		t.Fatal(foreign)
+	}
+	request(http.MethodDelete, "/v1/import/email-relay", owner, jsonType, "", 204)
+	request(http.MethodPost, "/v1/webhooks/email", relay, "message/rfc822", body, 401)
+	request(http.MethodDelete, "/v1/tracked/demo-UA123-2027-01-05", owner, jsonType, "", 204)
+	own = request(http.MethodPost, "/v1/bookings/lookup", owner, jsonType, `{"locator":"ZXC12B"}`, 200).Body.String()
+	if strings.Contains(own, "demo-UA123") || !strings.Contains(own, "demo-UA456") {
+		t.Fatal(own)
+	}
+}

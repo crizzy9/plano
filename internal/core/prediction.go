@@ -2,57 +2,88 @@ package core
 
 import (
 	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
+	"github.com/crizzy9/plano/internal/predict"
 )
 
 // Prediction preserves the official schedule and labels the inputs behind an estimate.
 type Prediction struct {
-	Departure    *time.Time `json:"departure,omitempty"`
-	DelayMinutes int        `json:"delayMinutes"`
-	Reasons      []string   `json:"reasons"`
-	Method       string     `json:"method"`
+	Departure            *time.Time             `json:"departure,omitempty"`
+	DelayMinutes         int                    `json:"delayMinutes"`
+	Reasons              []string               `json:"reasons"`
+	Method               string                 `json:"method"`
+	ModelVersion         string                 `json:"modelVersion,omitempty"`
+	BaselineMinutes      *float64               `json:"baselineMinutes,omitempty"`
+	FeatureContributions []predict.Contribution `json:"featureContributions,omitempty"`
 }
 
 // Predict uses independent operational constraints as lower bounds, avoiding double
 // counting when an airline's existing estimate already includes a disruption.
 func Predict(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, now time.Time) *Prediction {
-	if flight.ScheduledDeparture == nil || flight.ActualDeparture != nil || finished(flight) {
+	return PredictWithModel(nil, flight, rotation, advisories, now)
+}
+
+// PredictWithModel forecasts from observed flight and advisory signals when the
+// trained model supports them. A missing model or an unsupported input falls back
+// to the operational estimate. Neither estimate changes published flight times.
+func PredictWithModel(model *predict.Model, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, now time.Time) *Prediction {
+	features, reasons, ok := delayInputs(flight, rotation, advisories, now)
+	if !ok {
 		return nil
 	}
 	scheduled := *flight.ScheduledDeparture
-	lower := scheduled
+	if estimate, ok := model.Estimate(features, now, scheduled); ok {
+		delay := int(math.Round(estimate.DelayMinutes))
+		departure := scheduled.Add(time.Duration(estimate.DelayMinutes * float64(time.Minute)))
+		reasons = append(reasons, learnedReason(estimate.Contributions))
+		return &Prediction{
+			Departure: &departure, DelayMinutes: delay, Reasons: reasons, Method: "learned_estimate",
+			ModelVersion: model.ID(), BaselineMinutes: &estimate.Baseline, FeatureContributions: estimate.Contributions,
+		}
+	}
+	if len(reasons) == 0 {
+		return nil
+	}
+	minutes := max(features.AirlineDelayMinutes, features.InboundDelayMinutes, features.AirportDelayMinutes, features.GroundStopMinutes)
+	departure := scheduled.Add(time.Duration(minutes * float64(time.Minute)))
+	return &Prediction{Departure: &departure, DelayMinutes: int(minutes), Reasons: reasons, Method: "operational_estimate"}
+}
+
+// ExtractDelayFeatures gives historical snapshot exporters the same feature
+// derivation used for live forecasts. Pass only data available at observedAt.
+func ExtractDelayFeatures(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, observedAt time.Time) (predict.Features, bool) {
+	features, _, ok := delayInputs(flight, rotation, advisories, observedAt)
+	return features, ok
+}
+
+func delayInputs(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, now time.Time) (predict.Features, []string, bool) {
+	var features predict.Features
+	if flight.ScheduledDeparture == nil || flight.ScheduledDeparture.IsZero() || flight.ActualDeparture != nil || flight.ActualTakeoff != nil || finished(flight) {
+		return features, nil, false
+	}
+	switch flight.Status {
+	case "taxi_out", "airborne", "landed":
+		return features, nil, false
+	}
+	scheduled := *flight.ScheduledDeparture
 	reasons := make([]string, 0, 3)
-	if flight.EstimatedDeparture != nil && flight.EstimatedDeparture.After(lower) {
-		lower = *flight.EstimatedDeparture
+	if flight.EstimatedDeparture != nil {
+		features.AirlineDelayMinutes = max(0, flight.EstimatedDeparture.Sub(scheduled).Minutes())
 	}
-	var inbound *feeds.Flight
-	for i := range rotation {
-		leg := &rotation[i]
-		if leg.ID == flight.ID || leg.Destination != flight.Origin || leg.Status == "cancelled" {
-			continue
-		}
-		arrives := firstTime(leg.ScheduledArrival, effectiveArrival(*leg))
-		if arrives == nil || arrives.After(scheduled) || arrives.Before(scheduled.Add(-25*time.Hour)) {
-			continue
-		}
-		if inbound == nil || arrives.After(*firstTime(inbound.ScheduledArrival, effectiveArrival(*inbound))) {
-			inbound = leg
-		}
-	}
-	if inbound != nil {
+	if inbound := inboundLeg(flight, rotation, now); inbound != nil {
 		ready := effectiveArrival(*inbound).Add(40 * time.Minute)
-		if ready.After(scheduled) {
+		features.InboundDelayMinutes = max(0, ready.Sub(scheduled).Minutes())
+		if features.InboundDelayMinutes > 0 {
 			reasons = append(reasons, fmt.Sprintf("Inbound flight %s needs time to arrive and turn around.", inbound.Number))
-			if ready.After(lower) {
-				lower = ready
-			}
 		}
 	}
 	for _, a := range advisories {
 		at := advisoryTime(flight, a)
-		if at == nil || a.Kind == "airport_restriction" {
+		if at == nil || a.Kind == "airport_restriction" || a.ObservedAt.After(now) {
 			continue
 		}
 		if at.Before(now) {
@@ -61,27 +92,90 @@ func Predict(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Ad
 		if a.StartsAt != nil && a.StartsAt.After(*at) || a.EndsAt != nil && !a.EndsAt.After(*at) {
 			continue
 		}
+		hasDelay := a.DelayMinutes != nil && *a.DelayMinutes > 0 && *a.DelayMinutes <= 1440
 		if a.Reason != "" {
-			reasons = append(reasons, fmt.Sprintf("%s reports %s at %s.", a.Source, a.Reason, a.Airport))
+			reasons = append(reasons, fmt.Sprintf("%s reports %s at %s.", advisorySourceName(a.Source), a.Reason, a.Airport))
+		} else if hasDelay || a.Kind == "ground_stop" && a.EndsAt != nil {
+			reasons = append(reasons, fmt.Sprintf("%s reports an operational delay at %s.", advisorySourceName(a.Source), a.Airport))
 		}
-		if a.DelayMinutes != nil && *a.DelayMinutes > 0 && *a.DelayMinutes <= 1440 {
-			lower = maxTime(lower, scheduled.Add(time.Duration(*a.DelayMinutes)*time.Minute))
+		if hasDelay {
+			features.AirportDelayMinutes = max(features.AirportDelayMinutes, float64(*a.DelayMinutes))
 		}
 		if a.Kind == "ground_stop" && a.EndsAt != nil {
-			lower = maxTime(lower, *a.EndsAt)
+			features.GroundStopMinutes = max(features.GroundStopMinutes, a.EndsAt.Sub(scheduled).Minutes())
 		}
+		reason := strings.ToLower(a.Reason)
+		features.Weather = features.Weather || containsAny(reason, "weather", "thunderstorm", "low visibility", "lightning", "wind", "fog", "snow", "deicing", "de-icing", "icing", "hail")
+		features.AirTrafficControl = features.AirTrafficControl || containsAny(reason, "atc", "staffing", "airport volume", "capacity", "congestion", "traffic management")
 	}
-	if len(reasons) == 0 {
-		return nil
-	}
-	return &Prediction{Departure: &lower, DelayMinutes: int(lower.Sub(scheduled).Minutes()), Reasons: reasons, Method: "operational_estimate"}
+	return features, reasons, true
 }
 
-func maxTime(a, b time.Time) time.Time {
-	if a.Before(b) {
-		return b
+func inboundLeg(flight feeds.Flight, rotation []feeds.Flight, now time.Time) *feeds.Flight {
+	scheduled := *flight.ScheduledDeparture
+	var inbound *feeds.Flight
+	var selectedTime time.Time
+	for i := range rotation {
+		leg := &rotation[i]
+		if leg.ID == flight.ID || leg.ObservedAt.After(now) || leg.Status == "cancelled" || leg.Status == "diverted" {
+			continue
+		}
+		sameAirport := leg.Destination != "" && leg.Destination == flight.Origin
+		if leg.DestinationICAO != "" && flight.OriginICAO != "" {
+			sameAirport = leg.DestinationICAO == flight.OriginICAO
+		}
+		if !sameAirport || effectiveArrival(*leg) == nil {
+			continue
+		}
+		arrives := firstTime(leg.ScheduledArrival, effectiveArrival(*leg))
+		if arrives.After(scheduled) || arrives.Before(scheduled.Add(-25*time.Hour)) {
+			continue
+		}
+		if inbound == nil || arrives.After(selectedTime) {
+			inbound, selectedTime = leg, *arrives
+		}
 	}
-	return a
+	return inbound
+}
+
+func containsAny(value string, fragments ...string) bool {
+	for _, fragment := range fragments {
+		if strings.Contains(value, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func advisorySourceName(source string) string {
+	switch source {
+	case "faa_nas", feeds.FAASWIM:
+		return "FAA"
+	case feeds.Eurocontrol:
+		return "EUROCONTROL"
+	case "":
+		return "An airport advisory"
+	default:
+		return source
+	}
+}
+
+func learnedReason(contributions []predict.Contribution) string {
+	labels := map[string]string{
+		"airline_delay": "the airline's estimate", "inbound_turnaround": "inbound aircraft timing",
+		"airport_delay": "reported airport delays", "ground_stop": "a ground stop", "weather": "weather reports",
+		"air_traffic_control": "air traffic restrictions", "lead_time": "the time until departure",
+	}
+	var strongest predict.Contribution
+	for _, contribution := range contributions {
+		if _, ok := labels[contribution.Feature]; ok && contribution.Minutes > strongest.Minutes {
+			strongest = contribution
+		}
+	}
+	if strongest.Minutes < 1 {
+		return "The forecast uses historical departures and the current flight signals."
+	}
+	return fmt.Sprintf("In the historical model, %s adds about %.0f min above the baseline.", labels[strongest.Feature], strongest.Minutes)
 }
 
 // advisoryTime uses the published operation direction and does not attribute

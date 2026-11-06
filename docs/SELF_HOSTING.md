@@ -191,3 +191,29 @@ mkdir -p ./data
 PLANO_ADDR=127.0.0.1:8080 PLANO_DB=./data/plano.db \
   PLANO_PUBLIC_URL=http://localhost:8080 PLANO_DEMO=true ./plano
 ```
+
+## Airport routing, imports and delay models
+
+Set `PLANO_AIRPORT_TRANSFERS_FILE` to a read-only route graph if you maintain
+terminal and gate directions. [Airport transfer configuration](AIRPORT_TRANSFERS.md)
+
+Set `PLANO_BOOKING_KEY_FILE` to a read-only private key file to index imported
+booking locators. Email relays and the TripIt import have their own input
+contracts. [Flight imports](FLIGHT_IMPORTS.md)
+
+Set `PLANO_COLLECT_DELAY_SAMPLES=true` in live mode to collect one forecast
+snapshot per flight from 30 to 120 minutes before scheduled gate-out, with
+its eventual reported outcome. Confirm that your source license permits model
+training. The exporter streams completed samples without passenger details or
+raw provider flight IDs. From the running Compose project:
+
+```sh
+umask 077
+docker compose exec -T plano plano export-delay-samples > examples.jsonl
+docker compose exec -T plano plano-train -input - -output - \
+  < examples.jsonl > delay-model.json
+```
+
+The trainer reports holdout metrics on stderr and writes an artifact only if
+the default backtest gate passes. Mount a validated artifact read-only and
+set `PLANO_DELAY_MODEL_FILE` to its container path. [Delay model training](../cmd/plano-train/README.md)

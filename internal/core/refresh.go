@@ -99,7 +99,7 @@ func (r Refresher) refresh(ctx context.Context) error {
 				r.Logger.Warn("aircraft rotation refresh failed", "id", flight.ID, "error", err)
 			}
 		}
-		if err := r.Store.Observe(ctx, flight, positions, inbound, advisories); err != nil {
+		if err := r.Store.observeTracked(ctx, flight, positions, inbound, advisories); err != nil {
 			return err
 		}
 	}

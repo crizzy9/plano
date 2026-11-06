@@ -19,6 +19,7 @@ import (
 	"github.com/crizzy9/plano/internal/core"
 	"github.com/crizzy9/plano/internal/demodata"
 	"github.com/crizzy9/plano/internal/feeds"
+	"github.com/crizzy9/plano/internal/predict"
 	"github.com/crizzy9/plano/internal/push"
 )
 
@@ -32,6 +33,13 @@ func main() {
 		}
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "export-delay-samples" {
+		if err := core.ExportDelaySamples(context.Background(), env("PLANO_DB", "plano.db"), os.Stdout); err != nil {
+			logger.Error("delay sample export failed", "error", err)
 			os.Exit(1)
 		}
 		return
@@ -60,6 +68,25 @@ func run(logger *slog.Logger) error {
 	}
 	if len(enrollment) == 0 && !demo {
 		logger.Warn("live enrollment is open; restrict network access or set an enrollment code")
+	}
+	bookingKey, err := secret("", "PLANO_BOOKING_KEY_FILE")
+	if err != nil {
+		return err
+	}
+	if len(bookingKey) > 0 && len(bookingKey) < 32 {
+		return errors.New("PLANO_BOOKING_KEY_FILE requires at least 32 bytes")
+	}
+	var connections *api.ConnectionRules
+	if path := os.Getenv("PLANO_AIRPORT_TRANSFERS_FILE"); path != "" {
+		file, err := os.Open(path)
+		if err != nil {
+			return errors.New("cannot open PLANO_AIRPORT_TRANSFERS_FILE")
+		}
+		connections, err = api.LoadConnectionRules(file)
+		_ = file.Close()
+		if err != nil {
+			return fmt.Errorf("load airport transfer rules: %w", err)
+		}
 	}
 	var flights feeds.FlightSource
 	var advisories []feeds.AdvisorySource
@@ -123,7 +150,23 @@ func run(logger *slog.Logger) error {
 	if err != nil || interval < 5*time.Second || interval > 30*time.Minute {
 		return errors.New("PLANO_REFRESH_INTERVAL must be between 5s and 30m")
 	}
-	store, err := core.Open(env("PLANO_DB", "plano.db"))
+	var delayModel *predict.Model
+	if path := os.Getenv("PLANO_DELAY_MODEL_FILE"); path != "" && !demo {
+		file, err := os.Open(path)
+		if err != nil {
+			return errors.New("cannot open PLANO_DELAY_MODEL_FILE")
+		}
+		delayModel, err = predict.Load(file)
+		_ = file.Close()
+		if err != nil {
+			return fmt.Errorf("load delay model: %w", err)
+		}
+	}
+	collectSamples, err := flag("PLANO_COLLECT_DELAY_SAMPLES", false)
+	if err != nil {
+		return err
+	}
+	store, err := core.OpenWithOptions(env("PLANO_DB", "plano.db"), core.StoreOptions{DelayModel: delayModel, CollectDelaySamples: collectSamples && !demo})
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -151,7 +194,7 @@ func run(logger *slog.Logger) error {
 			}
 		})
 	}
-	handler := api.Server{Store: store, Source: flights, PublicURL: publicURL, EnrollmentCode: string(enrollment), Demo: demo, Logger: logger}.Handler()
+	handler := api.Server{Store: store, Source: flights, PublicURL: publicURL, EnrollmentCode: string(enrollment), BookingKey: bookingKey, ConnectionRules: connections, Demo: demo, Logger: logger}.Handler()
 	server := &http.Server{Addr: env("PLANO_ADDR", ":8080"), Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()

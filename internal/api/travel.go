@@ -7,10 +7,10 @@ import (
 	"math"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/crizzy9/plano/internal/core"
 	"github.com/crizzy9/plano/internal/feeds"
 )
 
@@ -81,11 +81,15 @@ func first(values ...*time.Time) *time.Time {
 }
 
 type connectionResult struct {
-	Risk             string   `json:"risk"`
-	AvailableMinutes int      `json:"availableMinutes"`
-	TransferMinutes  int      `json:"transferMinutes"`
-	Airport          string   `json:"airport"`
-	Instructions     []string `json:"instructions"`
+	Risk                    string               `json:"risk"`
+	AvailableMinutes        int                  `json:"availableMinutes"`
+	TransferMinutes         int                  `json:"transferMinutes"`
+	Airport                 string               `json:"airport"`
+	Instructions            []string             `json:"instructions"`
+	MapURL                  string               `json:"mapUrl,omitempty"`
+	Precision               string               `json:"precision"`
+	ArrivalGatePrediction   *core.GatePrediction `json:"arrivalGatePrediction,omitempty"`
+	DepartureGatePrediction *core.GatePrediction `json:"departureGatePrediction,omitempty"`
 }
 
 func (s Server) connection(w http.ResponseWriter, r *http.Request, owner string) error {
@@ -111,12 +115,21 @@ func (s Server) connection(w http.ResponseWriter, r *http.Request, owner string)
 	if arrive == nil || depart == nil || in.Destination == "" || in.Destination != out.Origin {
 		return errInvalid
 	}
-	result := estimateConnection(in, out, *arrive, *depart)
+	route, configured := s.ConnectionRules.Route(in.Destination, in.DestinationICAO, in.ArrivalTerminal, in.ArrivalGate, out.DepartureTerminal, out.DepartureGate)
+	result := estimateConnection(in, out, *arrive, *depart, route, configured)
+	result.ArrivalGatePrediction, err = s.Store.PredictGate(r.Context(), in, true, time.Now())
+	if err != nil {
+		return err
+	}
+	result.DepartureGatePrediction, err = s.Store.PredictGate(r.Context(), out, false, time.Now())
+	if err != nil {
+		return err
+	}
 	respond(w, 200, result)
 	return nil
 }
 
-func estimateConnection(in, out feeds.Flight, arrival, departure time.Time) connectionResult {
+func estimateConnection(in, out feeds.Flight, arrival, departure time.Time, route ConnectionRoute, configured bool) connectionResult {
 	minutes := int(departure.Sub(arrival).Minutes())
 	transfer := 50
 	instructions := []string{"Follow connections signage at " + in.Destination + ".", "Check the gate and boarding deadline with the airline."}
@@ -131,6 +144,11 @@ func estimateConnection(in, out feeds.Flight, arrival, departure time.Time) conn
 	if out.DepartureGate != "" {
 		instructions = append(instructions, "Continue to gate "+out.DepartureGate+".")
 	}
+	precision := "generic"
+	if configured {
+		transfer, precision = route.TransferMinutes, route.Precision
+		instructions = append(append([]string{}, route.Instructions...), "Check the gate and boarding deadline with the airline.")
+	}
 	risk := "Relaxed"
 	switch {
 	case out.Status == "cancelled" || in.Status == "cancelled" || in.Status == "diverted" || minutes <= 0:
@@ -140,7 +158,7 @@ func estimateConnection(in, out feeds.Flight, arrival, departure time.Time) conn
 	case minutes < transfer+25:
 		risk = "Tight"
 	}
-	return connectionResult{risk, minutes, transfer, in.Destination, instructions}
+	return connectionResult{Risk: risk, AvailableMinutes: minutes, TransferMinutes: transfer, Airport: in.Destination, Instructions: instructions, MapURL: route.MapURL, Precision: precision}
 }
 
 type passportSegment struct {
@@ -243,68 +261,6 @@ func greatCircle(from, to airportPoint) int {
 	lat, lon := (to.lat-from.lat)*deg, (to.lon-from.lon)*deg
 	value := math.Pow(math.Sin(lat/2), 2) + math.Cos(from.lat*deg)*math.Cos(to.lat*deg)*math.Pow(math.Sin(lon/2), 2)
 	return int(math.Round(2 * 3958.76 * math.Asin(math.Sqrt(min(1, max(0, value))))))
-}
-
-var importDesignator = regexp.MustCompile(`(?i)\b([A-Z][A-Z0-9]{1,2})[ -]?([0-9]{1,5}[A-Z]?)\b`)
-var isoDate = regexp.MustCompile(`\b[0-9]{4}-[0-9]{2}-[0-9]{2}\b`)
-var icsStart = regexp.MustCompile(`(?m)^DTSTART(?:;[^:\r\n]+)?:([0-9]{4})([0-9]{2})([0-9]{2})`)
-
-func (s Server) importFlights(w http.ResponseWriter, r *http.Request, owner string) error {
-	var input struct {
-		Source string `json:"source"`
-		Text   string `json:"text"`
-		Date   string `json:"date"`
-	}
-	if err := parse(w, r, &input, 64<<10); err != nil {
-		return err
-	}
-	if input.Source != "calendar" && input.Source != "email" && input.Source != "tripit" || strings.TrimSpace(input.Text) == "" {
-		return errInvalid
-	}
-	date := input.Date
-	if date == "" {
-		dates := isoDate.FindAllString(input.Text, -1)
-		for _, match := range icsStart.FindAllStringSubmatch(input.Text, -1) {
-			dates = append(dates, strings.Join(match[1:], "-"))
-		}
-		for _, possible := range dates {
-			if date != "" && date != possible {
-				return errInvalid
-			}
-			date = possible
-		}
-	}
-	if _, err := time.Parse(time.DateOnly, date); err != nil {
-		return errInvalid
-	}
-	flights, unmatched := make([]feeds.Flight, 0), make([]string, 0)
-	seen := make(map[string]bool)
-	for _, match := range importDesignator.FindAllStringSubmatch(input.Text, 100) {
-		if len(seen) >= 8 {
-			break
-		}
-		number := strings.ToUpper(match[1] + match[2])
-		if seen[number] {
-			continue
-		}
-		seen[number] = true
-		matches, err := s.lookup(r.Context(), number, date)
-		if err != nil {
-			return err
-		}
-		if len(matches) != 1 {
-			unmatched = append(unmatched, number)
-			continue
-		}
-		flights = append(flights, matches[0])
-	}
-	for _, flight := range flights {
-		if err := s.Store.Track(r.Context(), owner, flight.ID, ""); err != nil {
-			return err
-		}
-	}
-	respond(w, 200, map[string]any{"flights": flights, "unmatched": unmatched})
-	return nil
 }
 
 // PublicOrigin rejects URL components that would put access tokens on another host.

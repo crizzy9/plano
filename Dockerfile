@@ -5,7 +5,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
-RUN CGO_ENABLED=1 GOMAXPROCS=2 go build -p 1 -trimpath -o /out/plano ./cmd/plano
+RUN CGO_ENABLED=1 GOMAXPROCS=2 go build -p 1 -trimpath -o /out/plano ./cmd/plano \
+    && CGO_ENABLED=0 GOMAXPROCS=2 go build -p 1 -trimpath -o /out/plano-train ./cmd/plano-train
 
 FROM docker.io/library/debian:bookworm-slim
 
@@ -17,7 +18,7 @@ RUN apt-get update \
     && install -d -m 0750 -o plano -g plano /data \
     && install -m 0640 -o plano -g plano /dev/null /data/.plano-volume
 
-COPY --from=build /out/plano /usr/local/bin/plano
+COPY --from=build /out/plano /out/plano-train /usr/local/bin/
 ENV PLANO_ADDR=:8080 PLANO_DB=/data/plano.db
 WORKDIR /data
 USER 10001:10001

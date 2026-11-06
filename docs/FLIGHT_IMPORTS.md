@@ -1,0 +1,29 @@
+# Import flights into Plano
+
+Open **Tools → Import flights**. Plano imports only uniquely matched flight instances, up to eight distinct dated legs per request. Split larger pasted itineraries into separate requests. A pasted confirmation can contain separate dates for each leg. iCalendar files use the event's start date. When an event provides a UTC start, Plano matches the scheduled departure instant and checks adjacent origin dates if necessary. The parser skips cancelled and recurring calendar entries. [iCalendar specification](https://www.rfc-editor.org/rfc/rfc5545.html)
+
+The mobile calendar integration requests permission before reading event titles and departure times. The optional background task sends only recognized flight designators and dates to the selected self-host. iOS and Android decide when the task can run. The import screen can also run a calendar scan on demand.
+
+## Forward confirmation emails
+
+In the import screen, generate an email relay token. Each installation has one relay credential. Generating a replacement invalidates the previous token. A relay token can submit email for import. Installation credentials are required to view tracked flights or bookings.
+
+Configure your inbound mail service or local MTA to send the complete RFC 5322 message as `message/rfc822` over HTTPS. For example, a Postfix pipe can pass the incoming message on stdin to a wrapper invoking the following command. Put `Authorization: Bearer ` followed by the relay token in a private header file readable by the relay account. [Postfix delivery architecture](https://www.postfix.org/OVERVIEW.html)
+
+```sh
+curl --fail-with-body --silent --show-error \
+  --header @/run/secrets/plano-relay.headers \
+  --header 'Content-Type: message/rfc822' \
+  --data-binary @- \
+  https://plano.example.net/v1/webhooks/email
+```
+
+Send at most 256 KiB per message. The parser recognizes plain text, HTML text, forwarded messages and calendar parts. It never follows links in the message. A `204` means all recognized legs resolved or the message was already accepted. A partial match keeps the resolved flights and returns `503` so a resend can finish the itinerary. For `422`, review the original message and enter the flight manually if needed. Retry network failures and temporary server failures through the mail system. Plano keeps a message digest for deduplication and does not retain the email body.
+
+## Import a TripIt calendar feed
+
+Enable TripIt's calendar feed and detailed itinerary items, then copy its private calendar URL into the TripIt field in Plano. Keep the URL private. Plano reads the feed over HTTPS from TripIt and adds recognized flights in pages of eight, starting with upcoming trips. Choose **Import next TripIt flights** to continue through your history. The server does not retain the URL. [TripIt calendar feed setup](https://help.tripit.com/en/support/solutions/articles/103000063280-calendar-feed-setup-and-sync) · [TripIt detailed items](https://help.tripit.com/en/support/solutions/articles/103000063363-plans-not-appearing-in-calendar)
+
+## Find an imported booking by confirmation code
+
+Set `PLANO_BOOKING_KEY_FILE` to a mounted private file containing a stable random secret of at least 32 bytes. Plano stores an installation-scoped keyed digest of a recognized six-character locator. The booking lookup returns flights already imported and still tracked by that installation. It cannot query airline reservations. Rotating the key makes previous locator digests unavailable for lookup until a fresh import.

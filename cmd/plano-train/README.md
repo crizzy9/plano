@@ -1,0 +1,21 @@
+# Train a Plano delay model
+
+Use historical flight snapshots from a source you are allowed to retain for training. Record each feature snapshot before the flight pushes back, then join it to the actual gate-out time and the time your collector learned that result. Keep one observation per stable flight instance ID at a consistent forecast lead time. Plano ships no fitted model or historical training dataset.
+
+Prepare a JSON Lines file with one object per line. This example shows the format. Its values are illustrative.
+
+```json
+{"flightId":"sample-flight-id","observedAt":"2026-11-05T14:00:00Z","scheduledDeparture":"2026-11-05T15:00:00Z","departedAt":"2026-11-05T15:38:00Z","labelObservedAt":"2026-11-05T15:40:00Z","features":{"airlineDelayMinutes":25,"inboundDelayMinutes":30,"airportDelayMinutes":20,"groundStopMinutes":0,"weather":true,"airTrafficControl":false}}
+```
+
+`core.ExtractDelayFeatures` gives historical snapshot exporters the same feature derivation used by the server. The four numeric signals measure nonnegative minutes after scheduled departure. Airline delay comes from the published departure estimate. Inbound turnaround uses the linked inbound flight's expected or actual gate arrival plus Plano's 40-minute turnaround assumption. Airport delay is the largest matching advisory delay. Ground stop minutes measure the interval between scheduled departure and a matching stop's end time. Weather and ATC flags reflect recognized language in applicable advisories. Use only records that were available at `observedAt`, including the schedule as known at that time. The target is nonnegative minutes from that schedule to gate-out. Cancelled flights and records without gate-out times have no label for this model. Use `labelObservedAt` for the first provider observation that includes gate-out. Older inputs can omit it, in which case the trainer assumes the outcome was available at `departedAt`. This assumption can overstate what the model could have learned in real time.
+
+Training accepts 32 to 100,000 unique examples, with lead times from 25 hours before to two hours after scheduled departure and labels up to 24 hours late. A split may require more examples because earlier flights whose outcomes became available at or after the holdout boundary are purged. The newest fifth of forecasts form the default holdout and never enter the fit. Forecasts with equal observation timestamps stay on the same side. The trainer needs at least 24 usable training examples and eight holdout examples.
+
+```sh
+go run ./cmd/plano-train -input examples.jsonl -output delay-model.json
+```
+
+The command reports learned coverage, mean absolute error, root mean square error, and signed bias on the later flights. `learnedOrFallback` uses the model within its observed feature ranges and the operational baseline elsewhere. `publishedEstimateBaseline` uses the airline estimate when recorded and scheduled departure otherwise. By default the trainer writes an artifact only when learned coverage is at least 50% and mean absolute error beats both baselines on that holdout. `-allow-regression` writes an artifact for offline experiments even if the comparison fails. The minimum sample counts exercise the trainer. Validate operational accuracy with representative traffic and forecast lead times before deployment.
+
+Set `PLANO_DELAY_MODEL_FILE` to the artifact path on the server. A learned result exposes its historical baseline, signed feature contributions, and the model ID alongside the published schedule and estimates. Feature contributions explain the model's estimate. Provider advisories and inbound timing retain their own evidence. Unsupported values, missing observations, and absent model files leave the operational forecast available.

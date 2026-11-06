@@ -18,13 +18,18 @@ import (
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
+	"github.com/crizzy9/plano/internal/predict"
 	"github.com/crizzy9/plano/internal/push"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 var ErrNotFound = errors.New("record not found")
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db                  *sql.DB
+	delayModel          *predict.Model
+	collectDelaySamples bool
+}
 
 type Details struct {
 	Flight     feeds.Flight     `json:"flight"`
@@ -42,7 +47,14 @@ type Device struct {
 	RequestUpdateToken bool   `json:"requestUpdateToken,omitempty"`
 }
 
-func Open(path string) (*Store, error) {
+type StoreOptions struct {
+	DelayModel          *predict.Model
+	CollectDelaySamples bool
+}
+
+func Open(path string) (*Store, error) { return OpenWithOptions(path, StoreOptions{}) }
+
+func OpenWithOptions(path string, options StoreOptions) (*Store, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -99,6 +111,23 @@ CREATE TABLE IF NOT EXISTS live_started (
   device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE, flight_id TEXT NOT NULL REFERENCES flights(id),
   PRIMARY KEY(device_id, flight_id)
 );
+CREATE TABLE IF NOT EXISTS delay_samples (
+  flight_id TEXT PRIMARY KEY REFERENCES flights(id), observed_ns INTEGER NOT NULL,
+  scheduled_ns INTEGER NOT NULL, features TEXT NOT NULL, departed_ns INTEGER, label_observed_ns INTEGER
+);
+CREATE TABLE IF NOT EXISTS email_relays (
+  owner TEXT PRIMARY KEY REFERENCES installations(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS imported_messages (
+  owner TEXT NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
+  digest TEXT NOT NULL, imported INTEGER NOT NULL, PRIMARY KEY(owner, digest)
+);
+CREATE TABLE IF NOT EXISTS bookings (
+  owner TEXT NOT NULL, flight_id TEXT NOT NULL, locator_hash TEXT NOT NULL,
+  PRIMARY KEY(owner, flight_id, locator_hash),
+  FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS bookings_by_locator ON bookings(owner, locator_hash);
 CREATE TABLE IF NOT EXISTS shares (
   token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, flight_id TEXT NOT NULL, expires INTEGER NOT NULL,
   FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
@@ -106,7 +135,7 @@ CREATE TABLE IF NOT EXISTS shares (
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, delayModel: options.DelayModel, collectDelaySamples: options.CollectDelaySamples}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -139,6 +168,13 @@ func (s *Store) Track(ctx context.Context, owner, id, seat string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := trackFlight(ctx, tx, owner, id, seat, time.Now()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func trackFlight(ctx context.Context, tx *sql.Tx, owner, id, seat string, now time.Time) error {
 	result, err := tx.ExecContext(ctx, `INSERT INTO tracked(owner, flight_id, seat)
 SELECT ?, id, ? FROM flights WHERE id = ? ON CONFLICT(owner, flight_id) DO UPDATE SET seat = CASE WHEN excluded.seat = '' THEN tracked.seat ELSE excluded.seat END`, owner, seat, id)
 	if err != nil {
@@ -157,10 +193,7 @@ SELECT ?, id, ? FROM flights WHERE id = ? ON CONFLICT(owner, flight_id) DO UPDAT
 	if err := json.Unmarshal(raw, &flight); err != nil {
 		return err
 	}
-	if err := queueCheckIn(ctx, tx, flight, time.Now()); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return queueCheckIn(ctx, tx, flight, now)
 }
 
 func (s *Store) Untrack(ctx context.Context, owner, id string) error {
@@ -271,6 +304,14 @@ func (s *Store) Details(ctx context.Context, id string) (Details, error) {
 }
 
 func (s *Store) Observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory) error {
+	return s.observe(ctx, flight, track, inbound, advisories, false)
+}
+
+func (s *Store) observeTracked(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory) error {
+	return s.observe(ctx, flight, track, inbound, advisories, true)
+}
+
+func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory, trackedRefresh bool) error {
 	if flight.ID == "" || flight.ObservedAt.IsZero() {
 		return errors.New("missing flight identity or observation time")
 	}
@@ -305,12 +346,22 @@ func (s *Store) Observe(ctx context.Context, flight feeds.Flight, track []feeds.
 		}
 
 	}
-	predict := Predict(flight, inbound, advisories, flight.ObservedAt)
-	if advisories == nil && predict == nil && len(oldPrediction) > 0 && flight.ActualDeparture == nil && !finished(flight) {
-		if err := json.Unmarshal(oldPrediction, &predict); err != nil {
+	decisionAt := flight.ObservedAt
+	for _, leg := range inbound {
+		if leg.ObservedAt.After(decisionAt) {
+			decisionAt = leg.ObservedAt
+		}
+	}
+	var predictionValue *Prediction
+	if trackedRefresh || prior.ID == "" {
+		predictionValue = PredictWithModel(s.delayModel, flight, inbound, advisories, decisionAt)
+	}
+	if (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flight.ActualDeparture == nil && flight.ActualTakeoff == nil && flight.Status != "taxi_out" && flight.Status != "airborne" && flight.Status != "landed" && !finished(flight) {
+		if err := json.Unmarshal(oldPrediction, &predictionValue); err != nil {
 			return err
 		}
 	}
+
 	if len(track) > 0 && len(oldTrack) > 0 {
 		var earlier []feeds.Position
 		if err := json.Unmarshal(oldTrack, &earlier); err != nil {
@@ -341,7 +392,7 @@ func (s *Store) Observe(ctx context.Context, flight feeds.Flight, track []feeds.
 	if err != nil {
 		return err
 	}
-	prediction, err := json.Marshal(predict)
+	prediction, err := json.Marshal(predictionValue)
 	if err != nil {
 		return err
 	}
@@ -353,6 +404,12 @@ snapshot=excluded.snapshot, observed_ns=excluded.observed_ns, telemetry=COALESCE
 		return err
 	}
 
+	if s.collectDelaySamples && trackedRefresh {
+		if err := recordDelaySample(ctx, tx, flight, inbound, advisories, decisionAt); err != nil {
+			return err
+		}
+	}
+
 	events := make([]Event, 0, 8)
 	if prior.ID != "" {
 		events = changes(prior, flight)
@@ -360,8 +417,8 @@ snapshot=excluded.snapshot, observed_ns=excluded.observed_ns, telemetry=COALESCE
 		if err := json.Unmarshal(oldPrediction, &old); err != nil {
 			return err
 		}
-		if predict != nil && predict.DelayMinutes >= 10 && (old == nil || predict.DelayMinutes >= old.DelayMinutes+10 || !slices.Equal(predict.Reasons, old.Reasons)) {
-			events = append(events, Event{Kind: "delay_prediction", Title: "Departure delay predicted", Body: fmt.Sprintf("%s · %d min later", flight.Number, predict.DelayMinutes), At: flight.ObservedAt})
+		if predictionValue != nil && predictionValue.DelayMinutes >= 10 && (old == nil || predictionValue.DelayMinutes >= old.DelayMinutes+10 || !slices.Equal(predictionValue.Reasons, old.Reasons)) {
+			events = append(events, Event{Kind: "delay_prediction", Title: "Departure delay predicted", Body: fmt.Sprintf("%s · %d min later", flight.Number, predictionValue.DelayMinutes), At: flight.ObservedAt})
 		}
 	}
 	for _, a := range advisories {
