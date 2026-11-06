@@ -1101,12 +1101,21 @@ CASE WHEN ? THEN EXISTS(SELECT 1 FROM flights f WHERE f.id=o.flight_id
 		job.message.InboundLegID = ""
 	}
 	err = sender.Send(attempt, job.target, job.message)
+	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		// Shutdown interrupted transport without a provider result. Keep the
+		// existing lease so a later dispatcher can recover the job.
+		return
+	}
 	if err != nil {
 		logger.Warn("push delivery failed", "job", job.id, "platform", job.target.Platform)
 	} else {
 		logger.Debug("push accepted by provider", "job", job.id, "platform", job.target.Platform, "request_ms", time.Since(start).Milliseconds(), "observation_to_send_ms", start.Sub(job.message.Timestamp).Milliseconds())
 	}
-	if err := s.resolve(ctx, job, err, time.Now()); err != nil && ctx.Err() == nil {
+	// The dispatcher waits for its workers before closing SQLite. Persist a
+	// returned transport result even if the shutdown signal just arrived.
+	finish, cancelFinish := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancelFinish()
+	if err := s.resolve(finish, job, err, time.Now()); err != nil {
 		logger.Error("could not resolve push job", "job", job.id, "error", err)
 	}
 }

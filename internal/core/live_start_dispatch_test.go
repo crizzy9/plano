@@ -162,6 +162,49 @@ SELECT 1 FROM live_started WHERE device_id=? AND flight_id=?
 	}
 }
 
+func TestDispatcherPersistsLiveStartOutcomeDuringShutdown(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sendErr  error
+		accepted bool
+		attempts int
+	}{
+		{name: "provider accepted", accepted: true, attempts: 1},
+		{name: "provider rejected with retry", sendErr: &push.DeliveryError{Provider: "APNs", Status: 429, Retryable: true}, attempts: 1},
+		{name: "transport cancelled", sendErr: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newLiveStartDispatchFixture(t, "ios")
+			job := fixture.claimStart(t, fixture.now.Add(time.Second))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			called := false
+			fixture.store.deliver(ctx, pushFunc(func(context.Context, push.Target, push.Message) error {
+				called = true
+				cancel()
+				return tc.sendErr
+			}), slog.New(slog.DiscardHandler), job)
+			if !called {
+				t.Fatal("eligible start did not reach transport")
+			}
+			var done, confirmed bool
+			var attempts int
+			var lease int64
+			err := fixture.store.db.QueryRowContext(t.Context(), `SELECT done,attempts,lease_until,EXISTS(
+SELECT 1 FROM live_start_confirmations c WHERE c.device_id=o.device_id AND c.flight_id=o.flight_id
+) FROM outbox o WHERE o.id=?`, job.id).Scan(&done, &attempts, &lease, &confirmed)
+			wantLease := int64(0)
+			if tc.attempts == 0 {
+				wantLease = job.lease
+			}
+			if err != nil || done != tc.accepted || confirmed != tc.accepted || attempts != tc.attempts || lease != wantLease {
+				t.Fatalf("done=%t confirmed=%t attempts=%d lease=%d, want done and confirmed=%t attempts=%d lease=%d: %v",
+					done, confirmed, attempts, lease, tc.accepted, tc.attempts, wantLease, err)
+			}
+		})
+	}
+}
+
 type liveStartDispatchFixture struct {
 	store  *Store
 	owner  string

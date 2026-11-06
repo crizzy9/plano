@@ -48,6 +48,16 @@ func TestSubscriptionCalendarUsesCurrentEventRevision(t *testing.T) {
 			"SEQUENCE:2\nDTSTART:20261201T120000Z\nSUMMARY:Flight UA456\n", ""},
 		{"newer cancellation", "SEQUENCE:1\n" + earlier, "SEQUENCE:2\nSTATUS:CANCELLED\n", ""},
 		{"older cancellation", "SEQUENCE:1\nSTATUS:CANCELLED\n", "SEQUENCE:2\n" + revised, "UA456"},
+		{"same sequence older cancellation", "SEQUENCE:2\nDTSTAMP:20261105T120000Z\nSTATUS:CANCELLED\n",
+			"SEQUENCE:2\nDTSTAMP:20261106T120000Z\n" + revised, "UA456"},
+		{"same sequence newer cancellation", "SEQUENCE:2\nDTSTAMP:20261106T120000Z\nSTATUS:CANCELLED\n",
+			"SEQUENCE:2\nDTSTAMP:20261105T120000Z\n" + revised, ""},
+		{"same sequence same timestamp", "SEQUENCE:2\nDTSTAMP:20261106T120000Z\nSTATUS:CANCELLED\n",
+			"SEQUENCE:2\nDTSTAMP:20261106T120000Z\n" + revised, ""},
+		{"same sequence unknown cancellation timestamp", "SEQUENCE:2\nDTSTAMP:20261306T120000Z\nSTATUS:CANCELLED\n",
+			"SEQUENCE:2\nDTSTAMP:20261106T120000Z\n" + revised, ""},
+		{"higher cancellation sequence beats timestamp", "SEQUENCE:3\nDTSTAMP:20261105T120000Z\nSTATUS:CANCELLED\n",
+			"SEQUENCE:2\nDTSTAMP:20261106T120000Z\n" + revised, ""},
 		{"recurrence exception", "SEQUENCE:1\n" + earlier,
 			"SEQUENCE:2\nRECURRENCE-ID:20261208T120000Z\n" + revised, "UA123"},
 		{"new recurring master", "SEQUENCE:1\n" + earlier,
@@ -66,6 +76,21 @@ func TestSubscriptionCalendarUsesCurrentEventRevision(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSubscriptionCalendarRetainsUnstampedCancellation(t *testing.T) {
+	const event = "BEGIN:VEVENT\nUID:trip@example.test\nSEQUENCE:2\n"
+	const confirmation = event + "DTSTAMP:20261106T120000Z\nDTSTART:20261209T120000Z\nSUMMARY:Flight UA456\nEND:VEVENT\n"
+	const cancelled = event + "STATUS:CANCELLED\n"
+	const unstamped = cancelled + "END:VEVENT\n"
+	const earlier = cancelled + "DTSTAMP:20261105T120000Z\nEND:VEVENT\n"
+	for _, events := range []string{unstamped + earlier, earlier + unstamped} {
+		feed := "BEGIN:VCALENDAR\n" + events + confirmation + "END:VCALENDAR\n"
+		got, err := SubscriptionCalendar(feed, "2026-12-07")
+		if err != nil || len(got.Legs) != 0 {
+			t.Fatalf("same-sequence confirmation superseded unstamped cancellation: %+v, %v", got, err)
+		}
 	}
 }
 

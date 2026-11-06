@@ -45,6 +45,10 @@ type calendarRevision struct {
 	stamp    string // validated UTC DTSTAMP, ordered lexically
 }
 
+func (r calendarRevision) after(other calendarRevision) bool {
+	return r.sequence > other.sequence || r.sequence == other.sequence && r.stamp > other.stamp
+}
+
 type calendarRange struct{ start, end int }
 
 // METHOD belongs to the calendar object and can occur after its events. Scan
@@ -162,7 +166,7 @@ func (input calendarInput) latestConfirmedRevisions() map[string]calendarRevisio
 			return
 		}
 		previous, found := latest[event.uid]
-		if !found || event.sequence > previous.sequence || event.sequence == previous.sequence && event.stamp > previous.stamp {
+		if !found || event.calendarRevision.after(previous) {
 			latest[event.uid] = event.calendarRevision
 		}
 	})
@@ -195,10 +199,8 @@ func (input calendarInput) confirmed(limit int, from string, cancellations *cale
 		if cancelledUID && localDepartures == nil {
 			return
 		}
-		if revision, found := latest[event.uid]; found && !cancelledUID {
-			if event.sequence < revision.sequence || event.sequence == revision.sequence && event.stamp < revision.stamp {
-				return
-			}
+		if revision, found := latest[event.uid]; found && !cancelledUID && revision.after(event.calendarRevision) {
+			return
 		}
 		start := calendarDay(event.start)
 		if start == "" || start < from {
@@ -244,7 +246,7 @@ func (input calendarInput) confirmed(limit int, from string, cancellations *cale
 
 type calendarCancellations struct {
 	recognized bool
-	sequences  map[string]int
+	revisions  map[string]calendarRevision
 	schedules  map[Leg]bool // true when a cancellation for this schedule omitted UID
 	textLegs   map[Leg]bool
 	notices    emailCancellationNotices
@@ -265,15 +267,18 @@ func (input calendarInput) collectCancellations(cancellations *calendarCancellat
 		recognized = true
 		if !cancellations.recognized {
 			cancellations.recognized = true
-			cancellations.sequences = make(map[string]int)
+			cancellations.revisions = make(map[string]calendarRevision)
 			cancellations.schedules = make(map[Leg]bool)
 			cancellations.textLegs = make(map[Leg]bool)
 		}
 		// A recurrence-specific cancellation does not cancel a whole event UID.
 		if event.uid != "" && event.recurrence == "" {
-			sequence, ok := cancellations.sequences[event.uid]
-			if !ok || sequence < event.sequence {
-				cancellations.sequences[event.uid] = event.sequence
+			previous, found := cancellations.revisions[event.uid]
+			// Keep an unknown timestamp at the highest sequence. It can only
+			// be superseded by a confirmation at a higher sequence.
+			if !found || event.sequence > previous.sequence ||
+				event.sequence == previous.sequence && previous.stamp != "" && (event.stamp == "" || event.calendarRevision.after(previous)) {
+				cancellations.revisions[event.uid] = event.calendarRevision
 			}
 		}
 		if event.start == "" {
@@ -297,8 +302,11 @@ func (input calendarInput) collectCancellations(cancellations *calendarCancellat
 }
 
 func (cancellations *calendarCancellations) matchesUID(event calendarEvent) bool {
-	sequence, ok := cancellations.sequences[event.uid]
-	return ok && sequence >= event.sequence
+	revision, found := cancellations.revisions[event.uid]
+	if !found || revision.sequence != event.sequence {
+		return found && revision.sequence > event.sequence
+	}
+	return revision.stamp == "" || !event.calendarRevision.after(revision)
 }
 
 func (cancellations *calendarCancellations) matchesSchedule(event calendarEvent, leg Leg) bool {

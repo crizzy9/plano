@@ -173,7 +173,8 @@ func TestTripItSubscriptionIsPrivateAndDoesNotRetrackRemovedFlights(t *testing.T
 	const input = `{"url":"webcal://tripit.com` + privatePath + `"}`
 	calendar := fmt.Sprintf("BEGIN:VCALENDAR\r\n"+
 		"BEGIN:VEVENT\r\nUID:trip@example.test\r\nSEQUENCE:1\r\nDTSTART:%sT150000Z\r\nSUMMARY:Flight UA123\r\nEND:VEVENT\r\n"+
-		"BEGIN:VEVENT\r\nUID:trip@example.test\r\nSEQUENCE:2\r\nDTSTART:%sT150000Z\r\nSUMMARY:Flight UA123\r\nEND:VEVENT\r\n"+
+		"BEGIN:VEVENT\r\nUID:trip@example.test\r\nSEQUENCE:2\r\nDTSTAMP:20200101T120000Z\r\nSTATUS:CANCELLED\r\nEND:VEVENT\r\n"+
+		"BEGIN:VEVENT\r\nUID:trip@example.test\r\nSEQUENCE:2\r\nDTSTAMP:20200101T130000Z\r\nDTSTART:%sT150000Z\r\nSUMMARY:Flight UA123\r\nEND:VEVENT\r\n"+
 		"END:VCALENDAR\r\n", day.AddDate(0, 0, 1).Format("20060102"), day.Format("20060102"))
 	requests := 0
 	service.TripItSync.client = &http.Client{Transport: tripItTransport(func(r *http.Request) (*http.Response, error) {
