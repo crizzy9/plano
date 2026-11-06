@@ -14,15 +14,14 @@ import android.widget.RemoteViews
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.security.MessageDigest
 
 class PlanoFlightWidgetProvider : AppWidgetProvider() {
   override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
-    PlanoFlightWidget.refresh(context)
+    AndroidPushSession.refreshWidget(context)
   }
 
   override fun onReceive(context: Context, intent: Intent) {
-    if (intent.action == PlanoFlightWidget.REFRESH_ACTION) PlanoFlightWidget.refresh(context)
+    if (intent.action == PlanoFlightWidget.REFRESH_ACTION) AndroidPushSession.refreshWidget(context)
     else super.onReceive(context, intent)
   }
 
@@ -40,7 +39,6 @@ internal object PlanoFlightWidget {
   private data class Cache(
     val flights: MutableMap<String, WidgetFlightProgress> = mutableMapOf(),
     val stopped: MutableMap<String, Long> = mutableMapOf(),
-    val clearedAt: Long = 0,
   )
 
   // This is called only after the notification service accepts the FCM event's
@@ -49,15 +47,15 @@ internal object PlanoFlightWidget {
   fun onFlight(
     context: Context,
     flightId: String,
+    binding: String,
     started: Boolean,
     ended: Boolean,
     progress: WidgetFlightProgress?,
     sentAt: Long,
   ) {
     val now = System.currentTimeMillis()
-    val cache = read(context, now)
-    val key = flightKey(flightId)
-    if (sentAt <= cache.clearedAt) return
+    val cache = read(context, now, binding)
+    val key = hashPushIdentity(flightId)
 
     if (ended) {
       cache.flights.remove(key)
@@ -68,33 +66,36 @@ internal object PlanoFlightWidget {
       cache.stopped.remove(key)
       cache.flights[key] = progress
     }
-    write(context, cache)
+    write(context, cache, binding)
     render(context, cache, now)
   }
 
   @Synchronized
-  fun stop(context: Context, flightId: String) {
+  fun stop(context: Context, flightId: String, binding: String) {
     val now = System.currentTimeMillis()
-    val cache = read(context, now)
-    val key = flightKey(flightId)
+    val cache = read(context, now, binding)
+    val key = hashPushIdentity(flightId)
     cache.flights.remove(key)
     cache.stopped[key] = now
-    write(context, cache)
+    write(context, cache, binding)
     render(context, cache, now)
   }
 
   @Synchronized
   fun clear(context: Context) {
     val now = System.currentTimeMillis()
-    val cache = Cache(clearedAt = now)
-    write(context, cache)
-    render(context, cache, now)
+    val cache = Cache()
+    try {
+      write(context, cache, null)
+    } finally {
+      render(context, cache, now)
+    }
   }
 
   @Synchronized
-  fun refresh(context: Context) {
+  fun refresh(context: Context, binding: String?) {
     val now = System.currentTimeMillis()
-    render(context, read(context, now), now)
+    render(context, read(context, now, binding), now)
   }
 
   fun cancelRefresh(context: Context) {
@@ -162,15 +163,14 @@ internal object PlanoFlightWidget {
     WidgetFlightPhase.LANDED -> R.string.plano_widget_landed
   }
 
-  private fun flightKey(id: String) =
-    MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
-
   // The cache is app-private and excluded from Android backup/restore.
   private fun cacheFile(context: Context) = AtomicFile(File(context.noBackupFilesDir, "plano-flight-widget.json"))
 
-  private fun read(context: Context, now: Long): Cache = runCatching {
+  private fun read(context: Context, now: Long, binding: String?): Cache = runCatching {
+    if (binding == null) return Cache()
     val data = JSONObject(cacheFile(context).readFully().toString(Charsets.UTF_8))
-    val cache = Cache(clearedAt = data.optLong("clearedAt"))
+    if (data.optString("bindingKey") != hashPushIdentity(binding)) return Cache()
+    val cache = Cache()
     val flights = data.optJSONArray("flights") ?: JSONArray()
     for (index in 0 until minOf(flights.length(), MAX_CANDIDATES)) {
       val entry = flights.getJSONObject(index)
@@ -190,7 +190,7 @@ internal object PlanoFlightWidget {
     cache
   }.getOrElse { Cache() }
 
-  private fun write(context: Context, cache: Cache) {
+  private fun write(context: Context, cache: Cache, binding: String?) {
     val flights = JSONArray()
     cache.flights.entries.sortedWith(
       compareByDescending<Map.Entry<String, WidgetFlightProgress>> { it.value.phase.priority }.thenByDescending { it.value.observedAt },
@@ -200,7 +200,8 @@ internal object PlanoFlightWidget {
     }
     val stopped = JSONObject()
     cache.stopped.entries.sortedByDescending { it.value }.take(MAX_STOPPED).forEach { (key, at) -> stopped.put(key, at) }
-    val json = JSONObject().put("clearedAt", cache.clearedAt).put("flights", flights).put("stopped", stopped)
+    val json = JSONObject().put("flights", flights).put("stopped", stopped)
+    if (binding != null) json.put("bindingKey", hashPushIdentity(binding))
     val file = cacheFile(context)
     val stream = file.startWrite()
     try {

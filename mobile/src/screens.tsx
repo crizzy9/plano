@@ -339,7 +339,7 @@ export function ServerSettings({ api, error, onChange }: {
     setPending(true);
     try {
       const url = await saveServer(server, enrollmentCode.trim(), api.server);
-      if (api.server !== url) await clearLiveActivities();
+      if (api.server !== url && Platform.OS !== 'android') await clearLiveActivities();
       setEnrollmentCode('');
       setConnected(true);
       onChange(url);

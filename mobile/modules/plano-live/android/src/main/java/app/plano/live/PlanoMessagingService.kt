@@ -19,10 +19,12 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
 
   override fun onMessageReceived(remoteMessage: RemoteMessage) {
     val data = remoteMessage.data
-    when (data["type"]) {
-      "alert" -> showAlert(data, remoteMessage.messageId)
-      "live" -> showProgress(data, remoteMessage.sentTime)
-      else -> super.onMessageReceived(remoteMessage)
+    val binding = data["binding"]
+    AndroidPushSession.accept(this, binding, remoteMessage.sentTime) {
+      when (data["type"]) {
+        "alert" -> showAlert(data, remoteMessage.messageId)
+        "live" -> if (binding != null) showProgress(data, binding, remoteMessage.sentTime)
+      }
     }
   }
 
@@ -41,28 +43,26 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
       .setAutoCancel(true)
       .setContentIntent(openApp())
       .build()
-    manager.notify("plano-alert-$event", 0, notification)
+    manager.notify("plano-alert-${hashPushIdentity(event)}", 0, notification)
   }
 
-  private fun showProgress(data: Map<String, String>, sentAt: Long) {
+  private fun showProgress(data: Map<String, String>, binding: String, sentAt: Long) {
     val flightId = data["flightId"] ?: return
     val observedAt = data["observedEpoch"]?.toLongOrNull() ?: return
-    val tag = "plano-live-$flightId"
-    // FCM may redeliver or reorder data. Keep the last source time through app restarts.
-    val last = getSharedPreferences("plano-live-order", MODE_PRIVATE)
-    val lastObserved = last.getLong(flightId, 0L)
-    val lastSent = last.getLong("$flightId.sent", 0L)
-    if (observedAt < lastObserved || observedAt == lastObserved && sentAt <= lastSent) return
-    last.edit().putLong(flightId, observedAt).putLong("$flightId.sent", sentAt).apply()
+    val event = data["event"]
+    if (event !in listOf("start", "update", "end")) return
     val status = data["status"].orEmpty()
-    val ended = data["event"] == "end" || status in listOf("arrived", "cancelled")
+    val ended = event == "end" || status in listOf("arrived", "cancelled")
+    if (!ended && WidgetFlightPhase.fromStatus(status) == null) return
+    if (!AndroidPushSession.advance(this, flightId, observedAt, sentAt)) return
+    val tag = liveNotificationTag(flightId)
     val departure = data["departureEpoch"]?.toLongOrNull() ?: 0
     val arrival = data["arrivalEpoch"]?.toLongOrNull() ?: 0
     // Keep the opt-in widget independent of notification permission and pass
     // only the fields it can display. A widget host failure must not drop alerts.
     runCatching {
       PlanoFlightWidget.onFlight(
-        this, flightId, data["event"] == "start", ended,
+        this, flightId, binding, event == "start", ended,
         WidgetFlightProgress.fromEpochs(status, observedAt, departure, arrival),
         sentAt.takeIf { it > 0 } ?: epochMillis(observedAt),
       )

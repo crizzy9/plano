@@ -1,5 +1,6 @@
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
+import { disableAndroidPush, selectAndroidPushOrigin, type RetiredAndroidPush } from './live';
 
 export type FlightStatus = 'scheduled' | 'boarding' | 'taxi_out' | 'airborne'
   | 'landed' | 'arrived' | 'cancelled' | 'diverted';
@@ -115,6 +116,7 @@ export interface Device {
   token: string;
   kind: 'alert' | 'live_start' | 'live_update';
   flightId?: string;
+  binding?: string;
 }
 
 const defaultURL = process.env.EXPO_PUBLIC_API_URL || (__DEV__ ? Platform.select({
@@ -123,6 +125,10 @@ const defaultURL = process.env.EXPO_PUBLIC_API_URL || (__DEV__ ? Platform.select
 }) : '') || '';
 const hostKey = 'plano.server.v1';
 const cleanupKey = 'plano.retired-servers.v1';
+const androidCleanupKey = 'plano.retired-android-push.v1';
+const androidBindingPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const androidDeviceRequests = new Map<string, Promise<void>>();
+let drainingAndroidRetirements: Promise<void> | undefined;
 const calendarBackgroundStore = {
   keychainService: 'plano.background.v1',
   keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
@@ -133,14 +139,97 @@ async function retiredServers(): Promise<string[]> {
   return JSON.parse(await SecureStore.getItemAsync(cleanupKey) || '[]') as string[];
 }
 
-function serializeRetirement(operation: () => Promise<void>) {
+function serializeRetirement<T>(operation: () => Promise<T>) {
   const next = retirementQueue.then(operation);
-  retirementQueue = next.catch(() => {});
+  retirementQueue = next.then(() => {}, () => {});
   return next;
+}
+
+export function withActiveAndroidPushOrigin<T>(origin: string, operation: () => Promise<T>) {
+  return serializeRetirement(async () => {
+    if (Platform.OS !== 'android' || await loadServer() !== origin) return undefined;
+    return operation();
+  });
+}
+
+export function runAndroidDeviceRequest<T>(origin: string, operation: () => Promise<T>) {
+  const next = (androidDeviceRequests.get(origin) ?? Promise.resolve()).then(operation);
+  const tail = next.then(() => {}, () => {});
+  androidDeviceRequests.set(origin, tail);
+  void tail.then(() => {
+    if (androidDeviceRequests.get(origin) === tail) androidDeviceRequests.delete(origin);
+  });
+  return next;
+}
+
+async function androidRetirements(): Promise<RetiredAndroidPush[]> {
+  const pending = await SecureStore.getItemAsync(androidCleanupKey);
+  if (!pending) return [];
+  try {
+    const entries: unknown = JSON.parse(pending);
+    if (!Array.isArray(entries)) return [];
+    return entries.filter((item): item is RetiredAndroidPush => {
+      try {
+        return typeof item?.origin === 'string' && normalizeServer(item.origin) === item.origin
+          && typeof item.binding === 'string' && androidBindingPattern.test(item.binding);
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function recordAndroidRetirement(retired: RetiredAndroidPush | null) {
+  if (!retired) return;
+  const pending = await androidRetirements();
+  if (pending.some((item) => item.origin === retired.origin && item.binding === retired.binding)) return;
+  await SecureStore.setItemAsync(androidCleanupKey, JSON.stringify([...pending, retired].slice(-24)));
+}
+
+export async function initializeAndroidPushOrigin(origin: string) {
+  await withActiveAndroidPushOrigin(origin, async () => recordAndroidRetirement(await selectAndroidPushOrigin(origin)));
+}
+
+export async function disableAndroidPushForOrigin(origin: string) {
+  await serializeRetirement(async () => {
+    const retired = await disableAndroidPush(origin, null, true);
+    await SecureStore.deleteItemAsync(serverStorageKey('flight-alerts', origin));
+    await recordAndroidRetirement(retired);
+  });
+  void removeRetiredDevices(origin).catch(() => {});
+}
+
+export function deferAndroidPushRetirement(retired: RetiredAndroidPush | null) {
+  if (!retired) return Promise.resolve();
+  return serializeRetirement(() => recordAndroidRetirement(retired));
+}
+
+async function drainAndroidRetirements() {
+  const pending = await androidRetirements();
+  for (const item of pending) {
+    try {
+      await runAndroidDeviceRequest(item.origin, async () => {
+        await createAPI(item.origin).revokeDevices(item.binding);
+        await serializeRetirement(async () => {
+          const entries = await androidRetirements();
+          await SecureStore.setItemAsync(androidCleanupKey,
+            JSON.stringify(entries.filter(({ origin, binding }) => origin !== item.origin || binding !== item.binding)));
+        });
+      });
+    } catch {
+      // The native generation was already cleared. Retry this exact deletion later.
+    }
+  }
 }
 
 export function removeRetiredDevices(activeServer: string) {
   if (Platform.OS === 'web' || !activeServer) return Promise.resolve();
+  if (Platform.OS === 'android') {
+    drainingAndroidRetirements ??= drainAndroidRetirements().finally(() => { drainingAndroidRetirements = undefined; });
+    return drainingAndroidRetirements;
+  }
   return serializeRetirement(async () => {
     let pending = await retiredServers();
     for (const server of [...pending]) {
@@ -226,11 +315,18 @@ export async function saveServer(value: string, enrollmentCode?: string, previou
     globalThis.localStorage?.setItem(hostKey, url);
   } else {
     await serializeRetirement(async () => {
-      const pending = await retiredServers();
+      const current = await loadServer();
+      if (previous !== undefined && current !== previous && current !== url) {
+        throw new Error('The active Plano server changed. Try connecting again.');
+      }
+      if (Platform.OS === 'android') await recordAndroidRetirement(await selectAndroidPushOrigin(url));
       const previousBackground = await loadServer({ savedOnly: true });
       if (previousBackground && previousBackground !== url) await removeCalendarBackground(previousBackground);
-      if (previous && previous !== url && !pending.includes(previous)) pending.push(previous);
-      await SecureStore.setItemAsync(cleanupKey, JSON.stringify(pending.filter((item) => item !== url)));
+      if (Platform.OS !== 'android') {
+        const pending = await retiredServers();
+        if (previous && previous !== url && !pending.includes(previous)) pending.push(previous);
+        await SecureStore.setItemAsync(cleanupKey, JSON.stringify(pending.filter((item) => item !== url)));
+      }
       await SecureStore.setItemAsync(hostKey, url);
     });
   }
@@ -356,12 +452,15 @@ export function createAPI(server: string, options: { allowEnrollment?: boolean }
       authenticated<ImportResult>('/v1/import', {
         method: 'POST', body: JSON.stringify({ source, text, date }),
       }),
-    async revokeDevices() {
+    async revokeDevices(binding?: string) {
+      if (binding !== undefined && !androidBindingPattern.test(binding)) throw new Error('Invalid Android alert binding.');
       const token = await savedToken();
       if (!token) return;
       try {
         await request<void>(server, '/v1/devices', {
-          method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+          body: binding === undefined ? undefined : JSON.stringify({ platform: 'android', kind: 'alert', binding }),
         });
       } catch (cause) {
         if (!(cause instanceof APIError) || cause.status !== 401) throw cause;

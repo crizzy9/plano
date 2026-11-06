@@ -1,6 +1,5 @@
 package app.plano.live
 
-import android.app.NotificationManager
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -8,21 +7,30 @@ class PlanoLiveModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("PlanoLive")
 
-    AsyncFunction("stop") { flightId: String ->
+    AsyncFunction("selectAndroidPushOrigin") { origin: String ->
+      appContext.reactContext?.let { AndroidPushSession.selectOrigin(it, origin) }
+    }
+
+    AsyncFunction("androidPushStatus") { origin: String ->
+      appContext.reactContext?.let { AndroidPushSession.status(it, origin) }
+    }
+
+    AsyncFunction("enableAndroidPush") { origin: String, generation: String, explicit: Boolean ->
       val context = appContext.reactContext
-      val manager = context?.getSystemService(NotificationManager::class.java)
-      manager?.cancel("plano-live-$flightId", 0)
-      if (context != null) runCatching { PlanoFlightWidget.stop(context, flightId) }
+      context != null && AndroidPushSession.enable(context, origin, generation, explicit)
+    }
+
+    AsyncFunction("disableAndroidPush") { origin: String, expected: String?, suppress: Boolean ->
+      appContext.reactContext?.let { AndroidPushSession.disable(it, origin, expected, suppress) }
+    }
+
+    AsyncFunction("stop") { flightId: String ->
+      appContext.reactContext?.let { AndroidPushSession.stop(it, flightId) }
       Unit
     }
 
     AsyncFunction("clear") {
-      val context = appContext.reactContext
-      val manager = context?.getSystemService(NotificationManager::class.java)
-      manager?.activeNotifications?.filter { it.tag?.startsWith("plano-") == true }?.forEach {
-        manager.cancel(it.tag, it.id)
-      }
-      if (context != null) runCatching { PlanoFlightWidget.clear(context) }
+      appContext.reactContext?.let { AndroidPushSession.clear(it) }
       Unit
     }
   }
