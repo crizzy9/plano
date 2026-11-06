@@ -93,6 +93,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("GET /share/{token}", s.shared)
 	mux.HandleFunc("GET /v1/passport", s.auth(s.passport))
 	mux.HandleFunc("GET /v1/connections", s.auth(s.connection))
+	mux.HandleFunc("GET /v1/connection-suggestions", s.auth(s.connectionSuggestions))
 	mux.HandleFunc("GET /v1/connection-monitors", s.auth(s.connectionMonitors))
 	mux.HandleFunc("PUT /v1/connection-monitors", s.auth(s.connectionMonitors))
 	mux.HandleFunc("DELETE /v1/connection-monitors", s.auth(s.connectionMonitors))

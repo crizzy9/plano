@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Linking, Platform, StyleSheet, Text, View } from 'react-native';
-import type { Connection, Flight, ImportResult, ImportSource, PartnerBooking, Passport, PlanoAPI } from './api';
+import type { Connection, ConnectionSuggestion, Flight, ImportResult, ImportSource, PartnerBooking, Passport, PlanoAPI } from './api';
 import { errorText, formatDay, validDate } from './flight';
 import { Page, useRemote, type Routes, type Screen } from './screens';
 import { usePalette } from './theme';
@@ -207,6 +207,8 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
           {result.truncated && <Body>Some entries exceeded the import limit. Split the itinerary and import the remaining flights separately.</Body>}
           {result.nextOffset !== undefined && <Body>The TripIt feed has more flights to import.</Body>}
           {result.flights.length === 0 && <Body>No flights matched the details provided.</Body>}
+          {!pending && result.flights.length > 0 && <Action secondary label="Review connections"
+            onPress={() => navigation.navigate('Connection')} />}
           {result.flights.map((flight) => <FlightRow key={flight.id} flight={flight}
             onPress={() => navigation.navigate('Flight', { id: flight.id, number: flight.number, initial: flight })} />)}
           {result.unmatched.map((item, index) => <Body key={index}>Couldn’t match {item}.</Body>)}
@@ -249,32 +251,43 @@ function ConnectionGate({ direction, reported, prediction }: {
   );
 }
 
-export function ConnectionScreen({ api, initialPair }: { api: PlanoAPI; initialPair?: Routes['Connection'] }) {
-  const initialInbound = initialPair?.inbound;
-  const initialOutbound = initialPair?.outbound;
-  const load = useCallback(async () => {
-    const flights = await api.tracked();
-    if (!initialInbound || !initialOutbound) return flights;
-    const missing = [initialInbound, initialOutbound].filter((id) => !flights.some((flight) => flight.id === id));
-    if (!missing.length) return flights;
-    const selected = await api.tracked(missing);
-    return [...flights, ...selected.filter((flight) => missing.includes(flight.id))];
-  }, [api, initialInbound, initialOutbound]);
-  const { value, error, pending, refresh } = useRemote(load);
+type ConnectionPair = NonNullable<Routes['Connection']>;
+
+function suggestionLabel({ inboundNumber, outboundNumber, airport, timeZone, scheduledArrival, scheduledDeparture,
+  scheduledMinutes, source }: ConnectionSuggestion) {
+  let zone = timeZone || 'UTC';
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: zone });
+  } catch {
+    zone = 'UTC';
+  }
+  const arrival = formatDay(scheduledArrival, zone);
+  const departure = formatDay(scheduledDeparture, zone);
+  const dates = arrival === departure ? arrival : `${arrival} to ${departure}`;
+  const reason = source === 'booking' ? 'Shared imported booking code' : 'Schedule match';
+  return `${inboundNumber} to ${outboundNumber} at ${airport}\n${dates}${zone === 'UTC' ? ' UTC' : ''} · ${scheduledMinutes} min layover · ${reason}`;
+}
+
+export function ConnectionScreen({ api, initialPair }: { api: PlanoAPI; initialPair?: ConnectionPair }) {
+  const [openedPair, setOpenedPair] = useState(initialPair);
+  const load = useCallback(() => api.tracked(), [api]);
+  const { value, error, pending, refresh } = useRemote(load, !openedPair);
+  const loadSuggestions = useCallback(() => api.connectionSuggestions(), [api]);
+  const { value: suggestions, error: suggestionError, pending: suggestionsPending, refresh: refreshSuggestions } =
+    useRemote(loadSuggestions, !!api.server && !openedPair);
   const loadMonitors = useCallback(() => api.connectionMonitors(), [api]);
-  const { value: monitors, error: monitorError, refresh: refreshMonitors } = useRemote(loadMonitors, !!api.server, 30_000);
-  const [inboundID, setInboundID] = useState(initialPair?.inbound);
-  const [outboundID, setOutboundID] = useState(initialPair?.outbound);
-  const [checked, setChecked] = useState(!!initialPair);
+  const { value: monitors, error: monitorError, refresh: refreshMonitors } =
+    useRemote(loadMonitors, !!api.server && !openedPair, 30_000);
+  const [inboundID, setInboundID] = useState<string>();
+  const [outboundID, setOutboundID] = useState<string>();
+  const [checked, setChecked] = useState(false);
   const [monitorBusy, setMonitorBusy] = useState(false);
   const [monitorIssue, setMonitorIssue] = useState<string>();
   const monitorRequest = useRef<symbol | undefined>(undefined);
   useEffect(() => () => { monitorRequest.current = undefined; }, [api]);
   useEffect(() => {
     if (!initialPair) return;
-    setInboundID(initialPair.inbound);
-    setOutboundID(initialPair.outbound);
-    setChecked(true);
+    setOpenedPair(initialPair);
   }, [initialPair]);
 
   async function changeMonitoring(inbound: string, outbound: string, enabled: boolean, reportInList = false) {
@@ -293,13 +306,10 @@ export function ConnectionScreen({ api, initialPair }: { api: PlanoAPI; initialP
         monitorRequest.current = undefined;
         setMonitorBusy(false);
         refreshMonitors();
+        refreshSuggestions();
       }
     }
   }
-
-  const tracked = new Map(value?.map((flight) => [flight.id, flight]));
-  const inbound = inboundID ? tracked.get(inboundID) : undefined;
-  const outbound = outboundID ? tracked.get(outboundID) : undefined;
 
   function select(inbound?: string, outbound?: string, assess = false) {
     if (monitorRequest.current) return;
@@ -308,6 +318,28 @@ export function ConnectionScreen({ api, initialPair }: { api: PlanoAPI; initialP
     setChecked(assess);
   }
 
+  function openPair(inbound: string, outbound: string) {
+    if (monitorRequest.current) return;
+    select();
+    setOpenedPair({ inbound, outbound });
+  }
+
+  if (openedPair) {
+    return (
+      <Page key="connection-review">
+        <Action secondary disabled={monitorBusy} label="Choose another connection" onPress={() => {
+          if (monitorRequest.current) return;
+          setOpenedPair(undefined);
+        }} />
+        <TrackedConnection key={`${openedPair.inbound}:${openedPair.outbound}`} api={api} pair={openedPair}
+          monitorBusy={monitorBusy} changeMonitoring={changeMonitoring} />
+      </Page>
+    );
+  }
+
+  const tracked = new Map(value?.map((flight) => [flight.id, flight]));
+  const inbound = inboundID ? tracked.get(inboundID) : undefined;
+  const outbound = outboundID ? tracked.get(outboundID) : undefined;
   const candidates = inbound && value?.filter((flight) => {
     if (flight.id === inbound.id) return false;
     if (inbound.destinationICAO && flight.originICAO) return inbound.destinationICAO === flight.originICAO;
@@ -315,10 +347,24 @@ export function ConnectionScreen({ api, initialPair }: { api: PlanoAPI; initialP
   });
   return (
     <Page>
-      <Body>Choose two tracked flights that connect at the same airport.</Body>
+      <Body>Check how much time you have between two tracked flights.</Body>
       <ErrorMessage message={error} />
       {error && <Action secondary label="Refresh flights" onPress={refresh} />}
       {pending && !value && <Loading />}
+      {(suggestions || suggestionError || suggestionsPending) && (
+        <View style={layout.section}>
+          <Heading>Suggested connections</Heading>
+          {suggestionError && <ErrorMessage message={`Couldn’t load suggested connections. ${suggestionError}`} />}
+          {suggestionError && <Action secondary label="Retry suggested connections" busy={suggestionsPending}
+            onPress={refreshSuggestions} />}
+          {suggestionsPending && !suggestions && !suggestionError && <Body>Finding suggested connections…</Body>}
+          {suggestions?.length === 0 && !suggestionError && <Body>No suggested connections yet. You can check a pair below.</Body>}
+          {suggestions?.map((suggestion) => (
+            <Action key={`${suggestion.inbound}:${suggestion.outbound}`} secondary disabled={monitorBusy}
+              label={suggestionLabel(suggestion)} onPress={() => openPair(suggestion.inbound, suggestion.outbound)} />
+          ))}
+        </View>
+      )}
       {monitorError && (
         <View style={layout.section}>
           <ErrorMessage message={`Couldn’t load monitored connections. ${monitorError}`} />
@@ -326,7 +372,7 @@ export function ConnectionScreen({ api, initialPair }: { api: PlanoAPI; initialP
         </View>
       )}
       <ErrorMessage message={monitorIssue} />
-      {value && !!monitors?.length && (
+      {!!monitors?.length && (
         <View style={layout.section}>
           <Heading>Monitored connections</Heading>
           {monitors.map((monitor) => {
@@ -335,7 +381,8 @@ export function ConnectionScreen({ api, initialPair }: { api: PlanoAPI; initialP
             const key = `${monitor.inbound}:${monitor.outbound}`;
             if (!arriving || !departing) return (
               <View key={key} style={layout.section}>
-                <Body>{arriving?.number ?? 'Unavailable flight'} to {departing?.number ?? 'unavailable flight'} · {monitor.risk}</Body>
+                <Action secondary disabled={monitorBusy} label={`Review monitored connection · ${monitor.risk}`}
+                  onPress={() => openPair(monitor.inbound, monitor.outbound)} />
                 <Action secondary disabled={monitorBusy} label="Stop monitoring"
                   onPress={() => { void changeMonitoring(monitor.inbound, monitor.outbound, false, true); }} />
               </View>
@@ -369,6 +416,36 @@ export function ConnectionScreen({ api, initialPair }: { api: PlanoAPI; initialP
         </>
       )}
     </Page>
+  );
+}
+
+function TrackedConnection({ api, pair, monitorBusy, changeMonitoring }: {
+  api: PlanoAPI;
+  pair: ConnectionPair;
+  monitorBusy: boolean;
+  changeMonitoring: (inbound: string, outbound: string, enabled: boolean) => Promise<boolean | undefined>;
+}) {
+  const { inbound: inboundID, outbound: outboundID } = pair;
+  const load = useCallback(async () => {
+    const flights = await api.tracked([inboundID, outboundID]);
+    const inbound = flights.find((flight) => flight.id === inboundID);
+    const outbound = flights.find((flight) => flight.id === outboundID);
+    if (!inbound || !outbound) throw new Error('Both flights must still be tracked to check this connection.');
+    return { inbound, outbound };
+  }, [api, inboundID, outboundID]);
+  const { value, error, pending, refresh } = useRemote(load);
+  return (
+    <>
+      <ErrorMessage message={error} />
+      {error && <Action secondary label="Retry loading flights" busy={pending} onPress={refresh} />}
+      {!value && !error && <Loading />}
+      {value && !error && (
+        <>
+          <Heading>{value.inbound.number} to {value.outbound.number}</Heading>
+          <CheckedConnection api={api} {...value} monitorBusy={monitorBusy} changeMonitoring={changeMonitoring} />
+        </>
+      )}
+    </>
   );
 }
 

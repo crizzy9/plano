@@ -18,8 +18,9 @@ The default binds to loopback and runs on port 8080. Demo mode uses synthetic
 flight data and needs no provider accounts. The health endpoint reports
 `{"status":"ok","mode":"demo"}`.
 
-The app's search accepts demo flight `UA123` for the current date. You can
-also check the demo from a terminal with `jq` installed.
+The app's search accepts demo flights `UA123` and `UA456`. Track both for
+tomorrow's date to try a suggested connection through Newark. You can also
+check the demo from a terminal with `jq` installed.
 
 ```sh
 token=$(curl --fail --silent --show-error http://localhost:8080/v1/installations \

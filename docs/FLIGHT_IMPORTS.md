@@ -26,6 +26,10 @@ Enable TripIt's calendar feed and detailed itinerary items, then copy its privat
 
 If your server enables **Automatic TripIt sync**, you can save the same feed for recurring imports. The server encrypts the URL and checks for new upcoming flights. The sync status reports the last check and the next scheduled check. Choose **Stop TripIt sync** to remove the stored feed and stop future imports. Flights already imported remain in your list. [Self-host configuration](SELF_HOSTING.md#airport-routing-imports-and-delay-models)
 
+## Review possible connections
+
+Open **Tools → Connection Assistant** after an import. Plano suggests tracked flights that connect at the same airport and have an onward departure in the next seven days. A shared imported confirmation code can match layovers up to 24 hours. Matches based on the schedule alone have a limit of eight hours. Review the flights and choose **Monitor connection** if you want risk alerts. [Connection monitoring](AIRPORT_TRANSFERS.md#monitor-a-connection)
+
 ## Find an imported booking by confirmation code
 
 Set `PLANO_BOOKING_KEY_FILE` to a mounted private file containing a stable random secret of at least 32 bytes. Plano stores an installation-scoped keyed digest of a recognized six-character locator. The booking lookup returns flights already imported and still tracked by that installation. Rotating the key makes previous locator digests unavailable for lookup until a fresh import.

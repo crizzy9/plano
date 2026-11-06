@@ -105,11 +105,12 @@ terminals.
 
 ## Monitor a connection
 
-In Connection Assistant, select your arriving and onward tracked flights,
-check the connection, and choose **Monitor connection**. Both flights must
-connect at the same airport, with a scheduled transfer window of up to 24
-hours and an upcoming onward departure. You can save up to 32 active pairs
-per installation. Enable flight notifications on a device to receive alerts.
+In Connection Assistant, open a suggested pair or select your arriving
+and onward tracked flights. Check the connection and choose **Monitor
+connection**. Both flights must connect at the same airport, with a scheduled
+transfer window of up to 24 hours and an upcoming onward departure. You can
+save up to 32 active pairs per installation. Enable flight notifications on
+a device to receive alerts.
 Saved pairs are private to that installation.
 
 Plano checks both legs as new observations arrive and as time runs short.

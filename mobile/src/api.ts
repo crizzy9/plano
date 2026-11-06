@@ -173,6 +173,19 @@ export interface ConnectionMonitor {
   risk: string;
 }
 
+export interface ConnectionSuggestion {
+  inbound: string;
+  outbound: string;
+  inboundNumber: string;
+  outboundNumber: string;
+  airport: string;
+  timeZone?: string;
+  scheduledArrival: string;
+  scheduledDeparture: string;
+  scheduledMinutes: number;
+  source: 'booking' | 'schedule';
+}
+
 export interface GatePrediction {
   gate: string;
   samples: number;
@@ -695,6 +708,14 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
     connection: (inbound: string, outbound: string) => {
       const query = new URLSearchParams({ inbound, outbound });
       return authenticated<Connection>(`/v1/connections?${query}`);
+    },
+    async connectionSuggestions(): Promise<ConnectionSuggestion[] | undefined> {
+      try {
+        return (await authenticated<{ suggestions: ConnectionSuggestion[] }>('/v1/connection-suggestions')).suggestions ?? [];
+      } catch (error) {
+        if (error instanceof APIError && [404, 405, 501].includes(error.status)) return undefined;
+        throw error;
+      }
     },
     async connectionMonitors(): Promise<ConnectionMonitor[]> {
       try {
