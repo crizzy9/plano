@@ -56,6 +56,10 @@ func TestBuiltInConnectionDirectionsRetainGeneralTiming(t *testing.T) {
 		{airport: "DFW", arrivalGate: "A12", departureGate: "D9", arrivalTerminal: "A", departureTerminal: "D",
 			instruction: "Skylink", transfer: 65},
 		{airport: "ATL", arrivalGate: "T4", departureGate: "F3", instruction: "Plane Train", transfer: 50},
+		{airport: "SFO", arrivalGate: "A5", departureGate: "G9", arrivalTerminal: "I", departureTerminal: "I",
+			instruction: "via gate areas B, C, D, E, F", transfer: 35},
+		{airport: "LAX", arrivalGate: "42", departureGate: "64A", arrivalTerminal: "4", departureTerminal: "6",
+			instruction: "bus", transfer: 65},
 	} {
 		t.Run(tc.airport, func(t *testing.T) {
 			in := feeds.Flight{Destination: tc.airport, ArrivalGate: tc.arrivalGate, ArrivalTerminal: tc.arrivalTerminal, ScheduledArrival: &arrive}

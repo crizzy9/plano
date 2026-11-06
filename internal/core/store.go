@@ -88,6 +88,9 @@ CREATE TABLE IF NOT EXISTS flights (
 );
 CREATE INDEX IF NOT EXISTS flights_by_inbound_id ON flights(json_extract(snapshot,'$.inboundId'))
 WHERE json_extract(snapshot,'$.inboundId') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS flights_gate_history_route ON flights(
+  json_extract(snapshot,'$.number'),json_extract(snapshot,'$.origin'),json_extract(snapshot,'$.destination')
+);
 CREATE TABLE IF NOT EXISTS flight_estimate_anchors (
   flight_id TEXT PRIMARY KEY REFERENCES flights(id) ON DELETE CASCADE,
   departure DATETIME, arrival DATETIME

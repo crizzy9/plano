@@ -21,6 +21,17 @@ travelers who can stay past security.
   signs for the train serving your departure terminal. [DFW transfer guide](https://www.dfwairport.com/explore/plan/connect/)
 - ATL directions use Plane Train or the pedestrian walkway between concourses
   T and A through F. [ATL concourse connections](https://www.atl.com/maps-3/)
+- SFO directions use the secure walkways between gate areas A through G.
+  A and G occupy opposite ends of the walkway even though both serve the
+  International Terminal. Follow posted detours near Terminal 3. Travelers
+  who need U.S. entry processing should complete customs, any bag recheck,
+  and screening before following onward gate signs. [SFO connections](https://www.flysfo.com/connecting-flights-faq) · [Official maps](https://www.flysfo.com/maps/static-maps) · [Terminal 3 construction](https://www.flysfo.com/about/construction/terminal-3-construction)
+- LAX directions use the secure terminal connectors and the passenger tunnel
+  between Terminal B and its West Gates. Terminal 5 construction closes the
+  through tunnel. For transfers between Terminals 4 and 6, confirm the secure
+  bus with airport staff and follow posted signs. Trips involving unknown
+  gates or remote gates in the 50s use the official map and general guidance.
+  [LAX connector map](https://www.flylax.com/sites/lax/files/2025-12/Terminal%20Connections%20Pedestrian%20Path%2025-1222.pdf) · [LAWA construction notice](https://www.lawa.org/sites/lawa/files/2025-10/Construction%20Hot%20Topics_10.27.25.pdf) · [Terminal 5 status](https://www.flylax.com/terminals/terminal5)
 
 These directions use the general transfer estimate and boarding reserve for
 risk scoring. The official map remains available when gate information is
@@ -125,8 +136,9 @@ connection window also results in **Missed**.
 When comparable flights suggest a gate and that gate identifies a more
 precise airport path, Plano can show its duration including the configured
 buffer. The risk score uses the longer of that duration and the main
-estimate with its boarding allowance. Directions use reported gates and
-terminals.
+estimate with its boarding allowance. Gate history counts each verified
+flight instance once and uses the reported terminal when available.
+Directions use reported gates and terminals.
 
 ## Monitor a connection
 

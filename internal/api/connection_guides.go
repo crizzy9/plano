@@ -18,10 +18,10 @@ var airportConnectionGuides = []airportConnectionGuide{
 		func(in, out feeds.Flight) []string { return seaConnectionDirections(in.ArrivalGate, out.DepartureGate) }},
 	{"DFW", "KDFW", "https://www.dfwairport.com/map/", "https://www.dfwairport.com/explore/plan/connect/", dfwConnectionDirections},
 	{"ATL", "KATL", "https://www.atl.com/maps/", "https://www.atl.com/maps-3/", atlConnectionDirections},
-	{iata: "SFO", icao: "KSFO", mapURL: "https://www.flysfo.com/maps"},
+	{"SFO", "KSFO", "https://www.flysfo.com/maps", "https://www.flysfo.com/connecting-flights-faq", sfoConnectionDirections},
 	{iata: "EWR", icao: "KEWR", mapURL: "https://www.newarkairport.com/explore-ewr/airport-map"},
 	{iata: "JFK", icao: "KJFK", mapURL: "https://www.jfkairport.com/explore-jfk/airport-map"},
-	{iata: "LAX", icao: "KLAX", mapURL: "https://www.flylax.com/lax-terminal-maps"},
+	{"LAX", "KLAX", "https://www.flylax.com/lax-terminal-maps", "https://www.flylax.com/sites/lax/files/2025-12/Terminal%20Connections%20Pedestrian%20Path%2025-1222.pdf", laxConnectionDirections},
 	{iata: "ORD", icao: "KORD", mapURL: "https://maps.ord.flychicago.com/"},
 }
 
@@ -55,7 +55,7 @@ func (r *ConnectionRules) routeForConnection(in, out feeds.Flight) (ConnectionRo
 	return route, configured
 }
 
-var guideGatePattern = regexp.MustCompile(`^([A-Z])(?:0?[1-9]|[1-9][0-9])[A-Z]?$`)
+var guideGatePattern = regexp.MustCompile(`^([A-Z])(0?[1-9]|[1-9][0-9])[A-Z]?$`)
 
 func gateConcourse(gate, allowed string) string {
 	match := guideGatePattern.FindStringSubmatch(connectionCode(gate))
