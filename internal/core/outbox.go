@@ -497,7 +497,11 @@ func enqueueWithAdvisories(ctx context.Context, tx *sql.Tx, flightID string, msg
 	if err != nil {
 		return err
 	}
-	return linkOutboxAdvisories(ctx, tx, jobs, evidence)
+	jobIDs, err := readOutboxJobIDs(jobs)
+	if err != nil || len(jobIDs) == 0 {
+		return err
+	}
+	return linkOutboxAdvisories(ctx, tx, jobIDs, evidence)
 }
 
 type deliveryJob struct {
@@ -529,6 +533,7 @@ func (s *Store) claimForPlatform(ctx context.Context, now time.Time, limit int, 
 	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.device_id,d.registered,o.attempts,d.owner,d.platform,d.token,COALESCE(b.binding,''),o.message
 FROM outbox o JOIN devices d ON d.id=o.device_id LEFT JOIN device_bindings b ON b.device_id=d.id
 WHERE o.done=0 AND o.due<=? AND o.expires>? AND o.lease_until<=?`+platformFilter+` AND NOT `+dirtyConnectionAlert+`
+AND NOT `+revokedFriendAlert+`
 AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
   SELECT 1 FROM outbox older WHERE older.device_id=o.device_id AND older.flight_id=o.flight_id AND older.id<o.id
   AND older.done=0 AND older.expires>? AND json_extract(older.message,'$.Kind') <> 'alert'
@@ -706,7 +711,7 @@ func (s *Store) deliver(ctx context.Context, sender PushSender, logger *slog.Log
 	// Revoking a device or untracking a flight can remove a leased row. Check
 	// the lease again at the transport boundary without holding a transaction.
 	var expires int64
-	var connectionDirty, hasAdvisoryEvidence bool
+	var connectionDirty, hasAdvisoryEvidence, friendAlert bool
 	var flightEventKind, flightPhase string
 	var latestFlight, latestForecast, latestRotation []byte
 	var newerFlightEvent bool
@@ -714,6 +719,7 @@ func (s *Store) deliver(ctx context.Context, sender PushSender, logger *slog.Log
 	const leasedRow = ` FROM outbox o` + leaseFilter
 	err := s.db.QueryRowContext(ctx, `SELECT o.expires, `+dirtyConnectionAlert+`,
 EXISTS(SELECT 1 FROM outbox_advisory_evidence WHERE outbox_id=o.id),
+EXISTS(SELECT 1 FROM outbox_friend_jobs WHERE outbox_id=o.id),
 COALESCE(json_extract(e.data,'$.kind'),''), COALESCE(json_extract(f.snapshot,'$.status'),''), f.snapshot,
 CASE WHEN json_extract(e.data,'$.kind')='delay_prediction' THEN f.prediction END,
 CASE WHEN json_extract(e.data,'$.kind')='delay_prediction' THEN f.inbound END,
@@ -724,7 +730,7 @@ EXISTS(SELECT 1 FROM events newer WHERE newer.flight_id=e.flight_id AND newer.at
   AND EXISTS(SELECT 1 FROM outbox replacement WHERE replacement.device_id=o.device_id AND replacement.flight_id=o.flight_id
     AND json_extract(replacement.message,'$.CollapseID')=newer.id))
 FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leaseFilter,
-		job.id, job.deviceID, job.lease).Scan(&expires, &connectionDirty, &hasAdvisoryEvidence,
+		job.id, job.deviceID, job.lease).Scan(&expires, &connectionDirty, &hasAdvisoryEvidence, &friendAlert,
 		&flightEventKind, &flightPhase, &latestFlight, &latestForecast, &latestRotation, &newerFlightEvent)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
@@ -899,6 +905,20 @@ SELECT o.id,1`+leasedRow+` ON CONFLICT(outbox_id) DO UPDATE SET may_have_sent=1`
 			return
 		}
 		if authorized, err := result.RowsAffected(); err != nil || authorized != 1 {
+			return
+		}
+	}
+	if friendAlert {
+		var revoked bool
+		err := s.db.QueryRowContext(attempt, `SELECT `+revokedFriendAlert+leasedRow, job.id, job.deviceID, job.lease).Scan(&revoked)
+		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) && attempt.Err() == nil {
+				logger.Error("could not authorize friend push", "job", job.id, "error", err)
+			}
+			return
+		}
+		if revoked {
+			s.removeObsoletePush(ctx, logger, job)
 			return
 		}
 	}

@@ -127,11 +127,14 @@ interface FlightScreenData {
   savedAt?: string;
 }
 
+export type FriendAlertMode = 'off' | 'arrival' | 'all';
+
 export interface Friend {
   id: string;
   alias: string;
   direction: 'outgoing' | 'incoming';
   flightIds: string[];
+  alertMode?: FriendAlertMode;
 }
 
 export interface Friends {
@@ -850,6 +853,8 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
     },
     setFriendFlight: (id: string, flightId: string, shared: boolean) =>
       authenticated<void>(`${friendPath(id)}/flights/${encodeURIComponent(flightId)}`, { method: shared ? 'PUT' : 'DELETE' }),
+    setFriendAlerts: (id: string, mode: FriendAlertMode) =>
+      authenticated<void>(`${friendPath(id)}/alerts`, { method: 'PUT', body: JSON.stringify({ mode }) }),
     removeFriend: (id: string) => authenticated<void>(friendPath(id), { method: 'DELETE' }),
     connection: (inbound: string, outbound: string) => {
       const query = new URLSearchParams({ inbound, outbound });

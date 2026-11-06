@@ -8,6 +8,12 @@ The connection shares no flights initially. The sender enables each flight separ
 
 The Friends response carries flight information and display names. It leaves seats, bookings, device data, and local receiver tracks in their own installation scopes. A revoked share does not affect ordinary flight search for public provider status.
 
+### Alerts for shared flights
+
+Under **Shared with you**, choose the alert level for each friend. Alerts start off. **Arrivals** sends landing and gate arrival updates. **All updates** also sends flight status changes such as gate changes, delays, takeoff, and baggage. Enable Plano notifications on the device to receive alerts. [Push setup](SELF_HOSTING.md#enable-live-data-and-push)
+
+Alerts apply to new events on flights your friend has shared. A shared flight stays out of your Passport unless you track it yourself. Plano queues one alert per device and event even if you already track the flight or multiple friends share it. Changing your preference or revoking a share removes its authorization for queued alerts. Alerts already submitted to a push provider can still arrive.
+
 ## Public pickup links
 
 On a tracked flight, tap **Share live link** to generate a 72-hour link. The pickup page distinguishes scheduled, estimated, and actual gate arrival. A diversion asks the viewer to check the pickup airport with the airline. It refreshes while the flight is active.

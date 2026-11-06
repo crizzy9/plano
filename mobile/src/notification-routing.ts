@@ -161,8 +161,14 @@ export function useNotificationRouting(
       }
       const { flightId, connectionInboundId } = route;
       const ids = connectionInboundId ? [flightId, connectionInboundId] : [flightId];
-      const tracked = await createAPI(serverAtTap, { access: 'existing-installation' }).tracked(ids);
-      const destination = notificationDestination(route, tracked);
+      const api = createAPI(serverAtTap, { access: 'existing-installation' });
+      let destination = notificationDestination(route, await api.tracked(ids));
+      if (!currentTap()) return;
+      if (!destination && !widgetKey && !connectionInboundId) {
+        const { flights } = await api.friends();
+        const shared = flights.find(({ flight }) => flight.id === flightId);
+        if (shared) destination = notificationDestination(route, [shared.flight]);
+      }
       if (!destination || !currentTap()) return;
       const open = () => {
         if (!currentTap() || !navigation.isReady()) return;

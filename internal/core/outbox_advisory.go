@@ -40,26 +40,26 @@ WHERE e.outbox_id=? AND e.source=? AND c.observed_ns>e.observed_ns AND c.observe
 	return cancelled, err
 }
 
-func linkOutboxAdvisories(ctx context.Context, tx *sql.Tx, jobs *sql.Rows, evidence []forecastAdvisory) error {
+func readOutboxJobIDs(jobs *sql.Rows) ([]byte, error) {
 	defer jobs.Close()
 	var ids []int64
 	for jobs.Next() {
 		var id int64
 		if err := jobs.Scan(&id); err != nil {
-			return err
+			return nil, err
 		}
 		ids = append(ids, id)
 	}
 	if err := jobs.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := jobs.Close(); err != nil || len(ids) == 0 {
-		return err
+		return nil, err
 	}
-	jobIDs, err := json.Marshal(ids)
-	if err != nil {
-		return err
-	}
+	return json.Marshal(ids)
+}
+
+func linkOutboxAdvisories(ctx context.Context, tx *sql.Tx, jobIDs []byte, evidence []forecastAdvisory) error {
 	observations, err := json.Marshal(evidence)
 	if err != nil {
 		return err

@@ -15,6 +15,7 @@ func (s Server) registerFriendRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/friends", s.auth(s.friends))
 	mux.HandleFunc("POST /v1/friends/invites", s.auth(s.createFriendInvite))
 	mux.HandleFunc("POST /v1/friends/accept", s.auth(s.acceptFriendInvite))
+	mux.HandleFunc("PUT /v1/friends/{id}/alerts", s.auth(s.setFriendAlerts))
 	mux.HandleFunc("PUT /v1/friends/{id}/flights/{flightId}", s.auth(s.friendFlight))
 	mux.HandleFunc("DELETE /v1/friends/{id}/flights/{flightId}", s.auth(s.friendFlight))
 	mux.HandleFunc("DELETE /v1/friends/{id}", s.auth(s.removeFriend))
@@ -68,6 +69,27 @@ func (s Server) acceptFriendInvite(w http.ResponseWriter, r *http.Request, owner
 	respond(w, http.StatusCreated, struct {
 		Friend core.Friend `json:"friend"`
 	}{Friend: friend})
+	return nil
+}
+
+func (s Server) setFriendAlerts(w http.ResponseWriter, r *http.Request, owner string) error {
+	id := r.PathValue("id")
+	if !friendIDPattern.MatchString(id) {
+		return errInvalid
+	}
+	var input struct {
+		Mode string `json:"mode"`
+	}
+	if err := parse(w, r, &input, 2048); err != nil {
+		return err
+	}
+	if err := s.Store.SetFriendAlertMode(r.Context(), owner, id, input.Mode); err != nil {
+		if errors.Is(err, core.ErrInvalidFriend) {
+			return errInvalid
+		}
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
 

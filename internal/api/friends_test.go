@@ -97,7 +97,7 @@ func TestFriendsDirectedFlightGrantsAndPickupLinkIsolation(t *testing.T) {
 	accept(owner, code, "Pilot", 400)
 	friend := accept(viewer, code, "Pickup", 201)
 	accept(outsider, code, "Unrelated", 404)
-	if friend.Direction != "incoming" || friend.Alias != "Pilot" || friend.FlightIDs == nil || len(friend.FlightIDs) != 0 {
+	if friend.Direction != "incoming" || friend.Alias != "Pilot" || friend.FlightIDs == nil || len(friend.FlightIDs) != 0 || friend.AlertMode != core.FriendAlertOff {
 		t.Fatalf("accept response = %+v", friend)
 	}
 	if got := view(owner); len(got.Friends) != 1 || got.Friends[0].Direction != "outgoing" || got.Friends[0].Alias != "Pickup" || len(got.Flights) != 0 {
@@ -109,6 +109,35 @@ func TestFriendsDirectedFlightGrantsAndPickupLinkIsolation(t *testing.T) {
 	accept(viewer, invite(owner, "Pilot").Code, "Pickup", 409)
 
 	base := "/v1/friends/" + friend.ID
+	alerts := base + "/alerts"
+	alertMode := func(token string) string {
+		t.Helper()
+		for _, entry := range view(token).Friends {
+			if entry.ID == friend.ID {
+				return entry.AlertMode
+			}
+		}
+		t.Fatal("relationship missing from Friends view")
+		return ""
+	}
+	if got := alertMode(viewer); got != core.FriendAlertOff {
+		t.Fatalf("default alert mode = %q", got)
+	}
+	call("PUT", alerts, "", `{"mode":"all"}`, 401)
+	call("PUT", alerts, owner, `{"mode":"all"}`, 404)
+	call("PUT", alerts, outsider, `{"mode":"all"}`, 404)
+	for _, body := range []string{`{}`, `{"mode":null}`, `{"mode":"unexpected"}`, `{"mode":"all","extra":true}`} {
+		call("PUT", alerts, viewer, body, 400)
+	}
+	for _, mode := range []string{core.FriendAlertArrival, core.FriendAlertAll, core.FriendAlertAll, core.FriendAlertOff} {
+		call("PUT", alerts, viewer, `{"mode":"`+mode+`"}`, 204)
+		if got := alertMode(viewer); got != mode {
+			t.Fatalf("viewer alert mode = %q, want %q", got, mode)
+		}
+		if got := alertMode(owner); got != "" {
+			t.Fatalf("sender received viewer alert mode %q", got)
+		}
+	}
 	grant := base + "/flights/" + flight.ID
 	call("PUT", grant, owner, "", 404)
 	call("POST", "/v1/tracked", owner, `{"flightId":"`+flight.ID+`","seat":"27C"}`, 204)
@@ -171,6 +200,7 @@ func TestFriendsDirectedFlightGrantsAndPickupLinkIsolation(t *testing.T) {
 	}
 	call("DELETE", base, outsider, "", 404)
 	call("DELETE", base, viewer, "", 204)
+	call("PUT", alerts, viewer, `{"mode":"all"}`, 404)
 	call("PUT", grant, owner, "", 404)
 	if got := view(viewer); len(got.Flights) != 0 || len(got.Friends) != 1 || got.Friends[0].ID != reverse.ID {
 		t.Fatalf("relationship removal leaked grant or removed reverse consent: %+v", got)

@@ -35,7 +35,28 @@ CREATE TABLE IF NOT EXISTS friend_flights (
   FOREIGN KEY(owner,flight_id) REFERENCES tracked(owner,flight_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS friend_flights_by_tracking ON friend_flights(owner,flight_id);
+CREATE INDEX IF NOT EXISTS friend_flights_by_flight ON friend_flights(flight_id,friend_id);
+CREATE TABLE IF NOT EXISTS friend_alert_preferences (
+  friend_id TEXT PRIMARY KEY REFERENCES friend_relationships(id) ON DELETE CASCADE,
+  mode TEXT NOT NULL CHECK(mode IN ('off','arrival','all'))
+);
+CREATE TABLE IF NOT EXISTS outbox_friend_jobs (
+  outbox_id INTEGER PRIMARY KEY REFERENCES outbox(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS outbox_friend_grants (
+  outbox_id INTEGER NOT NULL REFERENCES outbox_friend_jobs(outbox_id) ON DELETE CASCADE,
+  friend_id TEXT NOT NULL, flight_id TEXT NOT NULL,
+  PRIMARY KEY(outbox_id,friend_id),
+  FOREIGN KEY(friend_id,flight_id) REFERENCES friend_flights(friend_id,flight_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS outbox_friend_grants_by_friend ON outbox_friend_grants(friend_id,flight_id);
 `
+
+const (
+	FriendAlertOff     = "off"
+	FriendAlertArrival = "arrival"
+	FriendAlertAll     = "all"
+)
 
 var (
 	ErrInvalidFriend   = errors.New("invalid friends input")
@@ -48,6 +69,7 @@ type Friend struct {
 	Alias     string   `json:"alias"`
 	Direction string   `json:"direction"`
 	FlightIDs []string `json:"flightIds"`
+	AlertMode string   `json:"alertMode,omitempty"`
 }
 
 type FriendInvite struct {
@@ -126,7 +148,7 @@ func (s *Store) AcceptFriendInvite(ctx context.Context, viewer, code, name strin
 	if sharer == viewer {
 		return Friend{}, ErrInvalidFriend
 	}
-	friend := Friend{ID: rand.Text(), Alias: sharerAlias, Direction: "incoming", FlightIDs: make([]string, 0)}
+	friend := Friend{ID: rand.Text(), Alias: sharerAlias, Direction: "incoming", FlightIDs: make([]string, 0), AlertMode: FriendAlertOff}
 	result, err := tx.ExecContext(ctx, `INSERT INTO friend_relationships(id,sharer,viewer,sharer_alias,viewer_alias)
 VALUES(?,?,?,?,?) ON CONFLICT(sharer,viewer) DO NOTHING`, friend.ID, sharer, viewer, sharerAlias, alias)
 	if err != nil {
@@ -150,8 +172,10 @@ func (s *Store) Friends(ctx context.Context, owner string) (FriendsView, error) 
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id,
 CASE WHEN r.sharer=?1 THEN r.viewer_alias ELSE r.sharer_alias END,
 CASE WHEN r.sharer=?1 THEN 'outgoing' ELSE 'incoming' END,
+CASE WHEN r.viewer=?1 THEN COALESCE(p.mode,'off') ELSE '' END,
 g.flight_id, CASE WHEN r.viewer=?1 THEN f.snapshot END
 FROM friend_relationships r
+LEFT JOIN friend_alert_preferences p ON p.friend_id=r.id
 LEFT JOIN friend_flights g ON g.friend_id=r.id
 LEFT JOIN flights f ON f.id=g.flight_id
 WHERE r.sharer=?1 OR r.viewer=?1 ORDER BY r.id,g.flight_id`, owner)
@@ -163,7 +187,7 @@ WHERE r.sharer=?1 OR r.viewer=?1 ORDER BY r.id,g.flight_id`, owner)
 		var friend Friend
 		var id sql.NullString
 		var snapshot []byte
-		if err := rows.Scan(&friend.ID, &friend.Alias, &friend.Direction, &id, &snapshot); err != nil {
+		if err := rows.Scan(&friend.ID, &friend.Alias, &friend.Direction, &friend.AlertMode, &id, &snapshot); err != nil {
 			return view, err
 		}
 		if count := len(view.Friends); count == 0 || view.Friends[count-1].ID != friend.ID {
@@ -183,6 +207,38 @@ WHERE r.sharer=?1 OR r.viewer=?1 ORDER BY r.id,g.flight_id`, owner)
 		}
 	}
 	return view, rows.Err()
+}
+
+func (s *Store) SetFriendAlertMode(ctx context.Context, viewer, friendID, mode string) error {
+	switch mode {
+	case FriendAlertOff, FriendAlertArrival, FriendAlertAll:
+	default:
+		return ErrInvalidFriend
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var previous string
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(p.mode,'off') FROM friend_relationships r
+LEFT JOIN friend_alert_preferences p ON p.friend_id=r.id WHERE r.id=? AND r.viewer=?`, friendID, viewer).Scan(&previous)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil || previous == mode {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO friend_alert_preferences(friend_id,mode) VALUES(?,?)
+ON CONFLICT(friend_id) DO UPDATE SET mode=excluded.mode`, friendID, mode); err != nil {
+		return err
+	}
+	// Each job retains only the grants that authorized it when it was queued.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox_friend_grants WHERE friend_id=?
+AND EXISTS(SELECT 1 FROM outbox WHERE id=outbox_friend_grants.outbox_id AND done=0)`, friendID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) GrantFriendFlight(ctx context.Context, owner, friendID, flightID string) error {

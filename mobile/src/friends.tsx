@@ -1,13 +1,18 @@
 import { useCallback, useRef, useState, type ReactNode } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { AppState, Platform, Share, StyleSheet, Switch, Text, View } from 'react-native';
-import type { Flight, Friend, FriendInvite, PlanoAPI } from './api';
+import { AppState, Platform, Pressable, Share, StyleSheet, Switch, Text, View } from 'react-native';
+import type { Flight, Friend, FriendAlertMode, FriendInvite, PlanoAPI } from './api';
 import { arrival, departure, errorText, flightStatus, formatDay, formatTime } from './flight';
 import { Page, useRemote } from './screens';
 import { usePalette } from './theme';
 import { Action, Body, ErrorMessage, Heading, Input, Loading, layout } from './ui';
 
 type Panel = 'invite' | 'accept';
+const alertOptions: ReadonlyArray<{ mode: FriendAlertMode; label: string }> = [
+  { mode: 'off', label: 'Off' },
+  { mode: 'arrival', label: 'Arrivals' },
+  { mode: 'all', label: 'All updates' },
+];
 
 export function FriendsScreen({ api }: { api: PlanoAPI }) {
   const { colors } = usePalette();
@@ -132,6 +137,22 @@ export function FriendsScreen({ api }: { api: PlanoAPI }) {
     });
   }
 
+  async function setAlerts(friend: Friend, mode: FriendAlertMode) {
+    if (mode === friend.alertMode) return;
+    await perform(`alerts-${friend.id}`, async () => {
+      try {
+        await api.setFriendAlerts(friend.id, mode);
+        remote.setValue((old) => old && ({
+          ...old,
+          friends: old.friends.map((entry) => entry.id === friend.id ? { ...entry, alertMode: mode } : entry),
+        }));
+        setNotice(`Alert preference saved for ${friend.alias}.`);
+      } finally {
+        remote.refresh();
+      }
+    });
+  }
+
   async function removeFriend(friend: Friend) {
     await perform(`remove-${friend.id}`, async () => {
       await api.removeFriend(friend.id);
@@ -253,6 +274,12 @@ export function FriendsScreen({ api }: { api: PlanoAPI }) {
                     : remote.pending ? <Body>Checking shared flight access…</Body>
                       : flights.length === 0 && <Body>No flights shared yet.</Body>}
                   {flights.map(({ flight }) => <SharedFlight key={flight.id} flight={flight} />)}
+                  {!remote.error && friend.alertMode !== undefined && (
+                    <FriendAlertOptions alias={friend.alias} mode={friend.alertMode}
+                      disabled={!!working || remote.pending || removing === friend.id}
+                      busy={working === `alerts-${friend.id}`}
+                      onChange={(mode) => void setAlerts(friend, mode)} />
+                  )}
                   <View style={removing === friend.id ? undefined : layout.actions}>{removal(friend)}</View>
                 </FriendGroup>
               );
@@ -261,6 +288,41 @@ export function FriendsScreen({ api }: { api: PlanoAPI }) {
         </>
       )}
     </Page>
+  );
+}
+
+function FriendAlertOptions({ alias, mode, disabled, busy, onChange }: {
+  alias: string;
+  mode: FriendAlertMode;
+  disabled: boolean;
+  busy: boolean;
+  onChange: (mode: FriendAlertMode) => void;
+}) {
+  const { colors } = usePalette();
+  return (
+    <View style={styles.alertOptions}>
+      <Text style={[styles.flightTitle, { color: colors.text }]}>Flight alerts</Text>
+      <Body>Get new updates on shared flights. Arrival alerts cover landing and gate arrival.</Body>
+      <View accessibilityRole="radiogroup" accessibilityLabel={`Flight alerts for ${alias}`}
+        accessibilityState={{ busy }} style={layout.actions}>
+        {alertOptions.map((option) => {
+          const checked = option.mode === mode;
+          return (
+            <Pressable key={option.mode} accessibilityRole="radio" accessibilityLabel={`${option.label} for ${alias}`}
+              accessibilityState={{ checked, disabled }} disabled={disabled} onPress={() => onChange(option.mode)}
+              style={({ pressed }) => [styles.alertOption, {
+                backgroundColor: checked || pressed ? colors.tintSoft : colors.surface,
+                borderColor: checked ? colors.tint : colors.divider,
+                opacity: pressed || disabled ? 0.72 : 1,
+              }]}>
+              <View style={[styles.radio, { borderColor: checked ? colors.tint : colors.muted, borderWidth: checked ? 5 : 1 }]} />
+              <Text style={[styles.alertLabel, { color: checked ? colors.tint : colors.text }]}>{option.label}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+      {busy && <Text accessibilityLiveRegion="polite" style={[styles.notice, { color: colors.muted }]}>Saving alert preference…</Text>}
+    </View>
   );
 }
 
@@ -316,6 +378,11 @@ const styles = StyleSheet.create({
   codePanel: { gap: 10, padding: 14, borderRadius: 12, alignItems: 'flex-start' },
   code: { fontSize: 18, fontWeight: '700', fontVariant: ['tabular-nums'], flexShrink: 1 },
   notice: { fontSize: 15, lineHeight: 21 },
+  alertOptions: { gap: 8, paddingVertical: 4 },
+  alertOption: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12,
+    borderRadius: 10, borderWidth: 1 },
+  radio: { width: 16, height: 16, borderRadius: 8 },
+  alertLabel: { fontSize: 15, fontWeight: '600', flexShrink: 1 },
   friend: { gap: 9, paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth },
   name: { fontSize: 18, fontWeight: '700' },
   confirm: { gap: 10, paddingVertical: 6 },
