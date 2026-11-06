@@ -9,6 +9,7 @@ import { errorText } from './src/flight';
 import { useFlightAlerts } from './src/alerts';
 import { resumeCalendarSync } from './src/calendar-sync';
 import { Home, Search, FlightDetailScreen, ServerSettings, type Routes } from './src/screens';
+import { FriendsScreen } from './src/friends';
 import { Tools, ImportFlights, PassportScreen, ConnectionScreen } from './src/tools';
 import { usePalette } from './src/theme';
 import { Loading } from './src/ui';
@@ -82,6 +83,9 @@ export default function App() {
             </Stack.Screen>
             <Stack.Screen name="Passport" options={{ title: 'Passport' }}>
               {(props) => <PassportScreen {...props} api={api} />}
+            </Stack.Screen>
+            <Stack.Screen name="Friends" options={{ title: 'Friends' }}>
+              {() => <FriendsScreen api={api} />}
             </Stack.Screen>
             <Stack.Screen name="Connection" options={{ title: 'Connection assistant' }}>
               {() => <ConnectionScreen api={api} />}

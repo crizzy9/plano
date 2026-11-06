@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
+import { AppState, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { saveServer, type Flight, type PlanoAPI } from './api';
+import { saveServer, type Flight, type PlanoAPI, type Position } from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
 import { usePalette } from './theme';
+import { PickupLinks } from './pickup-links';
 import { changeFlightAlerts, flightAlertsEnabled } from './alerts';
 import { canStartLiveActivity, clearLiveActivities, startLiveActivity, stopLiveActivity } from './live';
 import { Action, Body, Chart, ErrorMessage, FlightRow, FlightStrip, Heading, Input, Loading, RoutePlot, layout } from './ui';
@@ -17,6 +18,7 @@ export type Routes = {
   Tools: undefined;
   Import: undefined;
   Passport: undefined;
+  Friends: undefined;
   Connection: undefined;
   Settings: undefined;
 };
@@ -29,23 +31,30 @@ export function useRemote<T>(fetch: () => Promise<T>, enabled = true, interval?:
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
   const [revision, setRevision] = useState(0);
-  const refresh = useCallback(() => setRevision((previous) => previous + 1), []);
+  const requestVersion = useRef(0);
+  const refresh = useCallback(() => {
+    requestVersion.current += 1;
+    setRevision((previous) => previous + 1);
+  }, []);
   useFocusEffect(useCallback(() => {
     if (!enabled) return;
     let active = true;
+    const version = requestVersion.current;
+    const current = () => active && requestVersion.current === version;
     let timer: ReturnType<typeof setTimeout>;
     async function load(quiet = false) {
+      if (!current()) return;
       if (!quiet) setPending(true);
       try {
         const result = await fetch();
-        if (active) {
+        if (current()) {
           setValue(result);
           setError(undefined);
         }
       } catch (cause) {
-        if (active) setError(errorText(cause));
+        if (current()) setError(errorText(cause));
       } finally {
-        if (active) {
+        if (current()) {
           setPending(false);
           if (interval) timer = setTimeout(() => { void load(true); }, interval);
         }
@@ -57,7 +66,7 @@ export function useRemote<T>(fetch: () => Promise<T>, enabled = true, interval?:
       clearTimeout(timer);
     };
   }, [enabled, fetch, interval, revision]));
-  return { value, error, pending, refresh };
+  return { value, setValue, error, pending, refresh };
 }
 
 export function Page({ children, refreshing, refresh }: {
@@ -189,15 +198,13 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
     const [detail, tracked] = await Promise.all([api.detail(id), api.tracked()]);
     return { detail, tracked: tracked.some((item) => item.id === id) };
   }, [api, id]);
-  const { value, error, pending, refresh } = useRemote(load, true, 30_000);
+  const { value, setValue, error, pending, refresh } = useRemote(load, true, 30_000);
   const [actionError, setActionError] = useState<string>();
   const [operation, setOperation] = useState<'track' | 'share' | 'live'>();
   const [seat, setSeat] = useState('');
+  const [pickupRevision, setPickupRevision] = useState(0);
   const flight = value?.detail.flight ?? initial;
   const detail = value?.detail;
-  const points = (detail?.telemetry ?? []).filter(({ latitude, longitude }) =>
-    Number.isFinite(latitude) && Number.isFinite(longitude)).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
-  const latestPoint = points.at(-1);
   const prediction = detail?.prediction;
 
   async function toggleTrack() {
@@ -208,10 +215,12 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
       if (value.tracked) {
         await api.untrack(id);
         refresh();
+        setValue((old) => old && ({ ...old, tracked: false, detail: { ...old.detail, telemetry: undefined } }));
         await stopLiveActivity(id);
+      } else {
+        await api.track(id, seat.trim().toUpperCase() || undefined);
+        refresh();
       }
-      else await api.track(id, seat.trim().toUpperCase() || undefined);
-      refresh();
     } catch (cause) {
       setActionError(errorText(cause));
     } finally {
@@ -224,6 +233,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
     setActionError(undefined);
     try {
       const { url } = await api.share(id);
+      setPickupRevision((revision) => revision + 1);
       await Share.share({ message: `Follow ${flight.number} from ${flight.origin} to ${flight.destination} on Plano.\n${url}` });
     } catch (cause) {
       setActionError(errorText(cause));
@@ -262,6 +272,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
               disabled={!!operation && operation !== 'share'} icon="share" secondary />}
           </View>
           <ErrorMessage message={actionError} />
+          {value?.tracked && <PickupLinks key={pickupRevision} api={api} flightId={id} />}
           {(flight.aircraftType || flight.aircraftAge != null || flight.tailNumber || flight.baggage) && (
             <View style={layout.section}>
               <Heading>Flight details</Heading>
@@ -289,16 +300,8 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
                 onPress={() => navigation.push('Flight', { id: leg.id, number: leg.number, initial: leg })} />)}
             </View>
           )}
-          {latestPoint && (
-            <View style={layout.section}>
-              <Heading>Recorded flight path</Heading>
-              <RoutePlot label={`Recorded path from ${flight.origin} to ${flight.destination}`}
-                points={points.map(({ latitude, longitude }) => [latitude, longitude])} />
-              <Body>Last position at {formatTime(latestPoint.at)}{latestPoint.source && ` · ${latestPoint.source}`}</Body>
-              <Chart label="Altitude (ft)" values={points.flatMap((point) => point.altitudeFeet ?? [])} />
-              <Chart label="Ground speed (kt)" values={points.flatMap((point) => point.groundSpeedKnots ?? [])} />
-            </View>
-          )}
+          <FlightRadar key={`${id}:${flight.tailNumber ?? ''}:${!!value?.tracked}`}
+            api={api} flight={flight} tracked={value?.tracked === true} history={detail?.telemetry} />
           {detail && (
             <View style={layout.section}>
               <Heading>Flight updates</Heading>
@@ -317,6 +320,128 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
         </>
       )}
     </Page>
+  );
+}
+
+const radarInterval = 8_000;
+const radarMaxPoints = 512;
+
+function radarInstant(value: string) {
+  const fraction = /\.(\d{1,9})(?=Z$|[+-]\d{2}:\d{2}$)/.exec(value);
+  if (!fraction) return { millis: Date.parse(value), nanos: 0 };
+  const digits = (fraction[1] ?? '').padEnd(9, '0');
+  const isoMillis = `${value.slice(0, fraction.index)}.${digits.slice(0, 3)}${value.slice(fraction.index + fraction[0].length)}`;
+  return { millis: Date.parse(isoMillis), nanos: Number(digits.slice(3)) };
+}
+
+export function mergeRadarPositions(...groups: (readonly Position[] | undefined)[]) {
+  const byTime = new Map<string, { millis: number; nanos: number; point: Position }>();
+  for (const group of groups) {
+    for (const point of group ?? []) {
+      const { millis, nanos } = radarInstant(point.at);
+      if (!Number.isFinite(millis) || !Number.isFinite(point.latitude) || !Number.isFinite(point.longitude)
+        || Math.abs(point.latitude) > 90 || Math.abs(point.longitude) > 180) continue;
+      const key = `${millis}:${nanos}`;
+      const previous = byTime.get(key)?.point;
+      byTime.set(key, { millis, nanos, point: previous ? {
+        ...point,
+        altitudeFeet: point.altitudeFeet ?? previous.altitudeFeet,
+        groundSpeedKnots: point.groundSpeedKnots ?? previous.groundSpeedKnots,
+      } : point });
+    }
+  }
+  return [...byTime.values()].sort((a, b) => a.millis - b.millis || a.nanos - b.nanos)
+    .slice(-radarMaxPoints).map(({ point }) => point);
+}
+
+function FlightRadar({ api, flight, tracked, history }: {
+  api: PlanoAPI;
+  flight: Flight;
+  tracked: boolean;
+  history?: Position[];
+}) {
+  const id = flight.id;
+  const inFlight = tracked && (flight.status === 'airborne' || flight.status === 'diverted') && !flight.actualArrival;
+  const cursor = useRef<string>(undefined);
+  const [radar, setRadar] = useState<Position[]>([]);
+  const [stream, setStream] = useState<'ready' | 'unavailable' | 'interrupted'>();
+  const [checkedAt, setCheckedAt] = useState(0);
+  const points = useMemo(() => mergeRadarPositions(history, radar), [history, radar]);
+
+  useFocusEffect(useCallback(() => {
+    if (!inFlight) return;
+    let focused = true;
+    let foreground = AppState.currentState == null || AppState.currentState === 'active';
+    let inProgress = false;
+    let supported = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function load() {
+      if (!focused || !foreground || inProgress || !supported) return;
+      inProgress = true;
+      let delay = radarInterval;
+      try {
+        const result = await api.radar(id, cursor.current);
+        if (!focused || !foreground) return;
+        setCheckedAt(Date.now());
+        if (!result) {
+          supported = false;
+          setStream('unavailable');
+          return;
+        }
+        setStream('ready');
+        if (result.positions.length) {
+          const latest = result.cursor ?? mergeRadarPositions(result.positions).at(-1)?.at;
+          if (latest) cursor.current = latest;
+          setRadar((previous) => mergeRadarPositions(previous, result.positions));
+        }
+      } catch {
+        delay *= 3;
+        if (focused && foreground) {
+          setCheckedAt(Date.now());
+          setStream('interrupted');
+        }
+      } finally {
+        inProgress = false;
+        if (focused && foreground && supported) timer = setTimeout(() => { void load(); }, delay);
+      }
+    }
+    const subscription = AppState.addEventListener('change', (state) => {
+      foreground = state === 'active';
+      clearTimeout(timer);
+      if (foreground) void load();
+    });
+    void load();
+    return () => {
+      focused = false;
+      clearTimeout(timer);
+      subscription.remove();
+    };
+  }, [api, id, inFlight]));
+
+  const latest = points.at(-1);
+  if (!inFlight && !latest) return null;
+  const latestStreamed = radar.at(-1);
+  const age = latestStreamed ? checkedAt - radarInstant(latestStreamed.at).millis : Number.POSITIVE_INFINITY;
+  const fresh = inFlight && stream === 'ready' && age >= -30_000 && age <= 120_000;
+  const note = stream === 'interrupted' ? 'Live updates are temporarily unavailable.'
+    : stream === 'unavailable' ? 'Live positions are unavailable on this server.'
+    : latest ? 'Waiting for a fresh position.' : 'Waiting for the first position.';
+  return (
+    <View style={layout.section}>
+      <Heading>{fresh ? 'Live radar' : latest ? 'Recorded flight path' : 'Flight radar'}</Heading>
+      {latest && (
+        <>
+          <RoutePlot label={`Flight path from ${flight.origin} to ${flight.destination}`}
+            points={points.map(({ latitude, longitude }) => [latitude, longitude])} />
+          <Body>Last position at {formatTime(latest.at)}{latest.source && ` · ${latest.source}`}</Body>
+        </>
+      )}
+      {inFlight && !fresh && <Body>{note}</Body>}
+      <Chart label="Altitude (ft)" values={points.flatMap((point) =>
+        typeof point.altitudeFeet === 'number' && Number.isFinite(point.altitudeFeet) ? [point.altitudeFeet] : [])} />
+      <Chart label="Ground speed (kt)" values={points.flatMap((point) =>
+        typeof point.groundSpeedKnots === 'number' && Number.isFinite(point.groundSpeedKnots) ? [point.groundSpeedKnots] : [])} />
+    </View>
   );
 }
 

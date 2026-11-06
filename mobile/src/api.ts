@@ -50,6 +50,11 @@ export interface Position {
   source?: string;
 }
 
+export interface RadarBatch {
+  positions: Position[];
+  cursor?: string;
+}
+
 export interface Prediction {
   delayMinutes?: number;
   departureDelayMinutes?: number;
@@ -68,6 +73,30 @@ export interface FlightDetail {
   prediction?: Prediction | null;
 }
 
+export interface Friend {
+  id: string;
+  alias: string;
+  direction: 'outgoing' | 'incoming';
+  flightIds: string[];
+}
+
+export interface Friends {
+  friends: Friend[];
+  flights: { friendId: string; alias: string; flight: Flight }[];
+}
+
+export interface FriendInvite {
+  code: string;
+  expiresAt: string;
+}
+
+export interface PickupLink {
+  id: string;
+  flightId: string;
+  createdAt?: string;
+  expiresAt: string;
+}
+
 export interface PassportSegment {
   origin: string;
   destination: string;
@@ -82,6 +111,13 @@ export interface Passport {
   flights: Flight[];
   segments: PassportSegment[];
   stats: { flights: number; miles: number; hours: number; aircraft: number; delayMinutes: number };
+  coverage?: {
+    missingCoordinatesFlights: number;
+    missingDistanceFlights: number;
+    missingDurationFlights: number;
+    missingDelayFlights: number;
+    pendingAirportLookups: number;
+  };
 }
 
 export interface Connection {
@@ -374,6 +410,7 @@ export function serverStorageKey(scope: string, server: string) {
 }
 
 const flightPath = (id: string) => `/v1/flights/${encodeURIComponent(id)}`;
+const friendPath = (id: string) => `/v1/friends/${encodeURIComponent(id)}`;
 
 export function createAPI(server: string, options: { allowEnrollment?: boolean } = {}) {
   // The canonical origin is part of the key, so two installations on different
@@ -426,14 +463,45 @@ export function createAPI(server: string, options: { allowEnrollment?: boolean }
       return (await authenticated<{ flights: Flight[] }>('/v1/tracked')).flights;
     },
     detail: (id: string) => authenticated<FlightDetail>(flightPath(id)),
+    async radar(id: string, after?: string) {
+      const query = after ? `?${new URLSearchParams({ after })}` : '';
+      try {
+        return await authenticated<RadarBatch>(`${flightPath(id)}/radar${query}`);
+      } catch (error) {
+        if (error instanceof APIError && [404, 405, 501].includes(error.status)) return undefined;
+        throw error;
+      }
+    },
     track: (flightId: string, seat?: string) => authenticated<void>('/v1/tracked', {
       method: 'POST', body: JSON.stringify({ flightId, seat }),
     }),
     untrack: (id: string) => authenticated<void>(`/v1/tracked/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-    share: (flightId: string) => authenticated<{ url: string; expiresAt: string }>('/v1/shares', {
+    share: (flightId: string) => authenticated<{ url: string; expiresAt: string; id?: string; createdAt?: string }>('/v1/shares', {
       method: 'POST', body: JSON.stringify({ flightId }),
     }),
+    pickupLinks: (flightId: string) =>
+      authenticated<{ links: PickupLink[] }>(`/v1/shares?${new URLSearchParams({ flightId })}`),
+    revokePickupLink: (id: string) => authenticated<void>(`/v1/shares/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     passport: () => authenticated<Passport>('/v1/passport'),
+    friends: () => authenticated<Friends>('/v1/friends'),
+    createFriendInvite: (alias: string) => authenticated<FriendInvite>('/v1/friends/invites', {
+      method: 'POST', body: JSON.stringify({ alias }),
+    }),
+    async acceptFriendInvite(code: string, alias: string) {
+      try {
+        return await authenticated<{ friend: Friend }>('/v1/friends/accept', {
+          method: 'POST', body: JSON.stringify({ code, alias }),
+        });
+      } catch (error) {
+        if (error instanceof APIError && [400, 403, 404, 409, 410].includes(error.status)) {
+          throw new Error('Check the invite code and display name. Ask for a new code if it expired or was used.');
+        }
+        throw error;
+      }
+    },
+    setFriendFlight: (id: string, flightId: string, shared: boolean) =>
+      authenticated<void>(`${friendPath(id)}/flights/${encodeURIComponent(flightId)}`, { method: shared ? 'PUT' : 'DELETE' }),
+    removeFriend: (id: string) => authenticated<void>(friendPath(id), { method: 'DELETE' }),
     connection: (inbound: string, outbound: string) => {
       const query = new URLSearchParams({ inbound, outbound });
       return authenticated<Connection>(`/v1/connections?${query}`);

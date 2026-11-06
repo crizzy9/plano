@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Linking, Platform, StyleSheet, Text, View } from 'react-native';
-import type { Connection, Flight, ImportResult, ImportSource, PlanoAPI } from './api';
+import type { Connection, Flight, ImportResult, ImportSource, Passport, PlanoAPI } from './api';
 import { errorText, validDate } from './flight';
 import { Page, useRemote, type Screen } from './screens';
 import { usePalette } from './theme';
@@ -15,6 +15,7 @@ export function Tools({ navigation }: Screen<'Tools'>) {
       <Action label="Import flights" icon="download" onPress={() => navigation.navigate('Import')} />
       <Action label="Connection assistant" icon="plane" secondary onPress={() => navigation.navigate('Connection')} />
       <Action label="Plano Passport" icon="globe" secondary onPress={() => navigation.navigate('Passport')} />
+      <Action label="Friends" icon="share" secondary onPress={() => navigation.navigate('Friends')} />
     </Page>
   );
 }
@@ -304,6 +305,7 @@ export function PassportScreen({ api, navigation }: Screen<'Passport'> & { api: 
       {!!value?.flights.length && (
         <>
           <PassportMaps segments={value.segments} />
+          {value.coverage && <PassportCoverage coverage={value.coverage} refresh={refresh} pending={pending} />}
           <PassportCard stats={value.stats} />
           <View style={layout.section}>
             <Heading>Completed flights</Heading>
@@ -313,6 +315,36 @@ export function PassportScreen({ api, navigation }: Screen<'Passport'> & { api: 
         </>
       )}
     </Page>
+  );
+}
+
+function PassportCoverage({ coverage, refresh, pending }: {
+  coverage: NonNullable<Passport['coverage']>;
+  refresh: () => void;
+  pending: boolean;
+}) {
+  const details = [
+    [coverage.missingCoordinatesFlights, 'airport coordinates'],
+    [coverage.missingDistanceFlights, 'distance'],
+    [coverage.missingDurationFlights, 'flight time'],
+    [coverage.missingDelayFlights, 'delay records'],
+  ] as const;
+  if (!coverage.pendingAirportLookups && !details.some(([count]) => count > 0)) return null;
+  return (
+    <View style={layout.section}>
+      <Heading>Data coverage</Heading>
+      <Body>Totals reflect the flight information available on this server.</Body>
+      {details.map(([count, label]) => count > 0 && (
+        <Body key={label}>{count === 1 ? '1 flight is' : `${count} flights are`} missing {label}.</Body>
+      ))}
+      {coverage.pendingAirportLookups > 0 && (
+        <>
+          <Body>Airport lookups pending for {coverage.pendingAirportLookups}
+            {coverage.pendingAirportLookups === 1 ? ' airport.' : ' airports.'}</Body>
+          <Action label="Reload Passport" secondary onPress={refresh} busy={pending} />
+        </>
+      )}
+    </View>
   );
 }
 
