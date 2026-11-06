@@ -33,13 +33,8 @@ func main() {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
-		port := env("PLANO_HEALTH_URL", "http://127.0.0.1:8080/healthz")
-		resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(port)
-		if err != nil {
-			os.Exit(1)
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
+		endpoint, err := healthEndpoint()
+		if err != nil || checkHealth(endpoint, nil) != nil {
 			os.Exit(1)
 		}
 		return
@@ -64,13 +59,18 @@ func main() {
 		}
 		return
 	}
-	if err := run(logger); err != nil {
+	checkOnly := len(os.Args) == 2 && os.Args[1] == "check-config"
+	if len(os.Args) > 1 && !checkOnly {
+		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples]")
+		os.Exit(2)
+	}
+	if err := run(logger, checkOnly); err != nil {
 		logger.Error("plano stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
+func run(logger *slog.Logger, checkOnly bool) error {
 	demo, err := flag("PLANO_DEMO", false)
 	if err != nil {
 		return err
@@ -86,8 +86,17 @@ func run(logger *slog.Logger) error {
 	if len(enrollment) != 0 && (len(enrollment) < 16 || len(enrollment) > 128) {
 		return errors.New("enrollment code must be 16 to 128 bytes")
 	}
-	if len(enrollment) == 0 && !demo {
-		logger.Warn("live enrollment is open; restrict network access or set an enrollment code")
+	if !demo {
+		allowOpen, err := flag("PLANO_ALLOW_OPEN_ENROLLMENT", false)
+		if err != nil {
+			return err
+		}
+		if len(enrollment) == 0 {
+			if !allowOpen {
+				return errors.New("live mode requires PLANO_ENROLLMENT_CODE or PLANO_ENROLLMENT_CODE_FILE; private deployments can set PLANO_ALLOW_OPEN_ENROLLMENT=true")
+			}
+			logger.Warn("live enrollment is open; restrict network access")
+		}
 	}
 	bookingKey, err := secret("", "PLANO_BOOKING_KEY_FILE")
 	if err != nil {
@@ -272,6 +281,14 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	host, port, err := listenAddress()
+	if err != nil {
+		return err
+	}
+	if checkOnly {
+		logger.Info("plano configuration valid", "demo", demo, "apns", sender.APNs != nil, "fcm", sender.FCM != nil)
+		return nil
+	}
 	store, err := core.OpenWithOptions(env("PLANO_DB", "plano.db"), core.StoreOptions{DelayModel: delayModel, CollectDelaySamples: collectSamples && !demo})
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -282,7 +299,7 @@ func run(logger *slog.Logger) error {
 		BookingKey: bookingKey, ReservationSource: reservationSource, TripItSync: tripItSync, ConnectionRules: connections, Weather: weather,
 		AeroCallbackKey: aeroCallbackKey, AdvisoryIngressKey: advisoryIngressKey, Demo: demo, Logger: logger,
 	}
-	server := &http.Server{Addr: env("PLANO_ADDR", ":8080"), Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	server := &http.Server{Addr: net.JoinHostPort(host, port), Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		return err
@@ -327,39 +344,6 @@ func run(logger *slog.Logger) error {
 	}
 }
 
-func pushConfig() (push.Sender, error) {
-	var sender push.Sender
-	key, err := secret("", "PLANO_APNS_PRIVATE_KEY_FILE")
-	if err != nil {
-		return sender, err
-	}
-	if len(key) != 0 {
-		sandbox, err := flag("PLANO_APNS_SANDBOX", false)
-		if err != nil {
-			return sender, err
-		}
-		sender.APNs, err = push.NewAPNs(push.APNsConfig{TeamID: os.Getenv("PLANO_APNS_TEAM_ID"), KeyID: os.Getenv("PLANO_APNS_KEY_ID"), BundleID: os.Getenv("PLANO_APNS_BUNDLE_ID"), PrivateKeyPEM: key, Sandbox: sandbox})
-		if err != nil {
-			return sender, err
-		}
-	}
-	account, err := secret("", "PLANO_FCM_SERVICE_ACCOUNT_FILE")
-	if err != nil {
-		return sender, err
-	}
-	if len(account) != 0 {
-		constrained, err := flag("PLANO_FCM_BANDWIDTH_CONSTRAINED", false)
-		if err != nil {
-			return sender, err
-		}
-		sender.FCM, err = push.NewFCM(push.FCMConfig{ProjectID: os.Getenv("PLANO_FCM_PROJECT_ID"), ServiceAccountJSON: account, BandwidthConstrained: constrained})
-		if err != nil {
-			return sender, err
-		}
-	}
-	return sender, nil
-}
-
 func env(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value
@@ -396,5 +380,9 @@ func secret(name, fileName string) ([]byte, error) {
 	if err != nil || len(data) > 64<<10 {
 		return nil, fmt.Errorf("invalid secret file for %s", fileName)
 	}
-	return []byte(strings.TrimSpace(string(data))), nil
+	value = strings.TrimSpace(string(data))
+	if value == "" {
+		return nil, fmt.Errorf("empty secret file for %s", fileName)
+	}
+	return []byte(value), nil
 }

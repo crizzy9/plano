@@ -274,7 +274,8 @@ func connectionRisk(in, out feeds.Flight, arrival, departure, now time.Time, pla
 // PublicOrigin rejects URL components that would put access tokens on another host.
 func PublicOrigin(raw string) (string, error) {
 	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" && u.Path != "/" || u.Scheme != "http" && u.Scheme != "https" {
+	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
+		u.Path != "" && u.Path != "/" || u.Scheme != "http" && u.Scheme != "https" {
 		return "", errInvalid
 	}
 	return strings.TrimSuffix(u.String(), "/"), nil

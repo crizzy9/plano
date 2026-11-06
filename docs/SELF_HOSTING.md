@@ -96,11 +96,14 @@ own key, omit `PLANO_ANDROID_PREVIEW_BUILD` and set all four signing inputs.
 Gradle reads the passwords at build time. A release with no signing inputs
 is unsigned. Keep the keystore and password files outside the source tree.
 
-For a live server reachable from the Internet, require an enrollment code
-before connecting devices. Generate a random code of 16 to 128 bytes and
+Live mode requires an enrollment code by default. Generate a random code of 16 to 128 bytes and
 provide it through `PLANO_ENROLLMENT_CODE_FILE` or `PLANO_ENROLLMENT_CODE`.
 Share the code privately with new users so they can connect to the server.
 Existing installations retain access when you change the enrollment code.
+On a private live deployment where open enrollment is intended, set
+`PLANO_ALLOW_OPEN_ENROLLMENT=true` and restrict network access to that deployment.
+Set one of these options before upgrading an existing live deployment that
+used open enrollment.
 
 ## Enable live data and push
 
@@ -123,7 +126,7 @@ published port if both projects run on the same host.
 | readsb ADS-B | Set `PLANO_ADSB_URL` to an operator receiver's `aircraft.json` endpoint. Coverage depends on the receiver. |
 | FAA aircraft registry | Set `PLANO_FAA_REGISTRY_FILE` to a mounted, unzipped FAA `MASTER.txt` file to enrich US aircraft identities and approximate ages. |
 | Apple Push Notification service | Set `PLANO_APNS_TEAM_ID`, `PLANO_APNS_KEY_ID`, `PLANO_APNS_BUNDLE_ID`, and `PLANO_APNS_PRIVATE_KEY_FILE`. Set `PLANO_APNS_SANDBOX=true` for development tokens issued by the sandbox. |
-| Firebase Cloud Messaging | Set `PLANO_FCM_PROJECT_ID` and `PLANO_FCM_SERVICE_ACCOUNT_FILE` for the project registered by the Android build. |
+| Firebase Cloud Messaging | Set `PLANO_FCM_SERVICE_ACCOUNT_FILE` for the project registered by the Android build. `PLANO_FCM_PROJECT_ID` can override the project ID in that file. |
 
 `PLANO_REFRESH_INTERVAL` defaults to `60s` and accepts durations from `5s` to
 `30m`. Shorter polling intervals can consume provider quotas faster. Set
@@ -189,8 +192,16 @@ their own target paths. Mount the FAA registry file read-only at a path such
 as `/data-import/MASTER.txt` and set `PLANO_FAA_REGISTRY_FILE` to that path.
 
 ```sh
+docker compose -f compose.yaml -f compose.credentials.yaml run --build --rm --no-deps plano check-config
 docker compose -f compose.yaml -f compose.credentials.yaml up --build --wait
 ```
+
+`plano check-config` validates startup settings and reads configured credential
+files without opening the database, binding the port, or contacting providers.
+It exits nonzero for partial push configuration. After startup, `plano healthcheck`
+checks the service and its database through `/healthz`. It uses `PLANO_ADDR` by
+default. Set `PLANO_HEALTH_URL` for a different direct probe endpoint reachable
+from the service's runtime. The probe bypasses HTTP proxies and rejects redirects.
 
 For an iOS push-capable build, set `PLANO_IOS_TEAM_ID` to the Apple signing
 team ID. Set `PLANO_IOS_BUNDLE_ID` for a custom bundle identifier and use the

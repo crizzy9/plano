@@ -79,6 +79,8 @@ AeroAPI search / polling / callbacks     FAA NAS / signed advisory bridges
 
 The Go test suite exercises installation isolation, outbox persistence and retries, provider wire contracts, and the aviation fixture adapters. A standalone localhost smoke test verified the health endpoint, flight lookup, tracking and database persistence after restart. A rootless Podman smoke verified the image as UID 10001 with a read-only root and mounted SQLite storage. Two successive containers served the same installation token and tracked flight. Compose configuration also validated with the explicit health check and optional credential mounts.
 
+Live startup requires an enrollment code or an explicit private-deployment override. `plano check-config` validates deployment inputs before opening SQLite, binding a port, or contacting providers. The health command probes the running service separately and checks its Plano status and mode. A rootless smoke on the Docker-format image exercised the built-in health check, enrollment, installation isolation, and pickup links across service recreation and enrollment-code rotation. [Self-hosting](docs/SELF_HOSTING.md)
+
 The online backup regression test restores an installation and its tracked flight from a snapshot taken with uncheckpointed data in the live WAL. In both standalone and rootless container restore drills, a separate demo instance served the tracked flight over HTTP using the original installation token. The container drill created the backup while running with a read-only root and restored it to a fresh volume. [SQLite VACUUM INTO](https://sqlite.org/lang_vacuum.html)
 
 The following benchmark times a signed aviation webhook from handler entry to
