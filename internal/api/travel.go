@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,7 +13,11 @@ import (
 	"github.com/crizzy9/plano/internal/feeds"
 )
 
-const defaultConnectionBoardingReserveMinutes = 15
+const (
+	defaultConnectionBoardingReserveMinutes = 15
+	connectionMonitorGrace                  = 2 * time.Hour
+	connectionAlertLifetime                 = 15 * time.Minute
+)
 
 func first(values ...*time.Time) *time.Time {
 	for _, value := range values {
@@ -36,50 +42,72 @@ type connectionResult struct {
 	DepartureGate           string               `json:"departureGate"`
 	ArrivalGatePrediction   *core.GatePrediction `json:"arrivalGatePrediction,omitempty"`
 	DepartureGatePrediction *core.GatePrediction `json:"departureGatePrediction,omitempty"`
+	Monitoring              bool                 `json:"monitoring,omitempty"`
+	MonitorEligible         bool                 `json:"monitorEligible,omitempty"`
 }
 
-func (s Server) connection(w http.ResponseWriter, r *http.Request, owner string) error {
+func connectionIDs(r *http.Request) (string, string, error) {
 	query := r.URL.Query()
 	inID, outID := query.Get("inbound"), query.Get("outbound")
 	if inID == outID || !flightID.MatchString(inID) || !flightID.MatchString(outID) {
-		return errInvalid
+		return "", "", errInvalid
 	}
-	flights, err := s.Store.Tracked(r.Context(), owner)
+	return inID, outID, nil
+}
+
+func (s Server) connection(w http.ResponseWriter, r *http.Request, owner string) error {
+	ctx := r.Context()
+	inID, outID, err := connectionIDs(r)
 	if err != nil {
 		return err
 	}
-	var in, out feeds.Flight
-	for _, f := range flights {
-		if f.ID == inID {
-			in = f
-		}
-		if f.ID == outID {
-			out = f
-		}
-	}
-	arrive := first(in.ActualArrival, in.EstimatedArrival, in.ScheduledArrival)
-	depart := first(out.ActualDeparture, out.EstimatedDeparture, out.ScheduledDeparture, out.ActualTakeoff)
-	if arrive == nil || depart == nil || !connectionAirportsMatch(in, out) {
+	in, out, err := s.Store.TrackedConnection(ctx, owner, inID, outID)
+	if errors.Is(err, core.ErrNotFound) {
 		return errInvalid
+	}
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	result, assessment, err := s.assessConnection(ctx, in, out, now, s.Store.PredictGate)
+	if err != nil {
+		return err
+	}
+	result.MonitorEligible = assessment.Monitorable && canStartConnection(in, out, now)
+	result.Monitoring, err = s.Store.ConnectionMonitored(ctx, owner, inID, outID)
+	if err != nil {
+		return err
+	}
+	respond(w, 200, result)
+	return nil
+}
+
+func (s Server) assessConnection(ctx context.Context, in, out feeds.Flight, now time.Time, predictGate core.ConnectionGatePredictor) (connectionResult, core.ConnectionAssessment, error) {
+	var assessment core.ConnectionAssessment
+	arrive := first(in.ActualArrival, in.EstimatedArrival, in.ScheduledArrival)
+	depart := connectionDeparture(out)
+	if arrive == nil || depart == nil || !connectionAirportsMatch(in, out) {
+		return connectionResult{}, assessment, errInvalid
 	}
 	route, configured := s.ConnectionRules.Route(in.Destination, in.DestinationICAO, in.ArrivalTerminal, in.ArrivalGate, out.DepartureTerminal, out.DepartureGate)
 	result := estimateConnectionRoute(in, out, route, configured)
 	result.ArrivalGate, result.DepartureGate = in.ArrivalGate, out.DepartureGate
-	now := time.Now()
-	result.ArrivalGatePrediction, err = s.Store.PredictGate(r.Context(), in, true, now)
-	if err != nil {
-		return err
-	}
-	result.DepartureGatePrediction, err = s.Store.PredictGate(r.Context(), out, false, now)
-	if err != nil {
-		return err
-	}
 	if !configured {
 		result.BoardingReserveMinutes = defaultConnectionBoardingReserveMinutes
 	}
 	planningMinutes := result.TransferMinutes + result.BoardingReserveMinutes
 	departed := connectionDeparted(out)
-	if !departed && out.Status != "cancelled" && in.Status != "cancelled" && in.Status != "diverted" {
+	disrupted := connectionDisrupted(in, out)
+	var err error
+	result.ArrivalGatePrediction, err = predictGate(ctx, in, true, now)
+	if err != nil {
+		return connectionResult{}, assessment, err
+	}
+	result.DepartureGatePrediction, err = predictGate(ctx, out, false, now)
+	if err != nil {
+		return connectionResult{}, assessment, err
+	}
+	if !departed && !disrupted {
 		// Configured routes already include the operator's boarding allowance.
 		// An inferred gate may increase the total without replacing directions.
 		result.ForecastTransferMinutes = s.ConnectionRules.forecastTransfer(in, out, route.Precision, result.ArrivalGatePrediction, result.DepartureGatePrediction)
@@ -88,8 +116,75 @@ func (s Server) connection(w http.ResponseWriter, r *http.Request, owner string)
 		}
 	}
 	result.AvailableMinutes, result.Risk = connectionRisk(in, out, *arrive, *depart, now, planningMinutes, departed)
-	respond(w, 200, result)
-	return nil
+	assessment.Risk = result.Risk
+	staleAt := depart.Add(connectionMonitorGrace)
+	assessment.Monitorable = !departed && !disrupted && now.Before(staleAt)
+	if assessment.Monitorable {
+		assessment.MonitorUntil = staleAt
+		assessment.NextCheck = nextConnectionCheck(in, *depart, now, planningMinutes, result.Risk, staleAt)
+		assessment.AlertUntil = earlierTime(now.Add(connectionAlertLifetime), staleAt)
+	} else if departed || disrupted {
+		assessment.AlertUntil = terminalConnectionAlertUntil(in, out, now)
+	}
+	return result, assessment, nil
+}
+
+func canStartConnection(in, out feeds.Flight, now time.Time) bool {
+	depart := first(out.EstimatedDeparture, out.ScheduledDeparture)
+	if in.ScheduledArrival == nil || out.ScheduledDeparture == nil || depart == nil || !depart.After(now) {
+		return false
+	}
+	window := out.ScheduledDeparture.Sub(*in.ScheduledArrival)
+	return window > 0 && window <= 24*time.Hour
+}
+
+func connectionDisrupted(in, out feeds.Flight) bool {
+	return in.Status == "cancelled" || in.Status == "diverted" || out.Status == "cancelled"
+}
+
+func terminalConnectionAlertUntil(in, out feeds.Flight, now time.Time) time.Time {
+	observed := out.ObservedAt
+	if in.Status == "cancelled" || in.Status == "diverted" {
+		observed = in.ObservedAt
+	}
+	expires := earlierTime(now, observed).Add(connectionAlertLifetime)
+	if depart := connectionDeparture(out); depart != nil {
+		expires = earlierTime(expires, depart.Add(connectionMonitorGrace))
+	}
+	return expires
+}
+
+func connectionDeparture(flight feeds.Flight) *time.Time {
+	return first(flight.ActualDeparture, flight.ActualTakeoff, flight.EstimatedDeparture, flight.ScheduledDeparture)
+}
+
+func earlierTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+func nextConnectionCheck(in feeds.Flight, departure, now time.Time, planningMinutes int, risk string, staleAt time.Time) time.Time {
+	next := earlierTime(now.Add(5*time.Minute), staleAt)
+	if departure.After(now) {
+		next = earlierTime(next, departure)
+	}
+	if in.ActualArrival != nil {
+		return next
+	}
+	switch risk {
+	case "Relaxed":
+		planningMinutes += 25
+	case "Tight":
+	default:
+		return next
+	}
+	threshold := departure.Add(-time.Duration(planningMinutes)*time.Minute + time.Millisecond)
+	if threshold.After(now) {
+		next = earlierTime(next, threshold)
+	}
+	return next
 }
 
 func connectionAirportsMatch(in, out feeds.Flight) bool {
@@ -163,7 +258,7 @@ func connectionRisk(in, out feeds.Flight, arrival, departure, now time.Time, pla
 	minutes := int(window / time.Minute)
 	required := time.Duration(planningMinutes) * time.Minute
 	switch {
-	case out.Status == "cancelled" || in.Status == "cancelled" || in.Status == "diverted" || window <= 0:
+	case connectionDisrupted(in, out) || window <= 0:
 		return minutes, "Missed"
 	case departed && (in.ActualArrival == nil || window < required):
 		return minutes, "Missed"

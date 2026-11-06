@@ -295,6 +295,7 @@ func run(logger *slog.Logger) error {
 	workers.Go(func() {
 		(core.Refresher{Store: store, Flights: flights, Advisories: advisories, Registry: registry, Logger: logger, Interval: interval}).Run(ctx)
 	})
+	workers.Go(func() { service.RunConnectionMonitors(ctx) })
 	if receiver != nil {
 		workers.Go(func() { store.RunRadar(ctx, receiver, registry, radarCadence, logger) })
 	}

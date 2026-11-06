@@ -438,7 +438,7 @@ func (s *Store) claimForPlatform(ctx context.Context, now time.Time, limit int, 
 	args = append(args, t, limit)
 	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.device_id,d.registered,o.attempts,d.platform,d.token,COALESCE(b.binding,''),o.message
 FROM outbox o JOIN devices d ON d.id=o.device_id LEFT JOIN device_bindings b ON b.device_id=d.id
-WHERE o.done=0 AND o.due<=? AND o.expires>? AND o.lease_until<=?`+platformFilter+`
+WHERE o.done=0 AND o.due<=? AND o.expires>? AND o.lease_until<=?`+platformFilter+` AND NOT `+dirtyConnectionAlert+`
 AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
   SELECT 1 FROM outbox older WHERE older.device_id=o.device_id AND older.flight_id=o.flight_id AND older.id<o.id
   AND older.done=0 AND older.expires>? AND json_extract(older.message,'$.Kind') <> 'alert'
@@ -606,11 +606,22 @@ func (s *Store) deliver(ctx context.Context, sender PushSender, logger *slog.Log
 	// Revoking a device or untracking a flight can remove a leased row. Check
 	// the lease again at the transport boundary without holding a transaction.
 	var expires int64
-	err := s.db.QueryRowContext(ctx, `SELECT expires FROM outbox WHERE id=? AND device_id=? AND lease_until=? AND done=0`,
-		job.id, job.deviceID, job.lease).Scan(&expires)
+	var connectionDirty bool
+	err := s.db.QueryRowContext(ctx, `SELECT o.expires, `+dirtyConnectionAlert+`
+FROM outbox o WHERE o.id=? AND o.device_id=? AND o.lease_until=? AND o.done=0`,
+		job.id, job.deviceID, job.lease).Scan(&expires, &connectionDirty)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
 			logger.Error("could not validate push lease", "job", job.id, "error", err)
+		}
+		return
+	}
+	if connectionDirty {
+		// Re-evaluation can keep the same warning. Return its lease without
+		// consuming a delivery attempt so it can be claimed again promptly.
+		if _, err := s.db.ExecContext(ctx, `UPDATE outbox SET lease_until=0 WHERE id=? AND device_id=? AND lease_until=? AND done=0`,
+			job.id, job.deviceID, job.lease); err != nil && ctx.Err() == nil {
+			logger.Error("could not release connection push lease", "job", job.id, "error", err)
 		}
 		return
 	}

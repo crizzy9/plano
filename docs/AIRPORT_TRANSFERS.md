@@ -102,3 +102,22 @@ precise airport path, Plano can show its duration including the configured
 buffer. The risk score uses the longer of that duration and the main
 estimate with its boarding allowance. Directions use reported gates and
 terminals.
+
+## Monitor a connection
+
+In Connection Assistant, select your arriving and onward tracked flights,
+check the connection, and choose **Monitor connection**. Both flights must
+connect at the same airport, with a scheduled transfer window of up to 24
+hours and an upcoming onward departure. You can save up to 32 active pairs
+per installation. Enable flight notifications on a device to receive alerts.
+Saved pairs are private to that installation.
+
+Plano checks both legs as new observations arrive and as time runs short.
+The current risk is the starting point. A change to a worse risk level
+queues an alert. If the risk improves, that becomes the starting point for
+any later warning. Open the saved pair in Connection Assistant to see the
+current assessment. To stop warnings, choose **Stop monitoring** or untrack
+either leg.
+Monitoring ends after the onward flight leaves, the connection is disrupted
+by a cancellation or inbound diversion, or the last known onward departure
+time has passed by two hours without a recorded departure.

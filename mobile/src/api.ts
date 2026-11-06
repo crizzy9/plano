@@ -160,6 +160,14 @@ export interface Connection {
   departureGate?: string;
   arrivalGatePrediction?: GatePrediction;
   departureGatePrediction?: GatePrediction;
+  monitorEligible?: boolean;
+  monitoring?: boolean;
+}
+
+export interface ConnectionMonitor {
+  inbound: string;
+  outbound: string;
+  risk: string;
 }
 
 export interface GatePrediction {
@@ -677,6 +685,27 @@ export function createAPI(server: string, options: { allowEnrollment?: boolean }
     connection: (inbound: string, outbound: string) => {
       const query = new URLSearchParams({ inbound, outbound });
       return authenticated<Connection>(`/v1/connections?${query}`);
+    },
+    async connectionMonitors(): Promise<ConnectionMonitor[]> {
+      try {
+        return (await authenticated<{ monitors: ConnectionMonitor[] }>('/v1/connection-monitors')).monitors ?? [];
+      } catch (error) {
+        if (error instanceof APIError && [404, 405, 501].includes(error.status)) return [];
+        throw error;
+      }
+    },
+    async setConnectionMonitoring(inbound: string, outbound: string, enabled: boolean): Promise<boolean> {
+      const path = `/v1/connection-monitors?${new URLSearchParams({ inbound, outbound })}`;
+      try {
+        if (enabled) return (await authenticated<{ monitoring: boolean }>(path, { method: 'PUT' })).monitoring;
+        await authenticated<void>(path, { method: 'DELETE' });
+        return false;
+      } catch (error) {
+        if (error instanceof APIError && [404, 405, 501].includes(error.status)) {
+          throw new Error('This Plano server doesn’t support connection alerts.');
+        }
+        throw error;
+      }
     },
     importTripIt: (url: string, offset = 0) => authenticated<ImportResult>('/v1/import/tripit', {
       method: 'POST', body: JSON.stringify({ url, offset }),

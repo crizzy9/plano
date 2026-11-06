@@ -15,9 +15,17 @@ type GatePrediction struct {
 	Share   float64 `json:"share"`
 }
 
+type rowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 // PredictGate summarizes actual gate observations for the same route and
 // designator. Assigned gates always take precedence over the history.
 func (s *Store) PredictGate(ctx context.Context, flight feeds.Flight, arrival bool, now time.Time) (*GatePrediction, error) {
+	return predictGate(ctx, s.db, flight, arrival, now)
+}
+
+func predictGate(ctx context.Context, db rowQueryer, flight feeds.Flight, arrival bool, now time.Time) (*GatePrediction, error) {
 	if finished(flight) || flight.Number == "" || flight.Origin == "" || flight.Destination == "" || arrival && flight.ArrivalGate != "" || !arrival && flight.DepartureGate != "" {
 		return nil, nil
 	}
@@ -26,7 +34,7 @@ func (s *Store) PredictGate(ctx context.Context, flight feeds.Flight, arrival bo
 		gate, actual = "$.arrivalGate", "$.actualArrival"
 	}
 	var prediction GatePrediction
-	err := s.db.QueryRowContext(ctx, `WITH past(gate) AS (
+	err := db.QueryRowContext(ctx, `WITH past(gate) AS (
  SELECT json_extract(snapshot,?) FROM flights
  WHERE id <> ? AND json_extract(snapshot,'$.number') = ? AND json_extract(snapshot,'$.origin') = ? AND json_extract(snapshot,'$.destination') = ?
  AND json_extract(snapshot,'$.status') NOT IN ('cancelled','diverted')

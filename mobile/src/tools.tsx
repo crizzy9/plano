@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Linking, Platform, StyleSheet, Text, View } from 'react-native';
 import type { Connection, Flight, ImportResult, ImportSource, PartnerBooking, Passport, PlanoAPI } from './api';
-import { errorText, validDate } from './flight';
+import { errorText, formatDay, validDate } from './flight';
 import { Page, useRemote, type Screen } from './screens';
 import { usePalette } from './theme';
 import { calendarFlights, calendarSyncEnabled, setCalendarSyncEnabled } from './calendar-sync';
@@ -250,27 +250,47 @@ function ConnectionGate({ direction, reported, prediction }: {
 }
 
 export function ConnectionScreen({ api }: { api: PlanoAPI }) {
-  const { colors } = usePalette();
   const load = useCallback(() => api.tracked(), [api]);
   const { value, error, pending, refresh } = useRemote(load);
-  const [inbound, setInbound] = useState<Flight>();
-  const [outbound, setOutbound] = useState<Flight>();
-  const [result, setResult] = useState<Connection>();
-  const [busy, setBusy] = useState(false);
-  const [issue, setIssue] = useState<string>();
+  const loadMonitors = useCallback(() => api.connectionMonitors(), [api]);
+  const { value: monitors, error: monitorError, refresh: refreshMonitors } = useRemote(loadMonitors, !!api.server, 30_000);
+  const [inboundID, setInboundID] = useState<string>();
+  const [outboundID, setOutboundID] = useState<string>();
+  const [checked, setChecked] = useState(false);
+  const [monitorBusy, setMonitorBusy] = useState(false);
+  const [monitorIssue, setMonitorIssue] = useState<string>();
+  const monitorRequest = useRef<symbol | undefined>(undefined);
+  useEffect(() => () => { monitorRequest.current = undefined; }, [api]);
 
-  async function check() {
-    if (!inbound || !outbound || busy) return;
-    setBusy(true);
-    setIssue(undefined);
-    setResult(undefined);
+  async function changeMonitoring(inbound: string, outbound: string, enabled: boolean, reportInList = false) {
+    if (monitorRequest.current) return;
+    const request = Symbol();
+    monitorRequest.current = request;
+    setMonitorBusy(true);
+    setMonitorIssue(undefined);
     try {
-      setResult(await api.connection(inbound.id, outbound.id));
+      return await api.setConnectionMonitoring(inbound, outbound, enabled);
     } catch (cause) {
-      setIssue(errorText(cause));
+      if (!reportInList) throw cause;
+      if (monitorRequest.current === request) setMonitorIssue(errorText(cause));
     } finally {
-      setBusy(false);
+      if (monitorRequest.current === request) {
+        monitorRequest.current = undefined;
+        setMonitorBusy(false);
+        refreshMonitors();
+      }
     }
+  }
+
+  const tracked = new Map(value?.map((flight) => [flight.id, flight]));
+  const inbound = inboundID ? tracked.get(inboundID) : undefined;
+  const outbound = outboundID ? tracked.get(outboundID) : undefined;
+
+  function select(inbound?: string, outbound?: string, assess = false) {
+    if (monitorRequest.current) return;
+    setInboundID(inbound);
+    setOutboundID(outbound);
+    setChecked(assess);
   }
 
   const candidates = inbound && value?.filter((flight) => {
@@ -278,44 +298,114 @@ export function ConnectionScreen({ api }: { api: PlanoAPI }) {
     if (inbound.destinationICAO && flight.originICAO) return inbound.destinationICAO === flight.originICAO;
     return !!inbound.destination && flight.origin === inbound.destination;
   });
-  const airportMap = configuredAirportMap(result?.mapUrl);
   return (
     <Page>
       <Body>Choose two tracked flights that connect at the same airport.</Body>
       <ErrorMessage message={error} />
       {error && <Action secondary label="Refresh flights" onPress={refresh} />}
       {pending && !value && <Loading />}
+      {monitorError && (
+        <View style={layout.section}>
+          <ErrorMessage message={`Couldn’t load monitored connections. ${monitorError}`} />
+          <Action secondary label="Retry monitored connections" onPress={refreshMonitors} />
+        </View>
+      )}
+      <ErrorMessage message={monitorIssue} />
+      {value && !!monitors?.length && (
+        <View style={layout.section}>
+          <Heading>Monitored connections</Heading>
+          {monitors.map((monitor) => {
+            const arriving = tracked.get(monitor.inbound);
+            const departing = tracked.get(monitor.outbound);
+            const key = `${monitor.inbound}:${monitor.outbound}`;
+            if (!arriving || !departing) return (
+              <View key={key} style={layout.section}>
+                <Body>{arriving?.number ?? 'Unavailable flight'} to {departing?.number ?? 'unavailable flight'} · {monitor.risk}</Body>
+                <Action secondary disabled={monitorBusy} label="Stop monitoring"
+                  onPress={() => { void changeMonitoring(monitor.inbound, monitor.outbound, false, true); }} />
+              </View>
+            );
+            return (
+              <Action key={key} secondary disabled={monitorBusy}
+                label={`${arriving.number} to ${departing.number} · ${formatDay(arriving.scheduledDeparture, arriving.originTimeZone)} · ${monitor.risk}`}
+                onPress={() => select(arriving.id, departing.id, true)} />
+            );
+          })}
+        </View>
+      )}
       <Heading>Arriving flight</Heading>
       {value?.length === 0 && <Body>Track flights before checking a connection.</Body>}
       {inbound ? (
-        <FlightRow flight={inbound} onPress={() => {
-          if (busy) return;
-          setInbound(undefined);
-          setOutbound(undefined);
-          setResult(undefined);
-        }} />
-      ) : value?.map((flight) => <FlightRow key={flight.id} flight={flight} onPress={() => setInbound(flight)} />)}
+        <FlightRow flight={inbound} onPress={() => select()} />
+      ) : value?.map((flight) => <FlightRow key={flight.id} flight={flight} onPress={() => select(flight.id)} />)}
       {inbound && (
         <>
           <Heading>Departing flight</Heading>
           {candidates?.length === 0 && <Body>No tracked flights depart from {inbound.destination}.</Body>}
           {candidates?.map((flight) => (
             <Action key={flight.id} label={`${flight.number} to ${flight.destination}`}
-              secondary={flight.id !== outbound?.id} disabled={busy} onPress={() => { setOutbound(flight); setResult(undefined); }} />
+              secondary={flight.id !== outbound?.id} disabled={monitorBusy} onPress={() => select(inbound.id, flight.id)} />
           ))}
-          {outbound && <Action label="Check connection" onPress={check} busy={busy} />}
+          {outbound && !checked && <Action label="Check connection" onPress={() => select(inbound.id, outbound.id, true)} />}
+          {outbound && checked && (
+            <CheckedConnection key={`${inbound.id}:${outbound.id}`} api={api} inbound={inbound} outbound={outbound}
+              monitorBusy={monitorBusy} changeMonitoring={changeMonitoring} />
+          )}
         </>
       )}
-      <ErrorMessage message={issue} />
+    </Page>
+  );
+}
+
+function CheckedConnection({ api, inbound, outbound, monitorBusy, changeMonitoring }: {
+  api: PlanoAPI;
+  inbound: Flight;
+  outbound: Flight;
+  monitorBusy: boolean;
+  changeMonitoring: (inbound: string, outbound: string, enabled: boolean) => Promise<boolean | undefined>;
+}) {
+  const { colors } = usePalette();
+  const inboundID = inbound.id;
+  const outboundID = outbound.id;
+  const load = useCallback(() => api.connection(inboundID, outboundID), [api, inboundID, outboundID]);
+  const { value: result, setValue: setResult, error, pending, refresh } = useRemote(load, true, 30_000);
+  const [issue, setIssue] = useState<string>();
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  async function toggleMonitoring() {
+    if (!result || monitorBusy) return;
+    setIssue(undefined);
+    try {
+      const monitoring = await changeMonitoring(inboundID, outboundID, !result.monitoring);
+      if (mounted.current && monitoring !== undefined) {
+        setResult((previous) => previous && { ...previous, monitoring });
+      }
+    } catch (cause) {
+      if (mounted.current) setIssue(errorText(cause));
+    } finally {
+      if (mounted.current) refresh();
+    }
+  }
+
+  const airportMap = configuredAirportMap(result?.mapUrl);
+  return (
+    <View style={layout.section}>
+      <ErrorMessage message={error} />
+      {error && <Action secondary label="Recheck connection" onPress={refresh} busy={pending} disabled={monitorBusy} />}
+      {!result && !error && <Loading />}
       {result && (
-        <View style={layout.section}>
+        <>
           <Heading>{result.risk} connection at {result.airport}</Heading>
           <Text style={[styles.detail, { color: colors.text }]}>{Math.max(0, result.availableMinutes)} min connection window · {result.transferMinutes} min estimated transfer</Text>
           {(result.boardingReserveMinutes ?? 0) > 0 && <Body>Timing includes an estimated {result.boardingReserveMinutes} min boarding reserve.</Body>}
           {result.precision && transferDetail[result.precision] && <Body>{transferDetail[result.precision]}</Body>}
           {result.forecastTransferMinutes !== undefined && <Body>Historical gates suggest a {result.forecastTransferMinutes} min airport route. The risk estimate allows for whichever route requires more time, including boarding.</Body>}
-          <ConnectionGate direction="arrival" reported={result.arrivalGate ?? inbound?.arrivalGate} prediction={result.arrivalGatePrediction} />
-          <ConnectionGate direction="departure" reported={result.departureGate ?? outbound?.departureGate} prediction={result.departureGatePrediction} />
+          <ConnectionGate direction="arrival" reported={result.arrivalGate ?? inbound.arrivalGate} prediction={result.arrivalGatePrediction} />
+          <ConnectionGate direction="departure" reported={result.departureGate ?? outbound.departureGate} prediction={result.departureGatePrediction} />
           {result.instructions?.map((instruction, index) => <Body key={index}>{instruction}</Body>)}
           <Action secondary label={airportMap ? `Open ${result.airport} terminal map` : `Open ${result.airport} in maps`} onPress={() => {
             const place = encodeURIComponent(`${result.airport} airport`);
@@ -323,9 +413,19 @@ export function ConnectionScreen({ api }: { api: PlanoAPI }) {
               : `https://www.google.com/maps/search/?api=1&query=${place}`;
             Linking.openURL(airportMap ?? fallback).catch((cause: unknown) => setIssue(errorText(cause)));
           }} />
-        </View>
+          {(result.monitoring || result.monitorEligible) && (
+            <>
+              <Heading>Connection alerts</Heading>
+              <Body>{result.monitoring ? 'Plano is monitoring this connection for worsening risk.' : 'Monitor this connection to get an alert if its risk worsens.'}</Body>
+              {Platform.OS !== 'web' && <Body>To receive notifications on this device, enable Flight alerts in Plano Settings and allow notifications for Plano.</Body>}
+              <Action icon="bell" secondary busy={monitorBusy} label={result.monitoring ? 'Stop monitoring' : 'Monitor connection'}
+                onPress={toggleMonitoring} />
+            </>
+          )}
+          <ErrorMessage message={issue} />
+        </>
       )}
-    </Page>
+    </View>
   );
 }
 
