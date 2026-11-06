@@ -1,3 +1,11 @@
+function iosAPNsEnvironment() {
+  const environment = process.env.PLANO_IOS_APNS_ENVIRONMENT ?? 'development';
+  if (environment !== 'development' && environment !== 'production') {
+    throw new Error('PLANO_IOS_APNS_ENVIRONMENT must be development or production.');
+  }
+  return environment;
+}
+
 module.exports = ({ config }) => ({
   ...config,
   name: 'Plano',
@@ -8,6 +16,7 @@ module.exports = ({ config }) => ({
   ios: {
     bundleIdentifier: process.env.PLANO_IOS_BUNDLE_ID || 'app.plano.mobile',
     appleTeamId: process.env.PLANO_IOS_TEAM_ID || process.env.PLANO_APNS_TEAM_ID || undefined,
+    entitlements: { 'aps-environment': iosAPNsEnvironment() },
     infoPlist: {
       NSSupportsLiveActivities: true,
       NSAppTransportSecurity: { NSAllowsLocalNetworking: true },

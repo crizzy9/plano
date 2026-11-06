@@ -113,7 +113,10 @@ cd android
 PLANO_ANDROID_PREVIEW_BUILD=1 ./gradlew :app:assembleRelease
 ```
 
-The preview APK uses the Android debug key. For a release signed with your
+The preview APK uses the Android debug key. Set `PLANO_ANDROID_PACKAGE` to
+a distinct package such as `app.plano.preview` before preview prebuild if you
+want the preview and a separately signed release installed side by side.
+For a release signed with your
 own key, omit `PLANO_ANDROID_PREVIEW_BUILD` and set all four signing inputs.
 
 | Variable | Value |
@@ -271,7 +274,15 @@ from the service's runtime. The probe bypasses HTTP proxies and rejects redirect
 For an iOS push-capable build, set `PLANO_IOS_TEAM_ID` to the Apple signing
 team ID. Set `PLANO_IOS_BUNDLE_ID` for a custom bundle identifier and use the
 same identifier for `PLANO_APNS_BUNDLE_ID` on the server. The app and activity
-extension require signing and their matching entitlements.
+extension require signing and their matching provisioning profiles. Before
+iOS prebuild, set
+`PLANO_IOS_APNS_ENVIRONMENT=development` for a development build and set
+`PLANO_APNS_SANDBOX=true` on its server. For distribution, set
+`PLANO_IOS_APNS_ENVIRONMENT=production` and leave `PLANO_APNS_SANDBOX` unset
+or false. The app build defaults to `development`. Rerun iOS prebuild if
+you change the environment. The provisioning profile
+determines the signed app's entitlement. Check `aps-environment` on the
+exported app before enabling push. [Apple APNs environment](https://developer.apple.com/documentation/bundleresources/entitlements/aps-environment)
 For iOS foreground refresh from alerts, use the same HTTPS origin in
 `PLANO_PUBLIC_URL` and in the app's server settings.
 
@@ -279,7 +290,10 @@ For an Android push-capable build, set `PLANO_GOOGLE_SERVICES_FILE` to the
 Firebase `google-services.json` path. The Firebase Android application must
 match the build's package identifier, which `PLANO_ANDROID_PACKAGE` can set.
 Use the same Firebase project for the server's FCM credentials. Test tokens
-from the exact build and environment you deploy.
+from the exact build and environment you deploy. To switch to a build without
+Firebase, generate Android in a fresh checkout. Prebuild rejects an existing
+native project that still contains Firebase configuration when the file
+setting is omitted.
 
 ## Maintain and back up
 

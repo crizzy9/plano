@@ -70,6 +70,7 @@ jobs:
     timeout-minutes: 45
     env:
       PLANO_ANDROID_PREVIEW_BUILD: '1'
+      PLANO_ANDROID_PACKAGE: app.plano.preview
       CMAKE_BUILD_PARALLEL_LEVEL: '1'
     defaults:
       run:
@@ -100,7 +101,13 @@ jobs:
           apk=app/build/outputs/apk/release/app-release.apk
           test -s "$apk"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
-          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$apk" | grep -E "^native-code: 'arm64-v8a'[[:space:]]*$"
+          badging=$("$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$apk")
+          grep -F "package: name='$PLANO_ANDROID_PACKAGE'" <<< "$badging"
+          grep -E "^native-code: 'arm64-v8a'[[:space:]]*$" <<< "$badging"
+          manifest=$("$ANDROID_HOME/build-tools/36.0.0/aapt2" dump xmltree "$apk" --file AndroidManifest.xml)
+          grep -F 'app.plano.live.PlanoMessagingService' <<< "$manifest"
+          grep -F 'app.plano.live.PlanoFlightWidgetProvider' <<< "$manifest"
+          if grep -Fq 'expo.modules.notifications.service.ExpoFirebaseMessagingService' <<< "$manifest"; then exit 1; fi
 
   ios:
     name: iOS simulator and widget
@@ -108,6 +115,8 @@ jobs:
     timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+      PLANO_IOS_BUNDLE_ID: app.plano.verify
+      PLANO_IOS_APNS_ENVIRONMENT: production
     defaults:
       run:
         working-directory: mobile
@@ -139,4 +148,8 @@ jobs:
             -configuration Release -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$derived_data" -jobs 1 \
             CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO build
-          test -s "$derived_data/Build/Products/Release-iphonesimulator/Plano.app/PlugIns/PlanoActivity.appex/PlanoActivity"
+          app="$derived_data/Build/Products/Release-iphonesimulator/Plano.app"
+          extension="$app/PlugIns/PlanoActivity.appex"
+          test -s "$extension/PlanoActivity"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")" = "$PLANO_IOS_BUNDLE_ID"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$extension/Info.plist")" = "$PLANO_IOS_BUNDLE_ID.activity"
