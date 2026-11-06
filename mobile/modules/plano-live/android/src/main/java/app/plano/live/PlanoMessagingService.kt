@@ -18,6 +18,7 @@ import expo.modules.notifications.service.ExpoFirebaseMessagingService
 private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
 internal const val LEGACY_PROGRESS_EXPIRY_ACTION = "app.plano.live.EXPIRE_FLIGHT_PROGRESS"
 internal const val STOP_PROGRESS_ACTION = "app.plano.live.STOP_FLIGHT_PROGRESS"
+internal const val DISMISS_PROGRESS_NOTIFICATION_ACTION = "app.plano.live.DISMISS_FLIGHT_PROGRESS_NOTIFICATION"
 private const val FLIGHT_ALERTS_CHANNEL = "flight-alerts"
 private const val FLIGHT_PROGRESS_CHANNEL = "flight-progress"
 private val notificationFlightId = Regex("[A-Za-z0-9_.-]{1,128}")
@@ -107,7 +108,8 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     }
     // A saved widget tombstone also fences notifications if saving the session stop failed.
     if (widgetAccepted == false) return
-    val instance = accepted.instance ?: return
+    val notification = accepted.notification?.takeUnless { it.dismissed } ?: return
+    val instance = notification.instance
 
     if (!manager.areNotificationsEnabled()) return
     val now = System.currentTimeMillis()
@@ -154,8 +156,9 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
       .setVisibility(Notification.VISIBILITY_PRIVATE)
       .setPublicVersion(publicVersion)
       .setContentIntent(openApp(flightId))
+      .setDeleteIntent(progressAction(DISMISS_PROGRESS_NOTIFICATION_ACTION, flightId, binding, instance))
       .addAction(Notification.Action.Builder(
-        null, getString(R.string.plano_live_stop_progress), stopProgress(flightId, binding, instance),
+        null, getString(R.string.plano_live_stop_progress), progressAction(STOP_PROGRESS_ACTION, flightId, binding, instance),
       ).build())
     if (Build.VERSION.SDK_INT >= 36) {
       builder.addExtras(Bundle().apply { putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true) })
@@ -218,12 +221,12 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     alarm.set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + delay, pending)
   }
 
-  private fun stopProgress(flightId: String, binding: String, instance: String): PendingIntent? {
+  private fun progressAction(action: String, flightId: String, binding: String, instance: String): PendingIntent? {
     // PendingIntent identity excludes extras. Separate each flight, binding, and start by its data URI.
     val key = hashPushIdentity("$binding\u0000$flightId\u0000$instance")
     val intent = Intent(this, PlanoFlightWidgetProvider::class.java)
-      .setAction(STOP_PROGRESS_ACTION)
-      .setData(Uri.parse("plano://stop-flight-progress/$key"))
+      .setAction(action)
+      .setData(Uri.parse("plano://flight-progress-action/$key"))
       .putExtra("flightId", flightId)
       .putExtra("binding", binding)
       .putExtra("instance", instance)

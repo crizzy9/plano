@@ -25,11 +25,15 @@ class PlanoFlightWidgetProvider : AppWidgetProvider() {
   override fun onReceive(context: Context, intent: Intent) {
     when (intent.action) {
       PlanoFlightWidget.REFRESH_ACTION -> AndroidPushSession.refreshWidget(context)
-      STOP_PROGRESS_ACTION -> {
+      STOP_PROGRESS_ACTION, DISMISS_PROGRESS_NOTIFICATION_ACTION -> {
         val flightId = intent.getStringExtra("flightId")?.takeIf(::validNotificationFlightId) ?: return
         val binding = intent.getStringExtra("binding") ?: return
         val instance = intent.getStringExtra("instance") ?: return
-        runCatching { AndroidPushSession.stop(context, flightId, LiveProgressAction(binding, instance)) }
+        val expected = LiveProgressAction(binding, instance)
+        runCatching {
+          if (intent.action == STOP_PROGRESS_ACTION) AndroidPushSession.stop(context, flightId, expected)
+          else AndroidPushSession.dismissProgressNotification(context, flightId, expected)
+        }
       }
       LEGACY_PROGRESS_EXPIRY_ACTION -> {
         val flightId = intent.getStringExtra("flightId") ?: return

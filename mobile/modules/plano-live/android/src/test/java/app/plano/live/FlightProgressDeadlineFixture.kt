@@ -67,5 +67,14 @@ fun main() {
   check(!acceptsLiveAfterStop(stoppedAt, true, stoppedAt / 1000, stoppedAt))
   check(acceptsLiveAfterStop(stoppedAt, true, newer / 1000, newer))
   check(acceptsLiveAfterStop(stoppedAt, true, newer / 1000, 0))
-  println("Flight progress deadline, selection, and stop fixtures passed")
+
+  val original = checkNotNull(nextLiveProgressNotification(null, started = true, ended = false) { "first" })
+  check(!original.dismiss("stale").dismissed)
+  val dismissed = original.dismiss("first")
+  check(dismissed.dismissed)
+  check(nextLiveProgressNotification(dismissed, started = false, ended = false) { error("ordinary update replaced the notice") } == dismissed)
+  check(nextLiveProgressNotification(dismissed, started = false, ended = true) { error("end created a notice") } == null)
+  val restarted = checkNotNull(nextLiveProgressNotification(dismissed, started = true, ended = false) { "second" })
+  check(!restarted.dismiss("first").dismissed)
+  println("Flight progress deadline, selection, stop, and notification dismissal fixtures passed")
 }

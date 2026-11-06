@@ -18,10 +18,10 @@ internal object AndroidPushSession {
     val sent: Long,
     val received: Long,
     val stoppedAt: Long = 0,
-    val instance: String? = null,
+    val notification: LiveProgressNotification? = null,
   )
 
-  data class AcceptedProgress(val instance: String?, val stoppedKeys: Set<String>)
+  data class AcceptedProgress(val notification: LiveProgressNotification?, val stoppedKeys: Set<String>)
   private data class AlertOrder(val received: Long, val revisions: Map<String, Long>)
   private data class State(
     val origin: String = "",
@@ -121,7 +121,7 @@ internal object AndroidPushSession {
     val key = hashPushIdentity(flightId)
     val previous = current.order[key]
     if (expected != null && (!current.enabled || current.generation != expected.binding ||
-        previous == null || previous.instance != expected.instance || previous.stoppedAt != 0L)) return
+        previous == null || previous.notification?.instance != expected.instance || previous.stoppedAt != 0L)) return
     try {
       if (current.enabled) {
         val now = System.currentTimeMillis()
@@ -137,6 +137,28 @@ internal object AndroidPushSession {
     } finally {
       context.getSystemService(NotificationManager::class.java)?.cancel(liveNotificationTag(flightId), 0)
       if (current.enabled) PlanoFlightWidget.stop(context, flightId, current.generation, state(context).stoppedKeys())
+    }
+  }
+
+  @Synchronized
+  fun dismissProgressNotification(context: Context, flightId: String, expected: LiveProgressAction) {
+    val current = state(context)
+    if (!current.enabled || current.generation != expected.binding) return
+    val key = hashPushIdentity(flightId)
+    val previous = current.order[key] ?: return
+    if (previous.stoppedAt != 0L) return
+    val notification = previous.notification ?: return
+    val dismissed = notification.dismiss(expected.instance)
+    if (dismissed == notification) return
+    val next = current.withOrder(key, previous.copy(notification = dismissed))
+    try {
+      write(context, next, verify = true)
+    } catch (cause: Exception) {
+      loaded = next
+      throw cause
+    } finally {
+      // A push may have reposted the row before the delete intent arrived.
+      context.getSystemService(NotificationManager::class.java)?.cancel(liveNotificationTag(flightId), 0)
     }
   }
 
@@ -192,10 +214,10 @@ internal object AndroidPushSession {
     val old = current.order[key]?.takeIf { it.received >= now - ORDER_TTL_MILLIS }
     if (!acceptsLiveAfterStop(old?.stoppedAt ?: 0, started, observedAt, sentAt)) return null
     if (old != null && (observedAt < old.observed || observedAt == old.observed && sentAt <= old.sent)) return null
-    val instance = if (ended) null else old?.instance?.takeUnless { started } ?: UUID.randomUUID().toString()
-    val next = current.withOrder(key, Order(observedAt, sentAt, now, instance = instance))
+    val notification = nextLiveProgressNotification(old?.notification, started, ended) { UUID.randomUUID().toString() }
+    val next = current.withOrder(key, Order(observedAt, sentAt, now, notification = notification))
     write(context, next)
-    return AcceptedProgress(instance, next.stoppedKeys())
+    return AcceptedProgress(notification, next.stoppedKeys())
   }
 
   private fun State.withOrder(key: String, entry: Order): State {
@@ -239,8 +261,11 @@ internal object AndroidPushSession {
       val entries = json.optJSONObject("order") ?: JSONObject()
       val order = entries.keys().asSequence().take(MAX_ORDER_ENTRIES).associateWith { id ->
         val entry = entries.getJSONObject(id)
+        val notification = (entry.opt("instance") as? String)?.takeIf(String::isNotEmpty)?.let {
+          LiveProgressNotification(it, entry.optBoolean("notificationDismissed"))
+        }
         Order(entry.getLong("observed"), entry.getLong("sent"), entry.getLong("received"), entry.optLong("stoppedAt"),
-          (entry.opt("instance") as? String)?.takeIf(String::isNotEmpty))
+          notification)
       }
       val alertEntries = json.optJSONObject("alertOrder") ?: JSONObject()
       val alertOrder = alertEntries.keys().asSequence().take(MAX_ORDER_ENTRIES).mapNotNull { id ->
@@ -266,7 +291,10 @@ internal object AndroidPushSession {
     for ((key, value) in state.order) {
       val entry = JSONObject().put("observed", value.observed).put("sent", value.sent).put("received", value.received)
       if (value.stoppedAt != 0L) entry.put("stoppedAt", value.stoppedAt)
-      value.instance?.let { entry.put("instance", it) }
+      value.notification?.let {
+        entry.put("instance", it.instance)
+        if (it.dismissed) entry.put("notificationDismissed", true)
+      }
       order.put(key, entry)
     }
     val alertOrder = JSONObject()
@@ -288,7 +316,7 @@ internal object AndroidPushSession {
       file.failWrite(stream)
       throw cause
     }
-    if (verify) check(file.readFully().contentEquals(bytes)) { "Could not save live progress stop" }
+    if (verify) check(file.readFully().contentEquals(bytes)) { "Could not save live progress state" }
     loaded = state
   }
 }

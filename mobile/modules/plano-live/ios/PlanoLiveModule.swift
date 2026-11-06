@@ -87,6 +87,10 @@ private struct DeviceRegistration: Encodable {
   let binding: String
 }
 
+private struct DeviceRegistrationFailure: Decodable {
+  let error: String
+}
+
 private enum RegistrationError: LocalizedError {
   case invalidServer, keychain, disabled, notConfigured, inactive, superseded
 
@@ -354,7 +358,8 @@ private final class PlanoActivityCoordinator {
   private func endActivity(_ activity: Activity<PlanoActivityAttributes>) async {
     guard locallyEnding.insert(activity.id).inserted else { return }
     removeObservation(for: activity)
-    await activity.end(nil, dismissalPolicy: .immediate)
+    // Removing the observation can cancel the upload task that requested dismissal.
+    await Task { await activity.end(nil, dismissalPolicy: .immediate) }.value
     locallyEnding.remove(activity.id)
   }
 
@@ -445,8 +450,18 @@ private final class PlanoActivityCoordinator {
     request.httpBody = body
     for attempt in 0..<3 {
       guard isCurrent(generation) else { return true }
-      if let (_, response) = try? await transport.data(for: request),
+      if let (data, response) = try? await transport.data(for: request),
          let http = response as? HTTPURLResponse {
+        // Both a registration change and a replacement token cancel old uploads.
+        guard isCurrent(generation) else { return true }
+        if http.statusCode == 404, http.mimeType == "application/json",
+           (try? JSONDecoder().decode(DeviceRegistrationFailure.self, from: data))?.error == "record not found",
+           case let .update(activityID, flightID) = slot,
+           let activity = Activity<PlanoActivityAttributes>.activities.first(where: {
+             $0.id == activityID && $0.attributes.flightId == flightID && $0.attributes.activityBinding == binding
+           }) {
+          await endActivity(activity)
+        }
         if (200..<500).contains(http.statusCode) && http.statusCode != 408 && http.statusCode != 429 { return true }
       }
       if attempt < 2 {

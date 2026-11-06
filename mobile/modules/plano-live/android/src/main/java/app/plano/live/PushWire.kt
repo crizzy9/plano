@@ -22,6 +22,22 @@ internal fun acceptsLiveAfterStop(stoppedAt: Long, started: Boolean, observedAt:
   return stoppedAt == 0L || started && delivery > stoppedAt && observedAt >= stoppedAt / 1000
 }
 
+internal data class LiveProgressNotification(val instance: String, val dismissed: Boolean = false) {
+  fun dismiss(expectedInstance: String): LiveProgressNotification =
+    if (instance == expectedInstance) copy(dismissed = true) else this
+}
+
+internal fun nextLiveProgressNotification(
+  previous: LiveProgressNotification?,
+  started: Boolean,
+  ended: Boolean,
+  newInstance: () -> String,
+): LiveProgressNotification? = when {
+  ended -> null
+  !started && previous != null -> previous
+  else -> LiveProgressNotification(newInstance())
+}
+
 internal fun hashPushIdentity(id: String) =
   MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 

@@ -445,6 +445,9 @@ again when the app relaunches. The server replaces an older token in the
 same installation and Live Activity slot when it accepts the rotated token.
 The app persists a registration counter in Keychain so the server can ignore
 an older write that arrives out of order.
+If a delayed remote start arrives after you untrack a flight, the app can
+dismiss that activity when the server confirms the flight is missing from
+your tracked list.
 
 Turning off alerts or switching servers records a cutoff for the previous
 installation. Plano retries a pending revocation when the app returns to the
@@ -487,11 +490,13 @@ a progress notification can show a live countdown and requests expiry at its
 target or 20 minutes after the flight observation, whichever comes first. A
 fresh push can restore progress after the countdown ends. Android 7 uses a
 static system timestamp and an inexact alarm for the observation deadline.
+Swiping away a progress notification keeps it dismissed for that live
+session. The flight widget can still receive updates.
 Choose **Stop live progress** on the private notification to clear that
 flight's progress from the notification and widget. Flight tracking and
 ordinary alerts continue. The device ignores queued progress until a newer
 live start. Removing and tracking the flight again allows a fresh start.
-[Android notification timeout](https://developer.android.com/reference/android/app/Notification.Builder#setTimeoutAfter(long))
+[Android notification timeout](https://developer.android.com/reference/android/app/Notification.Builder#setTimeoutAfter(long)) · [Android Live Update dismissal](https://developer.android.com/develop/ui/views/notifications/live-update#dismissal)
 
 The Android widget shows phase, progress, and a labeled departure or arrival
 estimate in the device's local time. With Android flight alerts enabled,

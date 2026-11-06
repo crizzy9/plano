@@ -71,4 +71,30 @@ func TestActivityBindingRequestValidation(t *testing.T) {
 			}
 		})
 	}
+	untrack := httptest.NewRequest(http.MethodDelete, "/v1/tracked/"+flight.ID, nil)
+	untrack.Header.Set("Authorization", "Bearer "+installationToken)
+	untracked := httptest.NewRecorder()
+	handler.ServeHTTP(untracked, untrack)
+	if untracked.Code != http.StatusNoContent {
+		t.Fatalf("untrack returned %d: %s", untracked.Code, untracked.Body.String())
+	}
+
+	// APNs can deliver a start after untracking. Its new slot has never
+	// registered, even though it carries the same installation binding.
+	late, err := json.Marshal(core.Device{Platform: "ios", Kind: "live_update", Token: token, Binding: binding,
+		FlightID: flight.ID, LiveSlot: "activity:" + strings.Repeat("b", 64), LiveRevision: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := httptest.NewRequest(http.MethodPost, "/v1/devices", bytes.NewReader(late))
+	update.Header.Set("Authorization", "Bearer "+installationToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, update)
+	var problem struct {
+		Error string `json:"error"`
+	}
+	if response.Code != http.StatusNotFound || response.Header().Get("Content-Type") != "application/json" ||
+		json.Unmarshal(response.Body.Bytes(), &problem) != nil || problem.Error != "record not found" {
+		t.Fatalf("late live update returned %d: %s", response.Code, response.Body.String())
+	}
 }
