@@ -145,6 +145,22 @@ export interface ImportResult {
   nextOffset?: number;
 }
 
+export interface TripItSubscriptionStatus {
+  available: boolean;
+  enabled: boolean;
+  nextSyncAt?: string;
+  lastSyncAt?: string;
+  status?: 'pending' | 'synced' | 'unavailable';
+  matched?: number;
+  unmatched?: number;
+}
+
+export interface PartnerBooking {
+  carrier: string;
+  locator: string;
+  lastName: string;
+}
+
 export type ImportSource = 'calendar' | 'email' | 'tripit';
 
 export interface Device {
@@ -509,6 +525,20 @@ export function createAPI(server: string, options: { allowEnrollment?: boolean }
     importTripIt: (url: string, offset = 0) => authenticated<ImportResult>('/v1/import/tripit', {
       method: 'POST', body: JSON.stringify({ url, offset }),
     }, 28_000),
+    async tripItSubscription(): Promise<TripItSubscriptionStatus> {
+      try {
+        return await authenticated<TripItSubscriptionStatus>('/v1/import/tripit/subscription');
+      } catch (error) {
+        if (error instanceof APIError && [404, 405, 501].includes(error.status)) {
+          return { available: false, enabled: false };
+        }
+        throw error;
+      }
+    },
+    saveTripItSubscription: (url: string) => authenticated<void>('/v1/import/tripit/subscription', {
+      method: 'PUT', body: JSON.stringify({ url }),
+    }),
+    removeTripItSubscription: () => authenticated<void>('/v1/import/tripit/subscription', { method: 'DELETE' }),
     createEmailRelay: () => authenticated<{ url: string; token: string }>('/v1/import/email-relay', {
       method: 'POST', body: '{}',
     }),
@@ -516,6 +546,18 @@ export function createAPI(server: string, options: { allowEnrollment?: boolean }
     lookupBooking: (locator: string) => authenticated<{ flights: Flight[] }>('/v1/bookings/lookup', {
       method: 'POST', body: JSON.stringify({ locator }),
     }),
+    async resolveBooking(details: PartnerBooking) {
+      try {
+        return await authenticated<ImportResult>('/v1/bookings/resolve', {
+          method: 'POST', body: JSON.stringify(details),
+        }, 28_000);
+      } catch (error) {
+        if (error instanceof APIError && [404, 503].includes(error.status)) {
+          throw new Error('The partner booking lookup could not return a booking. Check the details or contact your Plano server operator.');
+        }
+        throw error;
+      }
+    },
     importFlights: (source: ImportSource, text: string, date?: string) =>
       authenticated<ImportResult>('/v1/import', {
         method: 'POST', body: JSON.stringify({ source, text, date }),

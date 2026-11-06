@@ -83,7 +83,7 @@ func (s Server) importTripIt(w http.ResponseWriter, r *http.Request, owner strin
 	if err != nil {
 		return err
 	}
-	parsed, err := itinerary.SubscriptionCalendar(calendar)
+	parsed, err := itinerary.SubscriptionCalendar(calendar, "")
 	if err != nil {
 		return errInvalid
 	}

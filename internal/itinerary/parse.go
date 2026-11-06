@@ -35,7 +35,7 @@ func Parse(text, date string) (Itinerary, error) {
 		return Itinerary{}, ErrInvalid
 	}
 	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(text)), "BEGIN:VCALENDAR") {
-		return calendar(text, MaxFlights)
+		return calendar(text, MaxFlights, "")
 	}
 	return fromText(text, date), nil
 }

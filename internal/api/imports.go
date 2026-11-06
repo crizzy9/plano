@@ -189,6 +189,43 @@ func (s Server) emailWebhook(w http.ResponseWriter, r *http.Request) {
 
 var bookingPattern = regexp.MustCompile(`^[A-Z0-9]{6}$`)
 
+func (s Server) resolveBooking(w http.ResponseWriter, r *http.Request, _ string) error {
+	if s.ReservationSource == nil {
+		return feeds.ErrUnavailable
+	}
+	var input struct {
+		Carrier  string `json:"carrier"`
+		Locator  string `json:"locator"`
+		LastName string `json:"lastName"`
+	}
+	if err := parse(w, r, &input, 1024); err != nil {
+		return err
+	}
+	query, err := feeds.NormalizeReservationQuery(feeds.ReservationQuery{Carrier: input.Carrier, Locator: input.Locator, Surname: input.LastName})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	legs, err := s.ReservationSource.Lookup(ctx, query)
+	if errors.Is(err, feeds.ErrNotFound) || err == nil && len(legs) == 0 {
+		return feeds.ErrNotFound
+	}
+	if err != nil || len(legs) > itinerary.MaxFlights {
+		return feeds.ErrUnavailable
+	}
+	parsed := itinerary.Itinerary{Legs: make([]itinerary.Leg, 0, len(legs))}
+	for _, leg := range legs {
+		parsed.Legs = append(parsed.Legs, itinerary.Leg{Number: leg.Number, Date: leg.Date})
+	}
+	result, err := s.resolveItinerary(ctx, parsed)
+	if err != nil {
+		return err
+	}
+	respond(w, http.StatusOK, result)
+	return nil
+}
+
 func (s Server) bookingDigest(owner, code string) string {
 	if len(s.BookingKey) == 0 || !bookingPattern.MatchString(code) {
 		return ""

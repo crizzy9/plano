@@ -5,11 +5,11 @@ import (
 	"time"
 )
 
-// SubscriptionCalendar reads a bounded feed so callers can select a page of
-// upcoming flights before falling back to history.
-func SubscriptionCalendar(text string) (Itinerary, error) { return calendar(text, 1024) }
+// SubscriptionCalendar reads a bounded feed. Pass an inclusive YYYY-MM-DD
+// cutoff to leave older events outside the leg limit, or an empty cutoff for history.
+func SubscriptionCalendar(text, from string) (Itinerary, error) { return calendar(text, 1024, from) }
 
-func calendar(text string, limit int) (Itinerary, error) {
+func calendar(text string, limit int, from string) (Itinerary, error) {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "\n ", ""), "\n\t", "")
 	result := Itinerary{}
@@ -36,7 +36,7 @@ func calendar(text string, limit int) (Itinerary, error) {
 				continue
 			}
 			active = false
-			if cancelled || recurring || start == "" {
+			if cancelled || recurring || start == "" || start < from {
 				continue
 			}
 			before := len(result.Legs)

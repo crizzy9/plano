@@ -24,6 +24,8 @@ type Server struct {
 	PublicURL          string
 	EnrollmentCode     string
 	BookingKey         []byte
+	ReservationSource  feeds.ReservationSource
+	TripItSync         *TripItSync
 	ConnectionRules    *ConnectionRules
 	Demo               bool
 	Logger             *slog.Logger
@@ -92,10 +94,14 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/connections", s.auth(s.connection))
 	mux.HandleFunc("POST /v1/import", s.auth(s.importFlights))
 	mux.HandleFunc("POST /v1/import/tripit", s.auth(s.importTripIt))
+	mux.HandleFunc("GET /v1/import/tripit/subscription", s.auth(s.tripItSubscription))
+	mux.HandleFunc("PUT /v1/import/tripit/subscription", s.auth(s.tripItSubscription))
+	mux.HandleFunc("DELETE /v1/import/tripit/subscription", s.auth(s.tripItSubscription))
 	mux.HandleFunc("POST /v1/import/email-relay", s.auth(s.emailRelay))
 	mux.HandleFunc("DELETE /v1/import/email-relay", s.auth(s.emailRelay))
 	mux.HandleFunc("POST /v1/webhooks/email", s.emailWebhook)
 	mux.HandleFunc("POST /v1/bookings/lookup", s.auth(s.booking))
+	mux.HandleFunc("POST /v1/bookings/resolve", s.auth(s.resolveBooking))
 	if len(s.AeroCallbackKey) != 0 {
 		mux.HandleFunc("POST /v1/webhooks/aeroapi", s.aeroCallback)
 	}

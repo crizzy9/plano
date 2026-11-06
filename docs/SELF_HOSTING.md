@@ -201,6 +201,20 @@ Set `PLANO_BOOKING_KEY_FILE` to a read-only private key file to index imported
 booking locators. Email relays and the TripIt import have their own input
 contracts. [Flight imports](FLIGHT_IMPORTS.md)
 
+In live mode, set `PLANO_TRIPIT_SYNC_KEY_FILE` to a mounted file with a stable
+random key of at least 32 bytes to enable scheduled TripIt imports. Keep the
+key with your deployment credentials when moving or restoring the database.
+Set `PLANO_TRIPIT_SYNC_INTERVAL` to a duration from `5m` to `24h`, with a
+default of `30m`. Removing the key pauses the worker. Installations can still
+remove their subscriptions. Replacing the key requires users to re-enter
+their feed URLs.
+
+Set `PLANO_RESERVATION_GATEWAY_URL` and `PLANO_RESERVATION_GATEWAY_TOKEN_FILE`
+to enable partner booking lookup in live mode. This integration uses an
+operator-managed reservation bridge with licensed access. Restrict enrollment
+on publicly reachable deployments and apply lookup limits at the bridge.
+[Reservation gateway contract](RESERVATION_GATEWAY.md)
+
 Set `PLANO_COLLECT_DELAY_SAMPLES=true` in live mode to collect one forecast
 snapshot per flight from 30 to 120 minutes before scheduled gate-out, with
 its eventual reported outcome. Confirm that your source license permits model

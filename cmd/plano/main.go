@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -111,10 +113,14 @@ func run(logger *slog.Logger) error {
 		}
 	}
 	var flights feeds.FlightSource
+	var aeroAPI *feeds.AeroAPI
+	var aeroSubscriptions *core.AeroSubscriptionOptions
 	var advisories []feeds.AdvisorySource
 	var receiver *feeds.ADSBReceiver
 	var registry *feeds.FAARegistry
 	var sender push.Sender
+	var reservationSource feeds.ReservationSource
+	var tripItSync *api.TripItSync
 	if demo {
 		flights = demodata.Source{}
 	} else {
@@ -125,7 +131,57 @@ func run(logger *slog.Logger) error {
 		if len(key) == 0 {
 			return errors.New("live mode requires PLANO_AEROAPI_KEY or PLANO_AEROAPI_KEY_FILE; enable PLANO_DEMO for synthetic data")
 		}
-		flights = feeds.NewAeroAPI(string(key), nil)
+		aeroAPI = feeds.NewAeroAPI(string(key), nil)
+		flights = aeroAPI
+		enableSubscriptions, err := flag("PLANO_AERO_SUBSCRIPTIONS", false)
+		if err != nil {
+			return err
+		}
+		if enableSubscriptions {
+			maxActive, err := strconv.Atoi(env("PLANO_AERO_SUBSCRIPTIONS_MAX", "10"))
+			if err != nil {
+				return errors.New("invalid PLANO_AERO_SUBSCRIPTIONS_MAX")
+			}
+			cadence, err := time.ParseDuration(env("PLANO_AERO_SUBSCRIPTIONS_INTERVAL", "5m"))
+			if err != nil {
+				return errors.New("invalid PLANO_AERO_SUBSCRIPTIONS_INTERVAL")
+			}
+			if len(aeroCallbackKey) == 0 || !strings.HasPrefix(publicURL, "https://") {
+				return errors.New("PLANO_AERO_SUBSCRIPTIONS requires PLANO_AEROALERTS_KEY_FILE and an HTTPS PLANO_PUBLIC_URL")
+			}
+			aeroSubscriptions = &core.AeroSubscriptionOptions{
+				CallbackURL: publicURL + "/v1/webhooks/aeroapi?token=" + url.QueryEscape(string(aeroCallbackKey)),
+				MaxActive:   maxActive,
+				Interval:    cadence,
+			}
+			if err := aeroSubscriptions.Validate(); err != nil {
+				return err
+			}
+		}
+		tripItKey, err := secret("", "PLANO_TRIPIT_SYNC_KEY_FILE")
+		if err != nil {
+			return err
+		}
+		if len(tripItKey) != 0 {
+			cadence, err := time.ParseDuration(env("PLANO_TRIPIT_SYNC_INTERVAL", "30m"))
+			if err != nil {
+				return errors.New("invalid PLANO_TRIPIT_SYNC_INTERVAL")
+			}
+			tripItSync, err = api.NewTripItSync(tripItKey, cadence)
+			if err != nil {
+				return err
+			}
+		}
+		if endpoint := os.Getenv("PLANO_RESERVATION_GATEWAY_URL"); endpoint != "" {
+			token, err := secret("PLANO_RESERVATION_GATEWAY_TOKEN", "PLANO_RESERVATION_GATEWAY_TOKEN_FILE")
+			if err != nil {
+				return err
+			}
+			reservationSource, err = feeds.NewReservationGateway(endpoint, string(token), nil)
+			if err != nil {
+				return err
+			}
+		}
 		enableFAA, err := flag("PLANO_FAA_NAS", true)
 		if err != nil {
 			return err
@@ -200,6 +256,17 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer store.Close()
+	service := api.Server{
+		Store: store, Source: flights, PublicURL: publicURL, EnrollmentCode: string(enrollment),
+		BookingKey: bookingKey, ReservationSource: reservationSource, TripItSync: tripItSync, ConnectionRules: connections,
+		AeroCallbackKey: aeroCallbackKey, AdvisoryIngressKey: advisoryIngressKey, Demo: demo, Logger: logger,
+	}
+	server := &http.Server{Addr: env("PLANO_ADDR", ":8080"), Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	var workers sync.WaitGroup
 	defer workers.Wait()
@@ -216,10 +283,14 @@ func run(logger *slog.Logger) error {
 	if len(aeroCallbackKey) != 0 {
 		workers.Go(func() { store.RunAeroRefresh(ctx, flights, logger) })
 	}
-	handler := api.Server{Store: store, Source: flights, PublicURL: publicURL, EnrollmentCode: string(enrollment), BookingKey: bookingKey, ConnectionRules: connections, AeroCallbackKey: aeroCallbackKey, AdvisoryIngressKey: advisoryIngressKey, Demo: demo, Logger: logger}.Handler()
-	server := &http.Server{Addr: env("PLANO_ADDR", ":8080"), Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	if aeroSubscriptions != nil {
+		workers.Go(func() { store.RunAeroSubscriptions(ctx, aeroAPI, *aeroSubscriptions, logger) })
+	}
+	if tripItSync != nil {
+		workers.Go(func() { service.RunTripItSync(ctx) })
+	}
 	done := make(chan error, 1)
-	go func() { done <- server.ListenAndServe() }()
+	go func() { done <- server.Serve(listener) }()
 	logger.Info("plano starting", "addr", server.Addr, "demo", demo, "apns", sender.APNs != nil, "fcm", sender.FCM != nil)
 	select {
 	case err := <-done:

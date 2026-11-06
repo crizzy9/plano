@@ -169,6 +169,9 @@ func (s aeroSchedule) normalize(key scheduleKey, now time.Time) Flight {
 		Status: "scheduled", ScheduledDeparture: s.Departure, ScheduledArrival: s.Arrival,
 		AircraftType: s.AircraftType, ObservedAt: now, Source: "flightaware_schedule",
 	}
+	if aeroAlertIdent.MatchString(key.OperatingNumber) {
+		flight.ICAONumber = key.OperatingNumber
+	}
 	if providerIdentifier.MatchString(s.ID) {
 		flight.ID, flight.providerID = s.ID, s.ID
 	}

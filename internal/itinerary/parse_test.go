@@ -2,11 +2,29 @@ package itinerary
 
 import (
 	"encoding/base64"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestSubscriptionCalendarFiltersHistoryBeforeApplyingLegLimit(t *testing.T) {
+	var feed strings.Builder
+	feed.WriteString("BEGIN:VCALENDAR\r\n")
+	for index := 1; index <= 1024; index++ {
+		fmt.Fprintf(&feed, "BEGIN:VEVENT\r\nDTSTART:20260101T120000Z\r\nSUMMARY:Flight UA%d\r\nEND:VEVENT\r\n", index)
+	}
+	feed.WriteString("BEGIN:VEVENT\r\nDTSTART:20261201T120000Z\r\nSUMMARY:Flight UA123\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	upcoming, err := SubscriptionCalendar(feed.String(), "2026-11-30")
+	if err != nil || upcoming.Truncated || len(upcoming.Legs) != 1 || upcoming.Legs[0].Date != "2026-12-01" {
+		t.Fatalf("unexpected upcoming result: %+v, %v", upcoming, err)
+	}
+	history, err := SubscriptionCalendar(feed.String(), "")
+	if err != nil || !history.Truncated || len(history.Legs) != 1024 {
+		t.Fatalf("unexpected history result: %d legs, truncated=%v, %v", len(history.Legs), history.Truncated, err)
+	}
+}
 
 func TestEmailItineraryWithHTMLAndMultipleLegs(t *testing.T) {
 	html := `<html><head><script>UA999 on 5 Jan 2027</script></head><body>

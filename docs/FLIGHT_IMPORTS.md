@@ -22,8 +22,14 @@ Send at most 256 KiB per message. The parser recognizes plain text, HTML text, f
 
 ## Import a TripIt calendar feed
 
-Enable TripIt's calendar feed and detailed itinerary items, then copy its private calendar URL into the TripIt field in Plano. Keep the URL private. Plano reads the feed over HTTPS from TripIt and adds recognized flights in pages of eight, starting with upcoming trips. Choose **Import next TripIt flights** to continue through your history. The server does not retain the URL. [TripIt calendar feed setup](https://help.tripit.com/en/support/solutions/articles/103000063280-calendar-feed-setup-and-sync) · [TripIt detailed items](https://help.tripit.com/en/support/solutions/articles/103000063363-plans-not-appearing-in-calendar)
+Enable TripIt's calendar feed and detailed itinerary items, then copy its private calendar URL into the TripIt field in Plano. Keep the URL private. A one-time import reads the feed over HTTPS and adds recognized flights in pages of eight, starting with upcoming trips. Choose **Import next TripIt flights** to continue through your history. A one-time import uses the URL only for the request. [TripIt calendar feed setup](https://help.tripit.com/en/support/solutions/articles/103000063280-calendar-feed-setup-and-sync) · [TripIt detailed items](https://help.tripit.com/en/support/solutions/articles/103000063363-plans-not-appearing-in-calendar)
+
+If your server enables **Automatic TripIt sync**, you can save the same feed for recurring imports. The server encrypts the URL and checks for new upcoming flights. The sync status reports the last check and the next scheduled check. Choose **Stop TripIt sync** to remove the stored feed and stop future imports. Flights already imported remain in your list. [Self-host configuration](SELF_HOSTING.md#airport-routing-imports-and-delay-models)
 
 ## Find an imported booking by confirmation code
 
-Set `PLANO_BOOKING_KEY_FILE` to a mounted private file containing a stable random secret of at least 32 bytes. Plano stores an installation-scoped keyed digest of a recognized six-character locator. The booking lookup returns flights already imported and still tracked by that installation. It cannot query airline reservations. Rotating the key makes previous locator digests unavailable for lookup until a fresh import.
+Set `PLANO_BOOKING_KEY_FILE` to a mounted private file containing a stable random secret of at least 32 bytes. Plano stores an installation-scoped keyed digest of a recognized six-character locator. The booking lookup returns flights already imported and still tracked by that installation. Rotating the key makes previous locator digests unavailable for lookup until a fresh import.
+
+## Look up a reservation through a partner
+
+Open **Partner booking lookup** and enter the carrier code, six-character confirmation code, and traveler last name. With a configured bridge, the server sends those details to the operator's licensed reservation partner. Review matched flights and select the ones you want to track. Plano does not save the submitted reservation credentials. [Reservation gateway contract](RESERVATION_GATEWAY.md)

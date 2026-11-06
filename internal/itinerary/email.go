@@ -44,7 +44,7 @@ func Email(raw []byte) (Itinerary, error) {
 		seen[leg] = true
 	}
 	for _, value := range parts.calendars {
-		extra, err := calendar(value, MaxFlights)
+		extra, err := calendar(value, MaxFlights, "")
 		if err != nil {
 			continue
 		}

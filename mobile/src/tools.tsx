@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Linking, Platform, StyleSheet, Text, View } from 'react-native';
-import type { Connection, Flight, ImportResult, ImportSource, Passport, PlanoAPI } from './api';
+import type { Connection, Flight, ImportResult, ImportSource, PartnerBooking, Passport, PlanoAPI } from './api';
 import { errorText, validDate } from './flight';
 import { Page, useRemote, type Screen } from './screens';
 import { usePalette } from './theme';
 import { calendarFlights, calendarSyncEnabled, setCalendarSyncEnabled } from './calendar-sync';
 import { PassportCard } from './passport-card';
 import { PassportMaps } from './passport-maps';
+import { TripItSync } from './tripit-sync';
+import { ReservationLookup } from './reservation-lookup';
 import { Action, Body, ErrorMessage, FlightRow, Heading, Input, Loading, layout } from './ui';
 
 export function Tools({ navigation }: Screen<'Tools'>) {
@@ -37,15 +39,18 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
   const [result, setResult] = useState<ImportResult>();
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
+  const importActive = useRef(false);
 
   const [tripItURL, setTripItURL] = useState('');
   const [tripItOffset, setTripItOffset] = useState(0);
+  const tripItPage = useRef<ImportResult>(undefined);
   const [locator, setLocator] = useState('');
   const [relay, setRelay] = useState<{ url: string; token: string }>();
   const [notice, setNotice] = useState<string>();
 
   async function runImport(action: () => Promise<void>) {
-    if (pending) return;
+    if (importActive.current) return;
+    importActive.current = true;
     setError(undefined);
     setNotice(undefined);
     setPending(true);
@@ -54,18 +59,20 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
     } catch (cause) {
       setError(errorText(cause));
     } finally {
+      importActive.current = false;
       setPending(false);
     }
   }
 
   async function submit(fromCalendar = false) {
-    if (pending) return;
+    if (importActive.current) return;
     setError(undefined);
     setResult(undefined);
     if (!fromCalendar && (!text.trim() || date && !validDate(date))) {
       setError('Enter flight details and use YYYY-MM-DD if you supply a departure date.');
       return;
     }
+    importActive.current = true;
     setPending(true);
     try {
       if (fromCalendar) {
@@ -90,6 +97,23 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
     } catch (cause) {
       setError(errorText(cause));
     } finally {
+      importActive.current = false;
+      setPending(false);
+    }
+  }
+
+  async function resolvePartnerBooking(details: PartnerBooking) {
+    if (importActive.current) throw new Error('Wait for the current import to finish.');
+    importActive.current = true;
+    setError(undefined);
+    setNotice(undefined);
+    setResult(undefined);
+    setPending(true);
+    try {
+      const booking = await api.resolveBooking(details);
+      setResult(booking);
+    } finally {
+      importActive.current = false;
       setPending(false);
     }
   }
@@ -122,24 +146,30 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
       <Input label="Departure date (optional)" value={date} onChangeText={setDate} editable={!pending}
         placeholder="YYYY-MM-DD" maxLength={10} />
       <Action label="Import flights" onPress={() => submit()} busy={pending} />
-      <Heading>TripIt calendar feed</Heading>
-      <Body>Import from the private calendar feed in your TripIt account settings.</Body>
-      <Input label="TripIt calendar URL" value={tripItURL} onChangeText={(value) => { setTripItURL(value); setTripItOffset(0); }}
-        editable={!pending} autoCapitalize="none" autoCorrect={false} secureTextEntry maxLength={1024} />
+      <Heading>Import a TripIt feed once</Heading>
+      <Body>Copy the private URL from Calendar Feed in your TripIt account settings.</Body>
+      <Input label="TripIt calendar URL" value={tripItURL} onChangeText={(value) => {
+        setTripItURL(value);
+        setTripItOffset(0);
+        tripItPage.current = undefined;
+      }} editable={!pending} autoComplete="off" autoCapitalize="none" autoCorrect={false} secureTextEntry maxLength={1024} />
       <Action label={tripItOffset ? 'Import next TripIt flights' : 'Import TripIt feed'} secondary disabled={pending || !tripItURL.trim()}
         onPress={() => void runImport(async () => {
           const next = await api.importTripIt(tripItURL.trim(), tripItOffset);
-          if (tripItOffset && result) {
-            const flights = new Map([...result.flights, ...next.flights].map((flight) => [flight.id, flight]));
-            setResult({ ...next, flights: [...flights.values()], unmatched: [...new Set([...result.unmatched, ...next.unmatched])] });
-          } else {
-            setResult(next);
-          }
+          const previous = tripItOffset ? tripItPage.current : undefined;
+          const combined = previous ? {
+            ...next,
+            flights: [...new Map([...previous.flights, ...next.flights].map((flight) => [flight.id, flight])).values()],
+            unmatched: [...new Set([...previous.unmatched, ...next.unmatched])],
+          } : next;
+          setResult(combined);
           setTripItOffset(next.nextOffset ?? 0);
+          tripItPage.current = next.nextOffset === undefined ? undefined : combined;
           if (next.nextOffset === undefined) setTripItURL('');
         })} />
-      <Heading>Booking lookup</Heading>
-      <Body>Find flights already imported on this server using your confirmation code.</Body>
+      <TripItSync api={api} disabled={pending} />
+      <Heading>Find an imported booking</Heading>
+      <Body>Use your confirmation code to find flights already imported on this server.</Body>
       <Input label="Confirmation code" value={locator} onChangeText={setLocator}
         autoCapitalize="characters" autoCorrect={false} editable={!pending} maxLength={6} />
       <Action label="Find imported booking" secondary disabled={pending || !/^[a-z0-9]{6}$/i.test(locator)}
@@ -149,6 +179,7 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
           setResult({ flights: booking.flights, unmatched: [] });
           setLocator('');
         })} />
+      <ReservationLookup disabled={pending} resolve={resolvePartnerBooking} />
       <Heading>Email relay</Heading>
       <Body>Connect a mail relay to import forwarded booking emails. Keep its token private.</Body>
       <View style={layout.actions}>
