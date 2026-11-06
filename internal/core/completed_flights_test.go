@@ -153,7 +153,7 @@ func TestCompletedFlightPageKeepsTiesAndMissingTimesAcrossInserts(t *testing.T) 
 }
 
 func TestCompletedFlightPageFillsMissingCompatibleAliasMeasurements(t *testing.T) {
-	for _, name := range []string{"compatible", "route conflict", "chronology conflict", "explicit facts"} {
+	for _, name := range []string{"compatible", "ICAO display fallback", "ICAO conflict", "IATA conflict", "chronology conflict", "explicit facts"} {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			s, err := Open(filepath.Join(t.TempDir(), "passport.db"))
@@ -170,8 +170,13 @@ func TestCompletedFlightPageFillsMissingCompatibleAliasMeasurements(t *testing.T
 			flight := feeds.Flight{ID: "UAL1-canonical", Source: "flightaware_aeroapi", Status: "arrived", ObservedAt: now,
 				Origin: "LAX", Destination: "SFO", ActualTakeoff: new(departure.Add(5 * time.Minute))}
 			switch name {
-			case "route conflict":
+			case "ICAO display fallback":
+				flight.Origin, flight.OriginICAO = "KLAX", "KLAX"
+				flight.Destination, flight.DestinationICAO = "KSFO", "KSFO"
+			case "ICAO conflict":
 				flight.DestinationICAO = "KOAK"
+			case "IATA conflict":
+				flight.Destination, flight.DestinationICAO = "OAK", "KSFO"
 			case "chronology conflict":
 				flight.ActualLanding = new(arrival.Add(time.Minute))
 			case "explicit facts":
@@ -196,8 +201,11 @@ func TestCompletedFlightPageFillsMissingCompatibleAliasMeasurements(t *testing.T
 			if got.ID != flight.ID || !got.ObservedAt.Equal(now) {
 				t.Fatalf("older alias replaced current snapshot: %+v", got)
 			}
-			if name == "route conflict" {
-				if got.DestinationICAO != "KOAK" || got.OriginICAO != "" || got.ActualArrival != nil || got.ScheduledArrival != nil ||
+			if got.Origin != flight.Origin || got.Destination != flight.Destination {
+				t.Fatalf("older alias replaced current display codes: %+v", got)
+			}
+			if name == "ICAO conflict" || name == "IATA conflict" {
+				if got.DestinationICAO != flight.DestinationICAO || got.OriginICAO != "" || got.ActualArrival != nil || got.ScheduledArrival != nil ||
 					got.ActualDeparture != nil || got.DistanceMiles != nil || got.TailNumber != "" {
 					t.Fatalf("conflicting route supplied measurements: %+v", got)
 				}

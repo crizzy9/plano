@@ -51,9 +51,14 @@ const completedFlightsSQL = `WITH owned AS MATERIALIZED (
   SELECT r.id,r.observed_ns,r.cursor_id,(
     SELECT older.id FROM owned older
     WHERE older.provider_id=r.provider_id AND older.id<>r.id AND older.status='arrived'
-      AND (older.origin='' OR r.origin='' OR older.origin=r.origin)
+      -- AeroAPI uses ICAO as the display code when the IATA code is absent.
+      AND (older.origin='' OR r.origin='' OR older.origin=r.origin OR (
+        r.origin_icao<>'' AND older.origin_icao=r.origin_icao AND r.origin_icao IN (older.origin,r.origin)
+      ))
       AND (older.origin_icao='' OR r.origin_icao='' OR older.origin_icao=r.origin_icao)
-      AND (older.destination='' OR r.destination='' OR older.destination=r.destination)
+      AND (older.destination='' OR r.destination='' OR older.destination=r.destination OR (
+        r.destination_icao<>'' AND older.destination_icao=r.destination_icao AND r.destination_icao IN (older.destination,r.destination)
+      ))
       AND (older.destination_icao='' OR r.destination_icao='' OR older.destination_icao=r.destination_icao)
     ORDER BY older.observed_ns DESC,(older.id=older.provider_id) DESC,older.id LIMIT 1
   ) AS older_id
