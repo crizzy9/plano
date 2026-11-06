@@ -1,0 +1,136 @@
+name: Verify Plano
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  EXPO_NO_TELEMETRY: '1'
+  NODE_OPTIONS: --max-old-space-size=1024
+
+jobs:
+  backend:
+    name: Go and self-hosted demo
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CGO_ENABLED: '1'
+      GOMAXPROCS: '2'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.26.10'
+          cache-dependency-path: go.sum
+      - run: go test -race -p=1 ./...
+      - run: go vet -p=1 ./...
+      - run: bash deploy/verify-demo.sh
+
+  mobile:
+    name: Mobile fixtures and bundles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+      - run: node --test --test-concurrency=1 scripts/*.test.cjs
+      - run: npm run typecheck
+      - run: |
+          npx --no-install expo export --platform android --max-workers 1 --output-dir "$RUNNER_TEMP/plano-android-bundle"
+          npx --no-install expo export --platform ios --max-workers 1 --output-dir "$RUNNER_TEMP/plano-ios-bundle"
+
+  android:
+    name: Android ARM64 preview
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PLANO_ANDROID_PREVIEW_BUILD: '1'
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e # v5.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android build tools
+        run: sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.1.12297006' 'cmake;3.22.1'
+      - run: npm ci
+      - run: npx --no-install expo prebuild --platform android --no-install
+      - name: Compile and verify the preview APK
+        working-directory: mobile/android
+        run: |
+          ./gradlew --no-daemon --max-workers=1 --no-parallel \
+            '-Dorg.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=768m -XX:ActiveProcessorCount=2' \
+            -Pkotlin.compiler.execution.strategy=in-process -PreactNativeArchitectures=arm64-v8a :app:assembleRelease
+          apk=app/build/outputs/apk/release/app-release.apk
+          test -s "$apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$apk" | grep -E "^native-code: 'arm64-v8a'[[:space:]]*$"
+
+  ios:
+    name: iOS simulator and widget
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+      - name: Generate the Xcode workspace
+        run: |
+          xcodebuild -version
+          npx --no-install expo prebuild --platform ios --no-install
+          pod install --project-directory=ios
+      - name: Compile the app and verify the embedded Live Activity extension
+        run: |
+          derived_data="$RUNNER_TEMP/plano-ios"
+          xcodebuild -workspace ios/Plano.xcworkspace -scheme Plano \
+            -configuration Release -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$derived_data" -jobs 1 \
+            CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO build
+          test -s "$derived_data/Build/Products/Release-iphonesimulator/Plano.app/PlugIns/PlanoActivity.appex/PlanoActivity"
