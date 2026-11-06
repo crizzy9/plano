@@ -798,6 +798,7 @@ func (s *Store) RunDispatcher(ctx context.Context, sender PushSender, logger *sl
 	completed := make(chan int, slots)
 	var workers sync.WaitGroup
 	defer workers.Wait()
+	workers.Go(func() { s.runCheckInScheduler(ctx, logger) })
 	for ctx.Err() == nil {
 		for lane := range lanes {
 			pool := &lanes[lane]

@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS check_in_queued (
   device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   flight_id TEXT NOT NULL REFERENCES flights(id), PRIMARY KEY(device_id, flight_id)
 );
+` + checkInScheduleSchema + `
 CREATE TABLE IF NOT EXISTS live_started (
   device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE, flight_id TEXT NOT NULL REFERENCES flights(id),
   PRIMARY KEY(device_id, flight_id)
@@ -781,6 +782,11 @@ ON CONFLICT(flight_id) DO UPDATE SET revision=flight_event_revisions.revision+1`
 	}
 	if prior.ID != "" && !providerChanged {
 		obsolete := supersededFlightAlertKinds(prior, flight, events)
+		// A timer can queue check-in after this snapshot was captured. Check
+		// for a moved opening at acceptance time as well.
+		if checkInOpeningMovedLater(prior, flight, time.Now()) && !slices.Contains(obsolete, "check_in") {
+			obsolete = append(obsolete, "check_in")
+		}
 		if predictionCleared && !slices.Contains(obsolete, "delay_prediction") {
 			obsolete = append(obsolete, "delay_prediction")
 		}
