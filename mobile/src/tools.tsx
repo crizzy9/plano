@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Linking, Platform, StyleSheet, Text, View } from 'react-native';
 import type { Connection, Flight, ImportResult, ImportSource, PartnerBooking, Passport, PlanoAPI } from './api';
 import { errorText, formatDay, validDate } from './flight';
-import { Page, useRemote, type Screen } from './screens';
+import { Page, useRemote, type Routes, type Screen } from './screens';
 import { usePalette } from './theme';
 import { calendarFlights, calendarSyncEnabled, setCalendarSyncEnabled } from './calendar-sync';
 import { PassportCard } from './passport-card';
@@ -249,18 +249,33 @@ function ConnectionGate({ direction, reported, prediction }: {
   );
 }
 
-export function ConnectionScreen({ api }: { api: PlanoAPI }) {
-  const load = useCallback(() => api.tracked(), [api]);
+export function ConnectionScreen({ api, initialPair }: { api: PlanoAPI; initialPair?: Routes['Connection'] }) {
+  const initialInbound = initialPair?.inbound;
+  const initialOutbound = initialPair?.outbound;
+  const load = useCallback(async () => {
+    const flights = await api.tracked();
+    if (!initialInbound || !initialOutbound) return flights;
+    const missing = [initialInbound, initialOutbound].filter((id) => !flights.some((flight) => flight.id === id));
+    if (!missing.length) return flights;
+    const selected = await api.tracked(missing);
+    return [...flights, ...selected.filter((flight) => missing.includes(flight.id))];
+  }, [api, initialInbound, initialOutbound]);
   const { value, error, pending, refresh } = useRemote(load);
   const loadMonitors = useCallback(() => api.connectionMonitors(), [api]);
   const { value: monitors, error: monitorError, refresh: refreshMonitors } = useRemote(loadMonitors, !!api.server, 30_000);
-  const [inboundID, setInboundID] = useState<string>();
-  const [outboundID, setOutboundID] = useState<string>();
-  const [checked, setChecked] = useState(false);
+  const [inboundID, setInboundID] = useState(initialPair?.inbound);
+  const [outboundID, setOutboundID] = useState(initialPair?.outbound);
+  const [checked, setChecked] = useState(!!initialPair);
   const [monitorBusy, setMonitorBusy] = useState(false);
   const [monitorIssue, setMonitorIssue] = useState<string>();
   const monitorRequest = useRef<symbol | undefined>(undefined);
   useEffect(() => () => { monitorRequest.current = undefined; }, [api]);
+  useEffect(() => {
+    if (!initialPair) return;
+    setInboundID(initialPair.inbound);
+    setOutboundID(initialPair.outbound);
+    setChecked(true);
+  }, [initialPair]);
 
   async function changeMonitoring(inbound: string, outbound: string, enabled: boolean, reportInList = false) {
     if (monitorRequest.current) return;

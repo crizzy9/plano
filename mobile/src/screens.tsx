@@ -22,7 +22,7 @@ export type Routes = {
   Import: undefined;
   Passport: undefined;
   Friends: undefined;
-  Connection: undefined;
+  Connection: { inbound: string; outbound: string } | undefined;
   Settings: undefined;
 };
 
@@ -198,7 +198,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const { colors } = usePalette();
   const { id, initial } = route.params;
   const load = useCallback(async () => {
-    const [detail, tracked] = await Promise.all([api.detail(id), api.tracked()]);
+    const [detail, tracked] = await Promise.all([api.detail(id), api.tracked([id])]);
     return { detail, tracked: tracked.some((item) => item.id === id) };
   }, [api, id]);
   const { value, setValue, error, pending, refresh } = useRemote(load, true, 30_000);

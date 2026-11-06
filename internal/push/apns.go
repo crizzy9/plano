@@ -150,8 +150,9 @@ func (a *APNs) request(m Message) ([]byte, http.Header, error) {
 		headers.Set("apns-collapse-id", m.CollapseID)
 	}
 	payload := struct {
-		APS      *apnsAPS `json:"aps"`
-		FlightID string   `json:"flightId,omitempty"`
+		APS                 *apnsAPS `json:"aps"`
+		FlightID            string   `json:"flightId,omitempty"`
+		ConnectionInboundID string   `json:"connectionInboundId,omitempty"`
 	}{APS: &aps}
 
 	if m.Kind == Alert {
@@ -160,6 +161,7 @@ func (a *APNs) request(m Message) ([]byte, http.Header, error) {
 		aps.Alert = &apnsAlert{Title: m.Title, Body: m.Body}
 		aps.Sound = "default"
 		payload.FlightID = m.FlightID
+		payload.ConnectionInboundID = m.ConnectionInboundID
 	} else {
 		headers.Set("apns-push-type", "liveactivity")
 		headers.Set("apns-topic", a.bundleID+".push-type.liveactivity")

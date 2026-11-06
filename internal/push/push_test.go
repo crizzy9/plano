@@ -77,6 +77,13 @@ func fixtureAlert(now time.Time) Message {
 	}
 }
 
+func fixtureConnectionAlert(now time.Time) Message {
+	message := fixtureAlert(now)
+	message.ConnectionInboundID = "inbound.1-2_3"
+	message.Title = "Connection risk increased"
+	return message
+}
+
 func fixtureActivity(kind Kind, now time.Time) Message {
 	return Message{
 		Kind: kind, FlightID: "flight-fixture", CollapseID: "flight-update", Timestamp: now, ExpiresAt: now.Add(90 * time.Second),
@@ -101,6 +108,7 @@ func TestAPNsWireRequests(t *testing.T) {
 		inputToken                                int
 	}{
 		{"alert", "com.example.plano", "alert", "10", "event-fixture", fixtureAlert(now), 0},
+		{"connection alert", "com.example.plano", "alert", "10", "event-fixture", fixtureConnectionAlert(now), 0},
 		{"start", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 0},
 		{"start requests update token", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 1},
 		{"update", "com.example.plano.push-type.liveactivity", "liveactivity", "5", "flight-update", fixtureActivity(LiveUpdate, now), 0},
@@ -155,12 +163,17 @@ func TestAPNsWireRequests(t *testing.T) {
 						Alert      map[string]string `json:"alert"`
 						State      *LiveState        `json:"content-state"`
 					} `json:"aps"`
-					FlightID string `json:"flightId"`
+					FlightID            string  `json:"flightId"`
+					ConnectionInboundID *string `json:"connectionInboundId"`
 				}
 				if err := json.Unmarshal(body, &wire); err != nil {
 					t.Fatal(err)
 				}
 				aps := wire.APS
+				if want := test.message.ConnectionInboundID; want == "" && wire.ConnectionInboundID != nil ||
+					want != "" && (wire.ConnectionInboundID == nil || *wire.ConnectionInboundID != want) {
+					t.Errorf("invalid APNs connection route: %s", body)
+				}
 				if test.message.Kind == Alert {
 					if wire.FlightID != test.message.FlightID || aps.Alert["title"] != test.message.Title || aps.Alert["body"] != test.message.Body || aps.Event != "" {
 						t.Errorf("invalid APNs alert: %s", body)
@@ -246,7 +259,7 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 	const device = "fixture:android-registration"
 	const binding = "ffffffff-ffff-4fff-bfff-ffffffffffff"
 	now := time.Now()
-	messages := []Message{fixtureAlert(now), fixtureActivity(LiveStart, now), fixtureActivity(LiveUpdate, now), fixtureActivity(LiveEnd, now)}
+	messages := []Message{fixtureAlert(now), fixtureActivity(LiveStart, now), fixtureActivity(LiveUpdate, now), fixtureActivity(LiveEnd, now), fixtureConnectionAlert(now)}
 	var exchanges, sends int
 	client.client = &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		body, err := io.ReadAll(r.Body)
@@ -302,6 +315,10 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 				return nil, err
 			}
 			got := wire.Message
+			inboundID, hasInboundID := got.Data["connectionInboundId"]
+			if inboundID != message.ConnectionInboundID || hasInboundID != (message.ConnectionInboundID != "") {
+				t.Errorf("invalid FCM connection route: %s", body)
+			}
 			ttl, err := time.ParseDuration(got.Android.TTL)
 			if got.Token != device || got.Android.Priority != "HIGH" || !got.Android.Bandwidth || err != nil || ttl <= 0 || ttl > 90*time.Second || got.Notification != nil || got.Android.UI != nil || got.Data["flightId"] != message.FlightID || got.Data["binding"] != binding {
 				t.Errorf("invalid FCM data request: %s", body)
@@ -339,7 +356,7 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if sends != 4 || exchanges != 2 {
+	if sends != len(messages) || exchanges != 2 {
 		t.Fatalf("OAuth cache / invalidation: sends=%d, exchanges=%d", sends, exchanges)
 	}
 }
@@ -382,6 +399,41 @@ func TestProviderRejectionsAndRetryAfter(t *testing.T) {
 	}
 }
 
+func TestConnectionAlertRejectsInvalidRoute(t *testing.T) {
+	now := time.Now()
+	for _, test := range []struct {
+		name, outbound, inbound string
+	}{
+		{name: "path separator", outbound: "outbound", inbound: "other/flight"},
+		{name: "non-ASCII", outbound: "outbound", inbound: "aé"},
+		{name: "dot segment", outbound: "outbound", inbound: "."},
+		{name: "parent segment", outbound: "..", inbound: "inbound"},
+		{name: "same leg", outbound: "flight", inbound: "flight"},
+		{name: "overlong ID", outbound: "outbound", inbound: strings.Repeat("a", 129)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			message := fixtureConnectionAlert(now)
+			message.FlightID, message.ConnectionInboundID = test.outbound, test.inbound
+			if _, err := message.prepare(now); err == nil {
+				t.Fatal("invalid connection route accepted")
+			}
+		})
+	}
+	live := fixtureActivity(LiveUpdate, now)
+	live.ConnectionInboundID = "inbound"
+	if _, err := live.prepare(now); err == nil {
+		t.Fatal("live update accepted connection route")
+	}
+	message := fixtureConnectionAlert(now)
+	message.ConnectionInboundID = strings.Repeat("a", 128)
+	if _, err := message.prepare(now); err != nil {
+		t.Fatalf("valid connection route rejected: %v", err)
+	}
+	if _, err := message.prepare(message.ExpiresAt); err == nil {
+		t.Fatal("expired connection alert accepted")
+	}
+}
+
 func TestOversizedPayloadsAreRejectedBeforeProviderCalls(t *testing.T) {
 	client := fixtureAPNs(t)
 	transport := &http.Client{Transport: fixtureTransport(func(*http.Request) (*http.Response, error) {
@@ -390,7 +442,7 @@ func TestOversizedPayloadsAreRejectedBeforeProviderCalls(t *testing.T) {
 	})}
 	client.client = transport
 	fcm := &FCM{client: transport}
-	message := fixtureAlert(time.Now())
+	message := fixtureConnectionAlert(time.Now())
 	message.Body = strings.Repeat("é", maxPayloadBytes/2)
 	for _, err := range []error{client.Send(t.Context(), "aabbccdd", message), fcm.Send(t.Context(), "fixture-registration", message)} {
 		if err == nil || !strings.Contains(err.Error(), "2048-byte limit") {

@@ -94,6 +94,13 @@ func TestConnectionMonitorAPIAndWorker(t *testing.T) {
 	request(http.MethodPut, monitors+query, "", http.StatusUnauthorized)
 	request(http.MethodPut, monitors+query, partial, http.StatusBadRequest)
 	request(http.MethodPut, monitors+"?inbound=monitor-out&outbound=monitor-in", owner, http.StatusBadRequest)
+	request(http.MethodGet, "/v1/tracked?flightId=", owner, http.StatusBadRequest)
+	request(http.MethodGet, "/v1/tracked?flightId=monitor-in&flightId=monitor-out&flightId=third", owner, http.StatusBadRequest)
+	var targets struct{ Flights []feeds.Flight }
+	if err := json.Unmarshal(request(http.MethodGet, "/v1/tracked?flightId=monitor-in&flightId=monitor-out", partial, http.StatusOK), &targets); err != nil ||
+		len(targets.Flights) != 1 || targets.Flights[0].ID != out.ID {
+		t.Fatalf("filtered lookup exposed an untracked leg: %+v %v", targets, err)
+	}
 	if result := status(owner); !result.MonitorEligible || result.Monitoring || result.Risk != "Relaxed" {
 		t.Fatalf("unexpected baseline: %+v", result)
 	}

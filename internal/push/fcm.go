@@ -261,6 +261,9 @@ func (f *FCM) request(m Message, deviceToken string, now time.Time) (fcmRequest,
 	}
 	if m.Kind == Alert {
 		data["type"] = "alert"
+		if m.ConnectionInboundID != "" {
+			data["connectionInboundId"] = m.ConnectionInboundID
+		}
 		if m.CollapseID != "" {
 			data["eventId"] = m.CollapseID
 		}

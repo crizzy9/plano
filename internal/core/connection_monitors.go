@@ -333,7 +333,7 @@ func removeConnectionMonitor(ctx context.Context, tx *sql.Tx, id int64) error {
 
 func enqueueConnectionAlert(ctx context.Context, tx *sql.Tx, id int64, owner string, monitor ConnectionMonitor, assessment ConnectionAssessment, now time.Time) error {
 	collapse := hash("connection\x00" + owner + "\x00" + monitor.Inbound + "\x00" + monitor.Outbound)
-	msg := push.Message{Kind: push.Alert, FlightID: monitor.Outbound, Title: "Connection risk increased",
+	msg := push.Message{Kind: push.Alert, FlightID: monitor.Outbound, ConnectionInboundID: monitor.Inbound, Title: "Connection risk increased",
 		Body:      "Plano estimates that your connection is " + strings.ToLower(assessment.Risk) + ". Check your flight details.",
 		Timestamp: now, ExpiresAt: assessment.AlertUntil, CollapseID: collapse}
 	if err := enqueue(ctx, tx, monitor.Outbound, msg, `SELECT id FROM devices WHERE owner=? AND kind='alert'`, owner); err != nil {

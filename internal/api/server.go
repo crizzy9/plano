@@ -236,7 +236,24 @@ func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) er
 }
 
 func (s Server) tracked(w http.ResponseWriter, r *http.Request, owner string) error {
-	f, err := s.Store.Tracked(r.Context(), owner)
+	ids, filtered := r.URL.Query()["flightId"]
+	var f []feeds.Flight
+	var err error
+	if filtered {
+		if len(ids) < 1 || len(ids) > 2 || !flightID.MatchString(ids[0]) {
+			return errInvalid
+		}
+		var secondID string
+		if len(ids) == 2 {
+			secondID = ids[1]
+			if !flightID.MatchString(secondID) {
+				return errInvalid
+			}
+		}
+		f, err = s.Store.TrackedFlights(r.Context(), owner, ids[0], secondID)
+	} else {
+		f, err = s.Store.Tracked(r.Context(), owner)
+	}
 	if err != nil {
 		return err
 	}

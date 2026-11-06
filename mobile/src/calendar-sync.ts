@@ -102,7 +102,7 @@ const syncLogKey = (server: string) => serverStorageKey('calendar-imports', serv
 
 export async function calendarSyncEnabled(server: string) {
   if (!native || !server || await SecureStore.getItemAsync(optInKey(server)) !== 'on') return false;
-  return createAPI(server, { allowEnrollment: false }).hasSavedInstallationToken();
+  return createAPI(server, { access: 'background' }).hasSavedInstallationToken();
 }
 
 function reconcileSchedule() {
@@ -209,7 +209,7 @@ async function runSync() {
     // Move past an unresolved or failed batch on the next run so it cannot
     // prevent new flights from syncing.
     await storeLog(server, now, next, imported);
-    const result = await createAPI(server, { allowEnrollment: false }).importFlights('calendar', group.codes.join('\n'), group.day);
+    const result = await createAPI(server, { access: 'background' }).importFlights('calendar', group.codes.join('\n'), group.day);
     const missed = new Set(result.unmatched.map((entry) => entry.split(' · ')[0]));
     const matched = group.codes.filter((code) => !missed.has(code));
     // Multiple designators may resolve to one flight. Store a batch only when

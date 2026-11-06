@@ -592,23 +592,24 @@ export function serverStorageKey(scope: string, server: string) {
 const flightPath = (id: string) => `/v1/flights/${encodeURIComponent(id)}`;
 const friendPath = (id: string) => `/v1/friends/${encodeURIComponent(id)}`;
 
-export function createAPI(server: string, options: { allowEnrollment?: boolean } = {}) {
+export function createAPI(server: string, options: { access?: 'background' | 'existing-installation' } = {}) {
   // The canonical origin is part of the key, so two installations on different
   // hosts can never use each other's bearer token.
   const tokenKey = serverStorageKey('installation', server);
+  const background = options.access === 'background';
   let tokenPromise: Promise<string> | undefined;
 
   async function savedToken() {
     return Platform.OS === 'web'
       ? globalThis.sessionStorage?.getItem(tokenKey)
-      : SecureStore.getItemAsync(tokenKey, options.allowEnrollment === false ? calendarBackgroundStore : undefined);
+      : SecureStore.getItemAsync(tokenKey, background ? calendarBackgroundStore : undefined);
   }
 
   function installationToken(enrollmentCode?: string): Promise<string> {
     tokenPromise ??= (async () => {
       const existing = await savedToken();
       if (existing) return existing;
-      if (options.allowEnrollment === false) throw new Error('This server has no saved Plano installation.');
+      if (options.access) throw new Error('This server has no saved Plano installation.');
       const { token } = await request<{ token: string }>(server, '/v1/installations', {
         method: 'POST', body: JSON.stringify({ enrollmentCode: enrollmentCode || undefined }),
       });
@@ -625,8 +626,8 @@ export function createAPI(server: string, options: { allowEnrollment?: boolean }
 
   async function authenticated<T>(path: string, init: RequestInit = {}, timeoutMs?: number) {
     const token = await installationToken();
-    if (options.allowEnrollment === false && await loadServer({ savedOnly: true }) !== server) {
-      throw new Error('Background access for this server ended.');
+    if (options.access && await loadServer({ savedOnly: background }) !== server) {
+      throw new Error('Access for this server ended.');
     }
     return request<T>(server, path, { ...init, headers: { Authorization: `Bearer ${token}` } }, timeoutMs);
   }
@@ -639,8 +640,11 @@ export function createAPI(server: string, options: { allowEnrollment?: boolean }
       const query = new URLSearchParams({ number, date });
       return (await authenticated<{ flights: Flight[] }>(`/v1/flights?${query}`)).flights;
     },
-    async tracked(): Promise<Flight[]> {
-      return (await authenticated<{ flights: Flight[] }>('/v1/tracked')).flights;
+    async tracked(flightIds: readonly string[] = []): Promise<Flight[]> {
+      const query = new URLSearchParams();
+      for (const id of flightIds) query.append('flightId', id);
+      const path = flightIds.length ? `/v1/tracked?${query}` : '/v1/tracked';
+      return (await authenticated<{ flights: Flight[] }>(path)).flights;
     },
     detail: (id: string) => authenticated<FlightDetail>(flightPath(id)),
     async radar(id: string, after?: string) {

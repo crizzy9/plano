@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { DarkTheme, DefaultTheme, NavigationContainer } from '@react-navigation/native';
+import { DarkTheme, DefaultTheme, NavigationContainer, useNavigationContainerRef } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
 import { AppState, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -7,6 +7,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { createAPI, loadServer, removeRetiredDevices } from './src/api';
 import { errorText } from './src/flight';
 import { useFlightAlerts } from './src/alerts';
+import { useNotificationRouting } from './src/notification-routing';
 import { resumeCalendarSync } from './src/calendar-sync';
 import { Home, Search, FlightDetailScreen, ServerSettings, type Routes } from './src/screens';
 import { FriendsScreen } from './src/friends';
@@ -19,6 +20,8 @@ const Stack = createNativeStackNavigator<Routes>();
 export default function App() {
   const { colors, isDark } = usePalette();
   const [server, setServer] = useState<string>();
+  const [readyServer, setReadyServer] = useState<string>();
+  const navigation = useNavigationContainerRef<Routes>();
   const [loadError, setLoadError] = useState<string>();
   useEffect(() => {
     loadServer().then(setServer, (error: unknown) => {
@@ -28,6 +31,7 @@ export default function App() {
   }, []);
   const api = useMemo(() => createAPI(server ?? ''), [server]);
   useFlightAlerts(api);
+  useNotificationRouting(server, server !== undefined && readyServer === server, navigation);
   useEffect(() => {
     if (!server) return;
     const resume = () => {
@@ -55,7 +59,7 @@ export default function App() {
       {server === undefined ? (
         <View style={[styles.wait, { backgroundColor: colors.ground }]}><Loading /></View>
       ) : (
-        <NavigationContainer key={server} theme={theme}>
+        <NavigationContainer key={server} theme={theme} ref={navigation} onReady={() => setReadyServer(server)}>
           <Stack.Navigator screenOptions={{
             headerShadowVisible: false, headerBackButtonDisplayMode: 'minimal',
             contentStyle: { backgroundColor: colors.ground },
@@ -75,7 +79,7 @@ export default function App() {
               {(props) => <Search {...props} api={api} />}
             </Stack.Screen>
             <Stack.Screen name="Flight" options={({ route }) => ({ title: route.params.number })}>
-              {(props) => <FlightDetailScreen {...props} api={api} />}
+              {(props) => <FlightDetailScreen key={props.route.params.id} {...props} api={api} />}
             </Stack.Screen>
             <Stack.Screen name="Tools" component={Tools} options={{ title: 'Trip tools' }} />
             <Stack.Screen name="Import" options={{ title: 'Import flights' }}>
@@ -88,7 +92,7 @@ export default function App() {
               {() => <FriendsScreen api={api} />}
             </Stack.Screen>
             <Stack.Screen name="Connection" options={{ title: 'Connection assistant' }}>
-              {() => <ConnectionScreen api={api} />}
+              {({ route }) => <ConnectionScreen api={api} initialPair={route.params} />}
             </Stack.Screen>
             <Stack.Screen name="Settings" options={{ title: 'Settings' }}>
               {() => <ServerSettings api={api} error={loadError} onChange={(next) => {

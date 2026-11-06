@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import com.google.firebase.messaging.RemoteMessage
@@ -13,6 +14,17 @@ import expo.modules.notifications.service.ExpoFirebaseMessagingService
 // The official NotificationCompat wire key also works when compiling with API 36,
 // whose framework stub does not yet expose the API 36.1 constant.
 private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
+private val notificationFlightId = Regex("[A-Za-z0-9_.-]{1,128}")
+
+private fun validNotificationFlightId(id: String?) =
+  id != null && id != "." && id != ".." && notificationFlightId.matches(id)
+
+private fun notificationDestination(flightId: String?, inboundId: String?): Uri? {
+  if (!validNotificationFlightId(flightId)) return null
+  if (inboundId == null) return Uri.parse("plano://notification/flight/$flightId")
+  if (!validNotificationFlightId(inboundId) || inboundId == flightId) return null
+  return Uri.parse("plano://notification/connection/$flightId/$inboundId")
+}
 
 class PlanoMessagingService : ExpoFirebaseMessagingService() {
   private val manager by lazy { requireNotNull(getSystemService(NotificationManager::class.java)) }
@@ -41,7 +53,7 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
       .setStyle(Notification.BigTextStyle().bigText(body))
       .setVisibility(Notification.VISIBILITY_PRIVATE)
       .setAutoCancel(true)
-      .setContentIntent(openApp())
+      .setContentIntent(openApp(data["flightId"], data["connectionInboundId"]))
       .build()
     manager.notify("plano-alert-${hashPushIdentity(event)}", 0, notification)
   }
@@ -108,7 +120,7 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
       .setOngoing(true)
       .setOnlyAlertOnce(true)
       .setTimeoutAfter(20 * 60 * 1000L)
-      .setContentIntent(openApp())
+      .setContentIntent(openApp(flightId))
       .setShowWhen(countdown > now && status != "landed")
 
     if (countdown > now && status != "landed") {
@@ -124,8 +136,13 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     manager.notify(tag, 0, builder.build())
   }
 
-  private fun openApp(): PendingIntent? {
+  private fun openApp(flightId: String?, inboundId: String? = null): PendingIntent? {
     val intent = packageManager.getLaunchIntentForPackage(packageName) ?: return null
+    if (intent.component == null) return null
+    notificationDestination(flightId, inboundId)?.let { destination ->
+      intent.action = Intent.ACTION_VIEW
+      intent.data = destination
+    }
     intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
     return PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
   }

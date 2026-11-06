@@ -55,18 +55,19 @@ type LiveState struct {
 }
 
 type Message struct {
-	Kind               Kind
-	FlightID           string
-	Title              string
-	Body               string
-	CollapseID         string
-	State              *LiveState
-	Timestamp          time.Time
-	ExpiresAt          time.Time
-	StaleAt            time.Time
-	DismissAt          time.Time
-	RequestUpdateToken bool   // Enable for iOS 18 or later push-to-start registrations.
-	binding            string // Android delivery generation, added at dispatch from its device registration.
+	Kind                Kind
+	FlightID            string
+	ConnectionInboundID string `json:",omitempty"`
+	Title               string
+	Body                string
+	CollapseID          string
+	State               *LiveState
+	Timestamp           time.Time
+	ExpiresAt           time.Time
+	StaleAt             time.Time
+	DismissAt           time.Time
+	RequestUpdateToken  bool   // Enable for iOS 18 or later push-to-start registrations.
+	binding             string // Android delivery generation, added at dispatch from its device registration.
 }
 
 type Sender struct {
@@ -136,6 +137,10 @@ func (m Message) prepare(now time.Time) (Message, error) {
 	if strings.TrimSpace(m.FlightID) == "" {
 		return m, errors.New("push requires a flight ID")
 	}
+	if m.ConnectionInboundID != "" && (m.Kind != Alert || m.ConnectionInboundID == m.FlightID ||
+		!validConnectionFlightID(m.ConnectionInboundID) || !validConnectionFlightID(m.FlightID)) {
+		return m, errors.New("invalid push connection route")
+	}
 	if len(m.CollapseID) > 64 || strings.IndexFunc(m.CollapseID, unicode.IsControl) >= 0 {
 		return m, errors.New("invalid push collapse ID")
 	}
@@ -155,6 +160,12 @@ func (m Message) prepare(now time.Time) (Message, error) {
 		return m, errors.New("push message expired")
 	}
 	return m, nil
+}
+
+var connectionFlightIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+
+func validConnectionFlightID(id string) bool {
+	return id != "." && id != ".." && connectionFlightIDPattern.MatchString(id)
 }
 
 func encodePayload(v any) ([]byte, error) {

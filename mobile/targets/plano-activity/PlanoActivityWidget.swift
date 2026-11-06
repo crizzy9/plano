@@ -1,4 +1,5 @@
 import ActivityKit
+import Foundation
 import SwiftUI
 import WidgetKit
 
@@ -30,6 +31,7 @@ struct PlanoActivityWidget: Widget {
       .activityBackgroundTint(Color(red: 0.07, green: 0.20, blue: 0.17))
       .activitySystemActionForegroundColor(.white)
       .foregroundStyle(.white)
+      .widgetURL(flightDestination(context.attributes.flightId))
     } dynamicIsland: { context in
       DynamicIsland {
         DynamicIslandExpandedRegion(.leading) {
@@ -62,8 +64,15 @@ struct PlanoActivityWidget: Widget {
         FlightPhaseIcon(state: context.state, stale: context.isStale)
       }
       .keylineTint(.mint)
+      .widgetURL(flightDestination(context.attributes.flightId))
     }
   }
+}
+
+private func flightDestination(_ flightId: String) -> URL? {
+  guard flightId != ".", flightId != "..",
+        flightId.range(of: #"\A[A-Za-z0-9_.-]{1,128}\z"#, options: .regularExpression) != nil else { return nil }
+  return URL(string: "plano://notification/flight/\(flightId)")
 }
 
 private struct CompactFlightTiming: View {

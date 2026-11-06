@@ -115,9 +115,10 @@ Saved pairs are private to that installation.
 Plano checks both legs as new observations arrive and as time runs short.
 The current risk is the starting point. A change to a worse risk level
 queues an alert. If the risk improves, that becomes the starting point for
-any later warning. Open the saved pair in Connection Assistant to see the
-current assessment. To stop warnings, choose **Stop monitoring** or untrack
-either leg.
+any later warning. Tap a warning to open Connection Assistant when both
+legs are still tracked and connect at the same airport. If the connection
+is no longer available, the tap opens the onward flight if it is still
+tracked. To stop warnings, choose **Stop monitoring** or untrack either leg.
 Monitoring ends after the onward flight leaves, the connection is disrupted
 by a cancellation or inbound diversion, or the last known onward departure
 time has passed by two hours without a recorded departure.

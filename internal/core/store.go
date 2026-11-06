@@ -278,6 +278,11 @@ func (s *Store) Tracked(ctx context.Context, owner string) ([]feeds.Flight, erro
 	return s.list(ctx, `SELECT f.snapshot FROM tracked t JOIN flights f ON t.flight_id=f.id WHERE t.owner=? ORDER BY f.observed_ns DESC LIMIT 1000`, owner)
 }
 
+func (s *Store) TrackedFlights(ctx context.Context, owner, firstID, secondID string) ([]feeds.Flight, error) {
+	return s.list(ctx, `SELECT f.snapshot FROM tracked t JOIN flights f ON f.id=t.flight_id
+WHERE t.owner=? AND t.flight_id IN (?,?) ORDER BY f.observed_ns DESC`, owner, firstID, secondID)
+}
+
 func (s *Store) Flight(ctx context.Context, id string) (feeds.Flight, error) {
 	var flight feeds.Flight
 	var raw []byte
