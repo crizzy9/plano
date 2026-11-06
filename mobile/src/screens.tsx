@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { AppState, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
+import { AccessibilityInfo, AppState, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
-  saveServer, type AirportWeatherForecast, type ATFMSlot, type Flight, type FlightNotice, type HistoricalDepartureRisk,
+  saveServer, withActiveAndroidPushOrigin, type AirportWeatherForecast, type ATFMSlot, type Flight, type FlightNotice, type HistoricalDepartureRisk,
   type PassportFlight, type PlanoAPI, type Position, type RadarCursor,
 } from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
@@ -12,8 +12,8 @@ import { usePalette } from './theme';
 import { PickupLinks } from './pickup-links';
 import { changeFlightAlerts, flightAlertsEnabled, startIOSFlightActivity } from './alerts';
 import {
-  androidWidgetDetailsEnabled, canCustomizeAndroidWidget, canStartLiveActivity,
-  setAndroidWidgetDetailsEnabled, stopLiveActivity,
+  androidWidgetDetailsEnabled, androidWidgetFlightPinned, canCustomizeAndroidWidget, canPinAndroidWidgetFlight,
+  canStartLiveActivity, setAndroidWidgetDetailsEnabled, setAndroidWidgetFlightPinned, stopLiveActivity,
 } from './live';
 import { Action, Body, ErrorMessage, FlightRow, FlightStrip, Heading, Input, Loading, layout } from './ui';
 import { RadarMetricChart, RadarRouteMap } from './radar-visuals';
@@ -219,7 +219,8 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const value = result?.savedAt && error ? undefined : result;
   const savedAt = value?.savedAt ?? (!value && !error ? initialSavedAt : undefined);
   const [actionError, setActionError] = useState<string>();
-  const [operation, setOperation] = useState<'track' | 'share' | 'live'>();
+  const [operation, setOperation] = useState<'track' | 'share' | 'live' | 'widget'>();
+  const widgetEditing = useRef(false);
   const [seat, setSeat] = useState('');
   const [pickupRevision, setPickupRevision] = useState(0);
   const flight = value?.detail.flight ?? (error && (result?.savedAt || initialSavedAt) ? undefined : initial);
@@ -229,6 +230,22 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const radarKey = flight && [api.server, id, flight.originICAO ?? flight.origin, flight.destinationICAO ?? flight.destination,
     flight.scheduledDeparture, flight.tailNumber, flight.actualTakeoff, detail?.receiverRevision, radarTracked].join('|');
   const rotationSnapshot = detail?.rotationSnapshot === true;
+  const widgetEligible = canPinAndroidWidgetFlight && !!api.server && !savedAt && !error && !rotationOf && !rotationSnapshot
+    && value?.tracked === true && flight?.id === id;
+  const widgetFinished = !!flight && isFinished(flight);
+  const loadWidgetPin = useCallback(async () => ({
+    origin: api.server, flightId: id,
+    pinned: await withActiveAndroidPushOrigin(api.server, () => androidWidgetFlightPinned(api.server, id)) ?? null,
+  }), [api.server, id]);
+  const { value: widgetPin, error: widgetPinError, pending: widgetPending, refresh: refreshWidgetPin, setValue: setWidgetPin } =
+    useRemote(loadWidgetPin, widgetEligible);
+  const widgetPinned = widgetEligible && !widgetPinError && widgetPin?.origin === api.server && widgetPin.flightId === id
+    ? widgetPin.pinned : null;
+  useEffect(() => {
+    if (!widgetEligible) return;
+    const subscription = AppState.addEventListener('focus', refreshWidgetPin);
+    return () => subscription.remove();
+  }, [widgetEligible, refreshWidgetPin]);
   const weather = detail?.weather?.filter((report) => Date.parse(report.validUntil) > Date.now()) ?? [];
   const forecasts = value?.tracked && !savedAt && !error && !rotationOf && !rotationSnapshot && detail?.flight.id === id
     ? detail.weatherForecasts : undefined;
@@ -299,6 +316,29 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
       setOperation(undefined);
     }
   }
+  async function toggleWidgetPin() {
+    if (widgetPinned === null || widgetFinished && !widgetPinned || pending || widgetPending || operation || widgetEditing.current) return;
+    widgetEditing.current = true;
+    setOperation('widget');
+    setActionError(undefined);
+    const origin = api.server;
+    const pinned = !widgetPinned;
+    try {
+      const updated = await withActiveAndroidPushOrigin(origin, () => setAndroidWidgetFlightPinned(origin, id, pinned));
+      if (updated) {
+        setWidgetPin({ origin, flightId: id, pinned });
+        AccessibilityInfo.announceForAccessibility(pinned ? 'Flight selected for the widget.' : 'Automatic widget selection enabled.');
+      } else {
+        setActionError('The widget selection changed. Try again.');
+      }
+    } catch {
+      setActionError('Couldn’t change the widget flight. Try again.');
+    } finally {
+      refreshWidgetPin();
+      widgetEditing.current = false;
+      setOperation(undefined);
+    }
+  }
   return (
     <Page refresh={refresh} refreshing={pending && !!flight}>
       <ErrorMessage message={savedAt ? savedFlightMessage(savedAt) : error} />
@@ -330,7 +370,14 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
               )}
               {value.tracked && <Action label="Share live link" onPress={share} busy={operation === 'share'}
                 disabled={!!operation && operation !== 'share'} icon="share" secondary />}
+              {widgetPinned !== null && (!widgetFinished || widgetPinned) && (
+                <Action label={widgetPinned ? 'Use automatic widget selection' : 'Show on flight widget'}
+                  onPress={toggleWidgetPin} busy={operation === 'widget'} disabled={pending || widgetPending || !!operation} secondary />
+              )}
             </View>
+          )}
+          {widgetPinned && (
+            <Body>{widgetFinished ? 'The widget is still set to this flight.' : 'The widget shows this flight when a fresh update is available.'}</Body>
           )}
           <ErrorMessage message={actionError} />
           {value?.tracked && !savedAt && <PickupLinks key={pickupRevision} api={api} flightId={id} />}

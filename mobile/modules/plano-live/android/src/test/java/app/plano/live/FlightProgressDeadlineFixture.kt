@@ -25,7 +25,7 @@ fun main() {
   check(taxiing.countdownTarget(taxiing.arrivalAt) == null)
   check(taxiing.percent(taxiing.arrivalAt) == 99)
   check(taxiing.copy(arrivalAt = now + 3_600_000L).displayDeadline(now) == taxiing.expiresAt)
-  check(selectWidgetFlight(listOf(taxiing), taxiing.expiresAt) == null)
+  check(selectWidgetFlight(mapOf("taxiing" to taxiing), taxiing.expiresAt) == null)
 
   val noDeparture = taxiing.copy(departureAt = 0)
   check(noDeparture.countdownTarget(now) == taxiing.arrivalAt)
@@ -47,6 +47,14 @@ fun main() {
   check(airborne.nextRefreshAt(now) <= airborne.expiresAt)
   check(!airborne.isFresh(airborne.displayDeadline(now)))
 
+  val flights = mapOf("scheduled" to scheduled, "airborne" to airborne)
+  check(selectWidgetFlight(flights, now) == airborne)
+  check(selectWidgetFlight(flights, now, "scheduled") == scheduled)
+  check(selectWidgetFlight(flights, now, "awaiting-first-update") == null)
+  val withFreshAirborne = flights + ("airborne" to airborne.copy(observedAt = scheduled.expiresAt))
+  check(selectWidgetFlight(withFreshAirborne, scheduled.expiresAt, "scheduled") == null)
+  check(selectWidgetFlight(withFreshAirborne, scheduled.expiresAt)?.phase == WidgetFlightPhase.AIRBORNE)
+
   val landed = airborne.copy(phase = WidgetFlightPhase.LANDED)
   check(landed.countdownTarget(now) == null)
   check(landed.displayDeadline(now) == landed.expiresAt)
@@ -59,5 +67,5 @@ fun main() {
   check(!acceptsLiveAfterStop(stoppedAt, true, stoppedAt / 1000, stoppedAt))
   check(acceptsLiveAfterStop(stoppedAt, true, newer / 1000, newer))
   check(acceptsLiveAfterStop(stoppedAt, true, newer / 1000, 0))
-  println("Flight progress deadline and stop fixtures passed")
+  println("Flight progress deadline, selection, and stop fixtures passed")
 }

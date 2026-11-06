@@ -23,6 +23,8 @@ type NativeLive = {
   androidWidgetDetailsEnabled?: () => Promise<boolean>;
   setAndroidWidgetDetailsEnabled?: (enabled: boolean) => Promise<void>;
   resolveWidgetFlight?: (origin: string, key: string) => Promise<string | null>;
+  androidWidgetFlightPinned?: (origin: string, flightId: string) => Promise<boolean | null>;
+  setAndroidWidgetFlightPinned?: (origin: string, flightId: string, pinned: boolean) => Promise<boolean>;
   nextIOSPushRevision?: () => Promise<string>;
   retireIOSPush?: (origin: string, token: string) => Promise<string>;
 };
@@ -32,6 +34,8 @@ const native = Platform.OS === 'web' ? null : requireOptionalNativeModule<Native
 export const canStartLiveActivity = Boolean(native?.start);
 export const canCustomizeAndroidWidget = Platform.OS === 'android'
   && !!native?.androidWidgetDetailsEnabled && !!native?.setAndroidWidgetDetailsEnabled;
+export const canPinAndroidWidgetFlight = Platform.OS === 'android'
+  && !!native?.androidWidgetFlightPinned && !!native?.setAndroidWidgetFlightPinned;
 export const canFenceIOSPush = Platform.OS === 'ios' && !!native?.nextIOSPushRevision && !!native?.retireIOSPush;
 
 function iosPushRevision(value: string) {
@@ -63,6 +67,18 @@ export async function setAndroidWidgetDetailsEnabled(enabled: boolean) {
 export async function resolveAndroidWidgetFlight(origin: string, key: string) {
   if (Platform.OS !== 'android') return null;
   return await native?.resolveWidgetFlight?.(origin, key) ?? null;
+}
+
+export async function androidWidgetFlightPinned(origin: string, flightId: string) {
+  if (Platform.OS !== 'android') return null;
+  return await native?.androidWidgetFlightPinned?.(origin, flightId) ?? null;
+}
+
+export async function setAndroidWidgetFlightPinned(origin: string, flightId: string, pinned: boolean) {
+  if (Platform.OS !== 'android' || !native?.setAndroidWidgetFlightPinned) {
+    throw new Error('Widget selection requires a current Android build of Plano.');
+  }
+  return native.setAndroidWidgetFlightPinned(origin, flightId, pinned);
 }
 
 export async function selectAndroidPushOrigin(origin: string) {

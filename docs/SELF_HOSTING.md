@@ -493,8 +493,15 @@ live start. Removing and tracking the flight again allows a fresh start.
 [Android notification timeout](https://developer.android.com/reference/android/app/Notification.Builder#setTimeoutAfter(long))
 
 The Android widget shows phase, progress, and a labeled departure or arrival
-estimate in the device's local time. In Plano Settings, choose **Show flight
-details on widget** to include the applicable
+estimate in the device's local time. With Android flight alerts enabled,
+open a tracked flight and choose **Show on flight widget** to pin it on this
+device. The widget waits for a fresh update for the pinned flight. Choose
+**Use automatic widget selection** on that flight to resume automatic selection.
+Receiving the flight's end update, stopping its progress, or ending the
+current alert session clears the pin. If the end update is missed, automatic
+selection is still available from the finished flight's details.
+
+In Plano Settings, choose **Show flight details on widget** to include the applicable
 gate, terminal, and seat from the next flight update. This setting applies to
 the device. Details can be visible on a lock screen that supports widgets.
 **Hide flight details on widget** removes the details from the widget cache.

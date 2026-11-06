@@ -33,6 +33,14 @@ class PlanoLiveModule : Module() {
       appContext.reactContext?.let { AndroidPushSession.resolveWidgetFlight(it, origin, key) }
     }
 
+    AsyncFunction("androidWidgetFlightPinned") { origin: String, flightId: String ->
+      appContext.reactContext?.let { AndroidPushSession.widgetFlightPinned(it, origin, flightId) }
+    }
+
+    AsyncFunction("setAndroidWidgetFlightPinned") { origin: String, flightId: String, pinned: Boolean ->
+      appContext.reactContext?.let { AndroidPushSession.setWidgetFlightPinned(it, origin, flightId, pinned) } ?: false
+    }
+
     AsyncFunction("setAndroidWidgetDetailsEnabled") { enabled: Boolean ->
       val context = checkNotNull(appContext.reactContext)
       AndroidPushSession.setWidgetDetailsEnabled(context, enabled)

@@ -112,7 +112,11 @@ internal data class WidgetFlightProgress(
 internal fun epochMillis(seconds: Long) =
   if (seconds in 1..(Long.MAX_VALUE - WIDGET_FRESH_MILLIS) / 1000) seconds * 1000 else 0L
 
-internal fun selectWidgetFlight(states: Collection<WidgetFlightProgress>, now: Long) =
-  states.asSequence().filter { it.isFresh(now) }.maxWithOrNull(
+internal fun selectWidgetFlight(
+  states: Map<String, WidgetFlightProgress>, now: Long, pinnedFlightKey: String? = null,
+): WidgetFlightProgress? {
+  if (pinnedFlightKey != null) return states[pinnedFlightKey]?.takeIf { it.isFresh(now) }
+  return states.values.asSequence().filter { it.isFresh(now) }.maxWithOrNull(
     compareBy<WidgetFlightProgress> { it.phase.priority }.thenBy { it.observedAt },
   )
+}

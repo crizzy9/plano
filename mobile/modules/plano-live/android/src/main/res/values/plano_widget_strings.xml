@@ -4,6 +4,8 @@
   <string name="plano_widget_description">Live status, estimated progress, and local flight time for one tracked flight.</string>
   <string name="plano_widget_no_flight">No active flight</string>
   <string name="plano_widget_hint">Open Plano to view your flights.</string>
+  <string name="plano_widget_waiting">Waiting</string>
+  <string name="plano_widget_pinned_hint">Pinned flight updates appear here.</string>
   <string name="plano_widget_progress">Estimated flight progress</string>
   <string name="plano_widget_estimated_arrival">Est. arrival</string>
   <string name="plano_widget_estimated_departure">Est. dep.</string>
