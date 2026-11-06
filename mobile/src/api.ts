@@ -89,6 +89,23 @@ export interface Connection {
   transferMinutes: number;
   airport: string;
   instructions: string[];
+  precision?: string;
+  mapUrl?: string;
+  arrivalGatePrediction?: GatePrediction;
+  departureGatePrediction?: GatePrediction;
+}
+
+export interface GatePrediction {
+  gate: string;
+  samples: number;
+  share: number;
+}
+
+export interface ImportResult {
+  flights: Flight[];
+  unmatched: string[];
+  truncated?: boolean;
+  nextOffset?: number;
 }
 
 export type ImportSource = 'calendar' | 'email' | 'tripit';
@@ -106,6 +123,10 @@ const defaultURL = process.env.EXPO_PUBLIC_API_URL || (__DEV__ ? Platform.select
 }) : '') || '';
 const hostKey = 'plano.server.v1';
 const cleanupKey = 'plano.retired-servers.v1';
+const calendarBackgroundStore = {
+  keychainService: 'plano.background.v1',
+  keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
+};
 let retirementQueue = Promise.resolve();
 
 async function retiredServers(): Promise<string[]> {
@@ -153,12 +174,45 @@ export function normalizeServer(value: string) {
   return `${protocol}://${host}${customPort ? `:${port}` : ''}`;
 }
 
-export async function loadServer(): Promise<string> {
+export async function loadServer({ savedOnly = false } = {}): Promise<string> {
+  if (savedOnly) {
+    if (Platform.OS === 'web') return '';
+    const saved = await SecureStore.getItemAsync(hostKey, calendarBackgroundStore);
+    return saved ? normalizeServer(saved) : '';
+  }
   const saved = Platform.OS === 'web'
     ? globalThis.localStorage?.getItem(hostKey)
     : await SecureStore.getItemAsync(hostKey);
   if (!saved && !defaultURL) return '';
   return normalizeServer(saved || defaultURL);
+}
+
+export async function prepareCalendarBackground(server: string) {
+  await serializeRetirement(async () => {
+    if (Platform.OS === 'web' || await loadServer() !== server) {
+      throw new Error('Choose a Plano server before enabling background calendar sync.');
+    }
+    const key = serverStorageKey('installation', server);
+    const token = await SecureStore.getItemAsync(key);
+    if (!token) throw new Error('Connect to your Plano server before enabling background calendar sync.');
+    await SecureStore.setItemAsync(key, token, calendarBackgroundStore);
+    try {
+      await SecureStore.setItemAsync(hostKey, server, calendarBackgroundStore);
+    } catch (cause) {
+      await SecureStore.deleteItemAsync(key, calendarBackgroundStore);
+      throw cause;
+    }
+  });
+}
+
+async function removeCalendarBackground(server: string) {
+  const active = await SecureStore.getItemAsync(hostKey, calendarBackgroundStore);
+  if (active === server) await SecureStore.deleteItemAsync(hostKey, calendarBackgroundStore);
+  await SecureStore.deleteItemAsync(serverStorageKey('installation', server), calendarBackgroundStore);
+}
+
+export async function clearCalendarBackground(server: string) {
+  if (Platform.OS !== 'web') await serializeRetirement(() => removeCalendarBackground(server));
 }
 
 export async function saveServer(value: string, enrollmentCode?: string, previous?: string): Promise<string> {
@@ -173,6 +227,8 @@ export async function saveServer(value: string, enrollmentCode?: string, previou
   } else {
     await serializeRetirement(async () => {
       const pending = await retiredServers();
+      const previousBackground = await loadServer({ savedOnly: true });
+      if (previousBackground && previousBackground !== url) await removeCalendarBackground(previousBackground);
       if (previous && previous !== url && !pending.includes(previous)) pending.push(previous);
       await SecureStore.setItemAsync(cleanupKey, JSON.stringify(pending.filter((item) => item !== url)));
       await SecureStore.setItemAsync(hostKey, url);
@@ -187,10 +243,10 @@ class APIError extends Error {
   }
 }
 
-async function request<T>(server: string, path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(server: string, path: string, init: RequestInit = {}, timeoutMs = 12_000): Promise<T> {
   if (!server) throw new Error('Connect to a Plano server in Settings.');
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(server + path, {
       ...init,
@@ -223,7 +279,7 @@ export function serverStorageKey(scope: string, server: string) {
 
 const flightPath = (id: string) => `/v1/flights/${encodeURIComponent(id)}`;
 
-export function createAPI(server: string) {
+export function createAPI(server: string, options: { allowEnrollment?: boolean } = {}) {
   // The canonical origin is part of the key, so two installations on different
   // hosts can never use each other's bearer token.
   const tokenKey = serverStorageKey('installation', server);
@@ -232,13 +288,14 @@ export function createAPI(server: string) {
   async function savedToken() {
     return Platform.OS === 'web'
       ? globalThis.sessionStorage?.getItem(tokenKey)
-      : SecureStore.getItemAsync(tokenKey);
+      : SecureStore.getItemAsync(tokenKey, options.allowEnrollment === false ? calendarBackgroundStore : undefined);
   }
 
   function installationToken(enrollmentCode?: string): Promise<string> {
     tokenPromise ??= (async () => {
       const existing = await savedToken();
       if (existing) return existing;
+      if (options.allowEnrollment === false) throw new Error('This server has no saved Plano installation.');
       const { token } = await request<{ token: string }>(server, '/v1/installations', {
         method: 'POST', body: JSON.stringify({ enrollmentCode: enrollmentCode || undefined }),
       });
@@ -253,13 +310,17 @@ export function createAPI(server: string) {
     return tokenPromise;
   }
 
-  async function authenticated<T>(path: string, init: RequestInit = {}) {
+  async function authenticated<T>(path: string, init: RequestInit = {}, timeoutMs?: number) {
     const token = await installationToken();
-    return request<T>(server, path, { ...init, headers: { Authorization: `Bearer ${token}` } });
+    if (options.allowEnrollment === false && await loadServer({ savedOnly: true }) !== server) {
+      throw new Error('Background access for this server ended.');
+    }
+    return request<T>(server, path, { ...init, headers: { Authorization: `Bearer ${token}` } }, timeoutMs);
   }
 
   return {
     server,
+    hasSavedInstallationToken: async () => Boolean(await savedToken()),
     installationToken,
     async search(number: string, date: string): Promise<Flight[]> {
       const query = new URLSearchParams({ number, date });
@@ -281,8 +342,18 @@ export function createAPI(server: string) {
       const query = new URLSearchParams({ inbound, outbound });
       return authenticated<Connection>(`/v1/connections?${query}`);
     },
+    importTripIt: (url: string, offset = 0) => authenticated<ImportResult>('/v1/import/tripit', {
+      method: 'POST', body: JSON.stringify({ url, offset }),
+    }, 28_000),
+    createEmailRelay: () => authenticated<{ url: string; token: string }>('/v1/import/email-relay', {
+      method: 'POST', body: '{}',
+    }),
+    revokeEmailRelay: () => authenticated<void>('/v1/import/email-relay', { method: 'DELETE' }),
+    lookupBooking: (locator: string) => authenticated<{ flights: Flight[] }>('/v1/bookings/lookup', {
+      method: 'POST', body: JSON.stringify({ locator }),
+    }),
     importFlights: (source: ImportSource, text: string, date?: string) =>
-      authenticated<{ flights: Flight[]; unmatched: string[] }>('/v1/import', {
+      authenticated<ImportResult>('/v1/import', {
         method: 'POST', body: JSON.stringify({ source, text, date }),
       }),
     async revokeDevices() {

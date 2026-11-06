@@ -1,10 +1,12 @@
-import { useCallback, useState } from 'react';
-import { Linking, Platform, Share, StyleSheet, Text, View } from 'react-native';
-import Svg, { Circle, Path } from 'react-native-svg';
-import type { Connection, Flight, ImportSource, PassportSegment, PlanoAPI } from './api';
-import { dateKey, errorText, validDate } from './flight';
+import { useCallback, useEffect, useState } from 'react';
+import { Linking, Platform, StyleSheet, Text, View } from 'react-native';
+import type { Connection, Flight, ImportResult, ImportSource, PlanoAPI } from './api';
+import { errorText, validDate } from './flight';
 import { Page, useRemote, type Screen } from './screens';
 import { usePalette } from './theme';
+import { calendarFlights, calendarSyncEnabled, setCalendarSyncEnabled } from './calendar-sync';
+import { PassportCard } from './passport-card';
+import { PassportMaps } from './passport-maps';
 import { Action, Body, ErrorMessage, FlightRow, Heading, Input, Loading, layout } from './ui';
 
 export function Tools({ navigation }: Screen<'Tools'>) {
@@ -18,12 +20,42 @@ export function Tools({ navigation }: Screen<'Tools'>) {
 }
 
 export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: PlanoAPI }) {
+  const { colors: palette } = usePalette();
+  const [calendarEnabled, setCalendarEnabled] = useState(false);
+  useEffect(() => {
+    let active = true;
+    setCalendarEnabled(false);
+    calendarSyncEnabled(api.server).then((enabled) => {
+      if (active) setCalendarEnabled(enabled);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [api.server]);
   const [source, setSource] = useState<ImportSource>('email');
   const [text, setText] = useState('');
   const [date, setDate] = useState('');
-  const [result, setResult] = useState<{ flights: Flight[]; unmatched: string[] }>();
+  const [result, setResult] = useState<ImportResult>();
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
+
+  const [tripItURL, setTripItURL] = useState('');
+  const [tripItOffset, setTripItOffset] = useState(0);
+  const [locator, setLocator] = useState('');
+  const [relay, setRelay] = useState<{ url: string; token: string }>();
+  const [notice, setNotice] = useState<string>();
+
+  async function runImport(action: () => Promise<void>) {
+    if (pending) return;
+    setError(undefined);
+    setNotice(undefined);
+    setPending(true);
+    try {
+      await action();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setPending(false);
+    }
+  }
 
   async function submit(fromCalendar = false) {
     if (pending) return;
@@ -44,10 +76,12 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
         const flights = new Map<string, Flight>();
         const unmatched: string[] = [];
         for (const [day, codes] of entries) {
-          const response = await api.importFlights('calendar', codes.join('\n'), day);
-          for (const flight of response.flights) flights.set(flight.id, flight);
-          unmatched.push(...response.unmatched);
-          setResult({ flights: [...flights.values()], unmatched: [...unmatched] });
+          for (let offset = 0; offset < codes.length; offset += 8) {
+            const response = await api.importFlights('calendar', codes.slice(offset, offset + 8).join('\n'), day);
+            for (const flight of response.flights) flights.set(flight.id, flight);
+            unmatched.push(...response.unmatched);
+            setResult({ flights: [...flights.values()], unmatched: [...unmatched] });
+          }
         }
       } else {
         setResult(await api.importFlights(source, text, date || undefined));
@@ -66,6 +100,13 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
         <>
           <Action label="Read upcoming calendar flights" icon="download" onPress={() => submit(true)} busy={pending} />
           <Body>Plano checks calendar titles on this device and sends matching flight numbers and dates to your server.</Body>
+          <Action label={calendarEnabled ? 'Turn off automatic calendar sync' : 'Turn on automatic calendar sync'}
+            secondary disabled={pending || !api.server} onPress={() => void runImport(async () => {
+              const next = !calendarEnabled;
+              await setCalendarSyncEnabled(api.server, next);
+              setCalendarEnabled(next);
+            })} />
+          <Body>With automatic sync on, your device can add matching flights in the background when the operating system permits.</Body>
         </>
       )}
       <Heading>Paste flight details</Heading>
@@ -80,10 +121,59 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
       <Input label="Departure date (optional)" value={date} onChangeText={setDate} editable={!pending}
         placeholder="YYYY-MM-DD" maxLength={10} />
       <Action label="Import flights" onPress={() => submit()} busy={pending} />
+      <Heading>TripIt calendar feed</Heading>
+      <Body>Import from the private calendar feed in your TripIt account settings.</Body>
+      <Input label="TripIt calendar URL" value={tripItURL} onChangeText={(value) => { setTripItURL(value); setTripItOffset(0); }}
+        editable={!pending} autoCapitalize="none" autoCorrect={false} secureTextEntry maxLength={1024} />
+      <Action label={tripItOffset ? 'Import next TripIt flights' : 'Import TripIt feed'} secondary disabled={pending || !tripItURL.trim()}
+        onPress={() => void runImport(async () => {
+          const next = await api.importTripIt(tripItURL.trim(), tripItOffset);
+          if (tripItOffset && result) {
+            const flights = new Map([...result.flights, ...next.flights].map((flight) => [flight.id, flight]));
+            setResult({ ...next, flights: [...flights.values()], unmatched: [...new Set([...result.unmatched, ...next.unmatched])] });
+          } else {
+            setResult(next);
+          }
+          setTripItOffset(next.nextOffset ?? 0);
+          if (next.nextOffset === undefined) setTripItURL('');
+        })} />
+      <Heading>Booking lookup</Heading>
+      <Body>Find flights already imported on this server using your confirmation code.</Body>
+      <Input label="Confirmation code" value={locator} onChangeText={setLocator}
+        autoCapitalize="characters" autoCorrect={false} editable={!pending} maxLength={6} />
+      <Action label="Find imported booking" secondary disabled={pending || !/^[a-z0-9]{6}$/i.test(locator)}
+        onPress={() => void runImport(async () => {
+          setResult(undefined);
+          const booking = await api.lookupBooking(locator);
+          setResult({ flights: booking.flights, unmatched: [] });
+          setLocator('');
+        })} />
+      <Heading>Email relay</Heading>
+      <Body>Connect a mail relay to import forwarded booking emails. Keep its token private.</Body>
+      <View style={layout.actions}>
+        <Action label="Generate relay token" secondary disabled={pending}
+          onPress={() => void runImport(async () => setRelay(await api.createEmailRelay()))} />
+        <Action label="Revoke relay" secondary disabled={pending}
+          onPress={() => void runImport(async () => {
+            await api.revokeEmailRelay();
+            setRelay(undefined);
+            setNotice('Email relay revoked.');
+          })} />
+      </View>
+      {relay && (
+        <View style={layout.section}>
+          <Text selectable style={{ color: palette.text }}>{relay.url}</Text>
+          <Text selectable style={{ color: palette.text }}>{relay.token}</Text>
+          <Action label="Hide relay token" secondary onPress={() => setRelay(undefined)} />
+        </View>
+      )}
+      {notice && <Body>{notice}</Body>}
       <ErrorMessage message={error} />
       {result && (
         <View style={layout.section}>
           <Heading>Import results</Heading>
+          {result.truncated && <Body>Some entries exceeded the import limit. Split the itinerary and import the remaining flights separately.</Body>}
+          {result.nextOffset !== undefined && <Body>The TripIt feed has more flights to import.</Body>}
           {result.flights.length === 0 && <Body>No flights matched the details provided.</Body>}
           {result.flights.map((flight) => <FlightRow key={flight.id} flight={flight}
             onPress={() => navigation.navigate('Flight', { id: flight.id, number: flight.number, initial: flight })} />)}
@@ -94,34 +184,37 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
   );
 }
 
-async function calendarFlights() {
-  const calendar = await import('expo-calendar/legacy');
-  const permission = await calendar.requestCalendarPermissionsAsync();
-  if (!permission.granted) throw new Error('Allow calendar access in device settings to import flight dates.');
-  const calendars = await calendar.getCalendarsAsync(calendar.EntityTypes.EVENT);
-  const byDate = new Map<string, string[]>();
-  if (calendars.length === 0) return byDate;
-  const start = new Date();
-  const end = new Date(start);
-  end.setDate(end.getDate() + 30);
-  const events = await calendar.getEventsAsync(calendars.map(({ id }) => id), start, end);
-  const entries = new Set<string>();
-  for (const event of events) {
-    const code = event.title.match(/\b(?:[A-Z]{2,3}|[A-Z][0-9]|[0-9][A-Z])[ -]?\d{1,4}[A-Z]?\b/);
-    const departure = new Date(event.startDate);
-    if (code && Number.isFinite(departure.getTime())) {
-      entries.add(`${code[0].replace(/[ -]/g, '')} ${dateKey(departure)}`);
-    }
-    if (entries.size >= 12) break;
+const transferDetail: Record<string, string> = {
+  gates: 'Gate-to-gate transfer estimate.',
+  mixed: 'Transfer estimate based on the available gate and terminal.',
+  terminals: 'Terminal-to-terminal transfer estimate.',
+  generic: 'General transfer estimate.',
+};
+
+function configuredAirportMap(value?: string) {
+  if (!value || /[\\\s]/.test(value)) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname && !url.username && !url.password ? value : undefined;
+  } catch {
+    return undefined;
   }
-  for (const entry of entries) {
-    const [code, day] = entry.split(' ');
-    if (!code || !day) continue;
-    const codes = byDate.get(day) ?? [];
-    codes.push(code);
-    byDate.set(day, codes);
-  }
-  return byDate;
+}
+
+function ConnectionGate({ direction, reported, prediction }: {
+  direction: 'arrival' | 'departure';
+  reported?: string;
+  prediction?: Connection['arrivalGatePrediction'];
+}) {
+  if (reported) return <Body>Reported {direction} gate {reported}</Body>;
+  if (!prediction) return null;
+  const share = new Intl.NumberFormat(undefined, { style: 'percent' }).format(prediction.share);
+  return (
+    <View>
+      <Body>Estimated {direction} gate {prediction.gate}</Body>
+      <Body>This gate was used in {share} of {prediction.samples} comparable flights.</Body>
+    </View>
+  );
 }
 
 export function ConnectionScreen({ api }: { api: PlanoAPI }) {
@@ -149,6 +242,7 @@ export function ConnectionScreen({ api }: { api: PlanoAPI }) {
   }
 
   const candidates = value?.filter((flight) => flight.id !== inbound?.id && flight.origin === inbound?.destination);
+  const airportMap = configuredAirportMap(result?.mapUrl);
   return (
     <Page>
       <Body>Choose two tracked flights that connect at the same airport.</Body>
@@ -181,12 +275,15 @@ export function ConnectionScreen({ api }: { api: PlanoAPI }) {
         <View style={layout.section}>
           <Heading>{result.risk} connection at {result.airport}</Heading>
           <Text style={[styles.detail, { color: colors.text }]}>{result.availableMinutes} min between flights · {result.transferMinutes} min estimated transfer</Text>
+          {result.precision && transferDetail[result.precision] && <Body>{transferDetail[result.precision]}</Body>}
+          <ConnectionGate direction="arrival" reported={inbound?.arrivalGate} prediction={result.arrivalGatePrediction} />
+          <ConnectionGate direction="departure" reported={outbound?.departureGate} prediction={result.departureGatePrediction} />
           {result.instructions?.map((instruction, index) => <Body key={index}>{instruction}</Body>)}
-          <Action secondary label={`Open ${result.airport} in maps`} onPress={() => {
+          <Action secondary label={airportMap ? `Open ${result.airport} terminal map` : `Open ${result.airport} in maps`} onPress={() => {
             const place = encodeURIComponent(`${result.airport} airport`);
-            const url = Platform.OS === 'ios' ? `https://maps.apple.com/?q=${place}`
+            const fallback = Platform.OS === 'ios' ? `https://maps.apple.com/?q=${place}`
               : `https://www.google.com/maps/search/?api=1&query=${place}`;
-            Linking.openURL(url).catch((cause: unknown) => setIssue(errorText(cause)));
+            Linking.openURL(airportMap ?? fallback).catch((cause: unknown) => setIssue(errorText(cause)));
           }} />
         </View>
       )}
@@ -197,103 +294,29 @@ export function ConnectionScreen({ api }: { api: PlanoAPI }) {
 export function PassportScreen({ api, navigation }: Screen<'Passport'> & { api: PlanoAPI }) {
   const load = useCallback(() => api.passport(), [api]);
   const { value, error, pending, refresh } = useRemote(load);
-  const [issue, setIssue] = useState<string>();
-  const formatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
-  const stats = value?.stats;
-  const summary = stats
-    ? `${formatter.format(stats.flights)} flights · ${formatter.format(stats.miles)} mi · ${formatter.format(stats.hours)} hr`
-    : '';
   return (
     <Page refreshing={pending && !!value} refresh={refresh}>
       <Heading>Flight history</Heading>
-      <ErrorMessage message={error || issue} />
+      <ErrorMessage message={error} />
       {error && <Action secondary label="Reload Passport" onPress={refresh} />}
       {pending && !value && <Loading />}
       {value && value.flights.length === 0 && <Body>Completed flights will appear here.</Body>}
-      {!!value?.flights.length && stats && (
+      {!!value?.flights.length && (
         <>
-          <Body>{summary}</Body>
-          <Body>{stats.aircraft} aircraft · {formatter.format(stats.delayMinutes)} min of delays</Body>
-          {value.segments.length > 0 && <PassportGlobe segments={value.segments} />}
-          <Action secondary icon="share" label="Share flight stats" onPress={() => {
-            Share.share({ message: `My Plano Passport\n${summary}\n${stats.aircraft} aircraft · ${formatter.format(stats.delayMinutes)} min of delays` })
-              .catch((cause: unknown) => setIssue(errorText(cause)));
-          }} />
-          {value.flights.map((flight) => <FlightRow key={flight.id} flight={flight}
-            onPress={() => navigation.navigate('Flight', { id: flight.id, number: flight.number, initial: flight })} />)}
+          <PassportMaps segments={value.segments} />
+          <PassportCard stats={value.stats} />
+          <View style={layout.section}>
+            <Heading>Completed flights</Heading>
+            {value.flights.map((flight) => <FlightRow key={flight.id} flight={flight}
+              onPress={() => navigation.navigate('Flight', { id: flight.id, number: flight.number, initial: flight })} />)}
+          </View>
         </>
       )}
     </Page>
   );
 }
 
-const rad = Math.PI / 180;
-const diameter = 216;
-const center = diameter / 2;
-
-function globeLine(points: [number, number][], viewLongitude: number): string {
-  let path = '';
-  let visible = false;
-  for (const [lat, lon] of points) {
-    const latitude = lat * rad;
-    const longitude = (lon - viewLongitude) * rad;
-    const x = center + (center - 4) * Math.cos(latitude) * Math.sin(longitude);
-    const y = center - (center - 4) * Math.sin(latitude);
-    const front = Math.cos(latitude) * Math.cos(longitude) >= 0;
-    if (front) path += `${visible ? 'L' : 'M'}${x.toFixed(2)} ${y.toFixed(2)}`;
-    visible = front;
-  }
-  return path;
-}
-
-function greatCircle(segment: PassportSegment): [number, number][] {
-  const { originLatitude, originLongitude, destinationLatitude, destinationLongitude } = segment;
-  const vector = (lat: number, lon: number) => [
-    Math.cos(lat * rad) * Math.cos(lon * rad), Math.cos(lat * rad) * Math.sin(lon * rad), Math.sin(lat * rad),
-  ] as const;
-  const [ax, ay, az] = vector(originLatitude, originLongitude);
-  const [bx, by, bz] = vector(destinationLatitude, destinationLongitude);
-  const angle = Math.acos(Math.max(-1, Math.min(1, ax * bx + ay * by + az * bz)));
-  const divisor = Math.sin(angle);
-  if (Math.abs(divisor) < 0.000001) return [[originLatitude, originLongitude], [destinationLatitude, destinationLongitude]];
-  return Array.from({ length: 33 }, (_, index) => {
-    const portion = index / 32;
-    const a = Math.sin((1 - portion) * angle) / divisor;
-    const b = Math.sin(portion * angle) / divisor;
-    const x = a * ax + b * bx;
-    const y = a * ay + b * by;
-    const z = a * az + b * bz;
-    return [Math.atan2(z, Math.hypot(x, y)) / rad, Math.atan2(y, x) / rad];
-  });
-}
-
-function PassportGlobe({ segments }: { segments: PassportSegment[] }) {
-  const { colors } = usePalette();
-  const [longitude, setLongitude] = useState(segments[0]?.originLongitude ?? 0);
-  const parallels = [-60, -30, 0, 30, 60].map((lat) =>
-    Array.from({ length: 91 }, (_, index): [number, number] => [lat, -180 + 4 * index]));
-  const meridians = [-180, -120, -60, 0, 60, 120, 180].map((lon) =>
-    Array.from({ length: 46 }, (_, index): [number, number] => [-90 + 4 * index, lon]));
-  return (
-    <View style={styles.globe}>
-      <Svg width="100%" height={236} viewBox={`0 0 ${diameter} ${diameter}`}
-        accessibilityRole="image" accessibilityLabel="Globe showing your recorded routes">
-        <Circle cx={center} cy={center} r={center - 4} fill={colors.route} />
-        {[...parallels, ...meridians].map((points, index) => <Path key={index} d={globeLine(points, longitude)}
-          stroke="#547A6E" strokeWidth={0.75} fill="none" />)}
-        {segments.map((segment, index) => <Path key={index} d={globeLine(greatCircle(segment), longitude)}
-          stroke={colors.routeLine} strokeWidth={1.7} fill="none" strokeLinecap="round" />)}
-      </Svg>
-      <View style={layout.actions}>
-        <Action secondary label="Rotate west" onPress={() => setLongitude((old) => (old - 30 + 360) % 360)} />
-        <Action secondary label="Rotate east" onPress={() => setLongitude((old) => (old + 30) % 360)} />
-      </View>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   multiline: { minHeight: 120, textAlignVertical: 'top' },
   detail: { fontSize: 16, lineHeight: 22 },
-  globe: { alignItems: 'center', gap: 8 },
 });

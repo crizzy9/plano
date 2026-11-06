@@ -7,6 +7,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { createAPI, loadServer, removeRetiredDevices } from './src/api';
 import { errorText } from './src/flight';
 import { useFlightAlerts } from './src/alerts';
+import { resumeCalendarSync } from './src/calendar-sync';
 import { Home, Search, FlightDetailScreen, ServerSettings, type Routes } from './src/screens';
 import { Tools, ImportFlights, PassportScreen, ConnectionScreen } from './src/tools';
 import { usePalette } from './src/theme';
@@ -28,10 +29,13 @@ export default function App() {
   useFlightAlerts(api);
   useEffect(() => {
     if (!server) return;
-    const clean = () => { void removeRetiredDevices(server).catch(() => {}); };
-    clean();
+    const resume = () => {
+      void removeRetiredDevices(server).catch(() => {});
+      void resumeCalendarSync().catch(() => {});
+    };
+    if (AppState.currentState !== 'background' && AppState.currentState !== 'inactive') resume();
     const subscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active') clean();
+      if (state === 'active') resume();
     });
     return () => subscription.remove();
   }, [server]);
