@@ -28,8 +28,9 @@ const (
 
 	// Keep notifications small enough to carry useful state without a follow-up
 	// API call, including on networks that only allow push traffic.
-	maxPayloadBytes  = 2048
-	maxResponseBytes = 16 << 10
+	maxPayloadBytes        = 2048
+	maxResponseBytes       = 16 << 10
+	providerRequestTimeout = 10 * time.Second
 )
 
 type Target struct {
@@ -245,7 +246,7 @@ func makeClient(http2Only bool) *http.Client {
 	}
 	return &http.Client{
 		Transport: transport,
-		Timeout:   10 * time.Second,
+		Timeout:   providerRequestTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

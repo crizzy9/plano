@@ -604,6 +604,7 @@ func enqueueWithAdvisories(ctx context.Context, tx *sql.Tx, flightID string, msg
 type deliveryJob struct {
 	id, deviceID, registered, lease int64
 	attempts                        int
+	checkIn                         bool
 	owner                           string
 	target                          push.Target
 	message                         push.Message
@@ -637,8 +638,9 @@ func (s *Store) claimReadyPush(ctx context.Context, now time.Time, limit int, pl
 		deviceJoin = "CROSS JOIN"
 	}
 	args = append(args, t, limit)
-	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.device_id,d.registered,o.attempts,d.owner,d.platform,d.token,COALESCE(b.binding,''),o.message
-FROM outbox o `+deviceJoin+` devices d ON d.id=o.device_id LEFT JOIN device_bindings b ON b.device_id=d.id
+	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.device_id,d.registered,o.attempts,d.owner,d.platform,d.token,COALESCE(b.binding,''),o.message,
+COALESCE(json_extract(e.data,'$.kind')='check_in',0)
+FROM outbox o `+deviceJoin+` devices d ON d.id=o.device_id LEFT JOIN device_bindings b ON b.device_id=d.id`+outboxFlightEvent+`
 WHERE o.done=0 AND o.due<=? AND o.expires>? AND o.lease_until<=?`+filter+` AND NOT `+dirtyConnectionAlert+`
 AND NOT `+revokedFriendAlert+`
 AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
@@ -654,7 +656,7 @@ AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
 		var job deliveryJob
 		var raw []byte
 		if err := rows.Scan(&job.id, &job.deviceID, &job.registered, &job.attempts, &job.owner,
-			&job.target.Platform, &job.target.Token, &job.target.Binding, &raw); err != nil {
+			&job.target.Platform, &job.target.Token, &job.target.Binding, &raw, &job.checkIn); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(raw, &job.message); err != nil {
@@ -674,6 +676,16 @@ AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
 			// A lease from before submission tracking may already have sent.
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox_live_start_leases
 SELECT id,0 FROM outbox WHERE id=? AND lease_until=0 AND attempts=0`, job.id); err != nil {
+				return nil, err
+			}
+		}
+		if job.checkIn {
+			// Carry an unsent marker forward only when it describes the old
+			// lease, or when the job has no active lease and no known send.
+			if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_check_in_leases(outbox_id,lease_until,may_have_sent)
+SELECT o.id,?,0 FROM outbox o LEFT JOIN outbox_check_in_leases l ON l.outbox_id=o.id
+WHERE o.id=? AND o.attempts=0 AND `+unsentCheckInLease+`
+ON CONFLICT(outbox_id) DO UPDATE SET lease_until=excluded.lease_until`, job.lease, job.id); err != nil {
 				return nil, err
 			}
 		}
@@ -1097,6 +1109,18 @@ CASE WHEN ? THEN EXISTS(SELECT 1 FROM flights f WHERE f.id=o.flight_id
 			return
 		}
 		job.message.InboundLegID = ""
+	}
+	if flightEventKind == "check_in" {
+		authorized, err := s.authorizeCheckIn(attempt, job, time.Now())
+		if err != nil {
+			if attempt.Err() == nil {
+				logger.Error("could not authorize check-in push", "job", job.id, "error", err)
+			}
+			return
+		}
+		if !authorized {
+			return
+		}
 	}
 	err = sender.Send(attempt, job.target, job.message)
 	if ctx.Err() != nil && errors.Is(err, context.Canceled) {

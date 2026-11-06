@@ -143,13 +143,14 @@ func TestCheckInSchedulerRechecksCandidatesBeforeQueueing(t *testing.T) {
 	}
 }
 
-func TestCheckInSchedulerReoffersOnlyUnclaimedRescheduledReminder(t *testing.T) {
+func TestCheckInSchedulerReoffersOnlyUnsentRescheduledReminder(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		claimed bool
+		name               string
+		claimed, submitted bool
 	}{
 		{name: "unclaimed"},
-		{name: "possibly submitted", claimed: true},
+		{name: "claimed but unsent", claimed: true},
+		{name: "possibly submitted", claimed: true, submitted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -159,8 +160,14 @@ func TestCheckInSchedulerReoffersOnlyUnclaimedRescheduledReminder(t *testing.T) 
 				t.Fatal(err)
 			}
 			if tc.claimed {
-				if jobs, err := store.claim(ctx, opens, 1); err != nil || len(jobs) != 1 {
+				jobs, err := store.claim(ctx, opens, 1)
+				if err != nil || len(jobs) != 1 {
 					t.Fatalf("claimed %d reminders, err = %v", len(jobs), err)
+				}
+				if tc.submitted {
+					if authorized, err := store.authorizeCheckIn(ctx, jobs[0], opens); err != nil || !authorized {
+						t.Fatalf("check-in authorization = %t, err = %v", authorized, err)
+					}
 				}
 			}
 			// Both windows were closed when the provider captured this
@@ -171,7 +178,7 @@ func TestCheckInSchedulerReoffersOnlyUnclaimedRescheduledReminder(t *testing.T) 
 				t.Fatal(err)
 			}
 			var latchAfterRevision int
-			if tc.claimed {
+			if tc.submitted {
 				latchAfterRevision = 1
 			}
 			checkInSchedulerCounts(t, store, 1, latchAfterRevision, 0)

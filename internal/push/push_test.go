@@ -1,6 +1,7 @@
 package push
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -19,6 +20,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -483,6 +486,162 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 	}
 	if sends != len(messages) || exchanges != 2 {
 		t.Fatalf("OAuth cache / invalidation: sends=%d, exchanges=%d", sends, exchanges)
+	}
+}
+
+func TestFCMSendsWithValidBearerWhileOAuthRefreshes(t *testing.T) {
+	const (
+		cached = "fixture-cached-access"
+		fresh  = "fixture-refreshed-access"
+		send   = "https://fcm.googleapis.com/v1/projects/fixture-project/messages:send"
+	)
+	for _, test := range []struct {
+		name          string
+		refreshStatus int
+		nearExpiry    bool
+	}{
+		{"refresh succeeds", http.StatusOK, false},
+		{"refresh is rate limited", http.StatusTooManyRequests, false},
+		{"bearer could expire during send", http.StatusOK, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			started := make(chan struct{})
+			release := make(chan struct{})
+			finishRefresh := sync.OnceFunc(func() { close(release) })
+			var exchanges atomic.Int32
+			var submitted []string
+			lifetime := 30 * time.Second
+			if test.nearExpiry {
+				lifetime = time.Second
+			}
+			client := &FCM{
+				key: key, email: "plano@fixture-project.iam.gserviceaccount.com", tokenEndpoint: googleOAuthEndpoint,
+				endpoint: send, token: cached, expires: time.Now().Add(lifetime),
+				client: &http.Client{Timeout: 5 * time.Second, Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
+					switch r.URL.String() {
+					case googleOAuthEndpoint:
+						if exchanges.Add(1) == 1 {
+							close(started)
+						}
+						select {
+						case <-release:
+						case <-r.Context().Done():
+							return nil, r.Context().Err()
+						}
+						if test.refreshStatus == http.StatusTooManyRequests {
+							return fixtureResponse(test.refreshStatus, `{"error":"rate_limited"}`, http.Header{"Retry-After": {"120"}})
+						}
+						return fixtureResponse(test.refreshStatus, `{"access_token":"`+fresh+`","token_type":"Bearer","expires_in":3600}`, nil)
+					case send:
+						submitted = append(submitted, r.Header.Get("Authorization"))
+						return fixtureResponse(http.StatusOK, `{}`, nil)
+					default:
+						return nil, fmt.Errorf("unexpected fixture URL: %s", r.URL.Host)
+					}
+				})},
+			}
+			currentRefresh := func() *tokenRefresh {
+				client.mu.Lock()
+				defer client.mu.Unlock()
+				return client.refresh
+			}
+			t.Cleanup(func() {
+				finishRefresh()
+				if refresh := currentRefresh(); refresh != nil {
+					select {
+					case <-refresh.done:
+					case <-time.After(6 * time.Second):
+						t.Error("OAuth fixture refresh did not finish")
+					}
+				}
+			})
+			sendAlert := func(ctx context.Context) error {
+				return client.Send(ctx, "fixture:android-registration", fixtureAlert(time.Now()))
+			}
+			expectSubmission := func(bearer string) {
+				t.Helper()
+				before := len(submitted)
+				if err := sendAlert(ctx); err != nil {
+					t.Fatalf("FCM send using a valid bearer failed: %v", err)
+				}
+				if len(submitted) != before+1 || submitted[before] != "Bearer "+bearer {
+					t.Fatalf("unexpected FCM submissions: %v", submitted)
+				}
+			}
+			waitForExchange := func() {
+				t.Helper()
+				select {
+				case <-started:
+				case <-ctx.Done():
+					t.Fatal("expected an OAuth exchange")
+				}
+			}
+			if test.nearExpiry {
+				result := make(chan error, 1)
+				go func() { result <- sendAlert(ctx) }()
+				waitForExchange()
+				finishRefresh()
+				select {
+				case err := <-result:
+					if err != nil || len(submitted) != 1 || submitted[0] != "Bearer "+fresh {
+						t.Fatalf("send did not wait for a bearer with enough lifetime: submissions=%v, error=%v", submitted, err)
+					}
+				case <-ctx.Done():
+					t.Fatal("send did not complete after refresh")
+				}
+				return
+			}
+
+			expectSubmission(cached)
+			waitForExchange()
+			refresh := currentRefresh()
+			if refresh == nil {
+				t.Fatal("OAuth exchange completed while its response was held")
+			}
+			expectSubmission(cached)
+			if test.refreshStatus == http.StatusOK {
+				client.rejectToken(cached)
+				wait, cancelWait := context.WithTimeout(ctx, 50*time.Millisecond)
+				err := sendAlert(wait)
+				cancelWait()
+				if !errors.Is(err, context.DeadlineExceeded) || len(submitted) != 2 {
+					t.Fatalf("send using a rejected bearer: submissions=%v, error=%v", submitted, err)
+				}
+			}
+			finishRefresh()
+			select {
+			case <-refresh.done:
+			case <-ctx.Done():
+				t.Fatal("expected the shared OAuth exchange to finish")
+			}
+			if test.refreshStatus == http.StatusOK {
+				// A late rejection for the previous bearer must leave the new one usable.
+				client.rejectToken(cached)
+				expectSubmission(fresh)
+			} else {
+				expectSubmission(cached)
+				client.mu.Lock()
+				client.expires = time.Now().Add(-time.Second)
+				client.mu.Unlock()
+				var failure *DeliveryError
+				err := sendAlert(ctx)
+				if !errors.As(err, &failure) || failure.Status != http.StatusTooManyRequests || !failure.Retryable || failure.RetryAfter < 110*time.Second {
+					t.Fatalf("expected the OAuth cooldown after the bearer expired, got %v", err)
+				}
+				if len(submitted) != 3 {
+					t.Fatalf("expired bearer was submitted: %v", submitted)
+				}
+			}
+			if got := exchanges.Load(); got != 1 {
+				t.Fatalf("OAuth exchanges = %d, want one", got)
+			}
+		})
 	}
 }
 

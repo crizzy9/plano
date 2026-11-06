@@ -358,6 +358,85 @@ func TestFlightAlertDispatcherReoffersUnclaimedCheckInAfterReinstatement(t *test
 	assertFlightAlertHistory(t, store, flight.ID, "cancelled|AA2", "check_in|Check check-in availability for AA2 with your airline.")
 }
 
+func TestFlightAlertDispatcherReoffersOnlyUnsentCheckInAfterCorrection(t *testing.T) {
+	for _, firstClaim := range []string{"unsent", "reclaimed unsent", "legacy", "legacy reclaims", "submitted"} {
+		t.Run(firstClaim, func(t *testing.T) {
+			store, flight := flightAlertDispatchFixture(t)
+			departure := flight.ObservedAt.Add(time.Hour)
+			flight.ScheduledDeparture = &departure
+			observeFlightAlertFixture(t, store, &flight)
+			claims := claimFlightAlertJobs(t, store, 2)
+			correct := func() {
+				flight.ScheduledDeparture = new(flight.ObservedAt.Add(30 * time.Hour))
+				observeFlightAlertFixture(t, store, &flight)
+			}
+			logger := slog.New(slog.DiscardHandler)
+			switch firstClaim {
+			case "reclaimed unsent":
+				var err error
+				claims, err = store.claim(t.Context(), time.Unix(0, claims[0].lease).Add(time.Second), len(claims))
+				if err != nil || len(claims) != 2 {
+					t.Fatalf("reclaims = %d, want 2, error = %v", len(claims), err)
+				}
+				correct()
+			case "legacy":
+				if _, err := store.db.ExecContext(t.Context(), `DELETE FROM outbox_check_in_leases WHERE outbox_id=?`, claims[0].id); err != nil {
+					t.Fatal(err)
+				}
+				correct()
+			case "legacy reclaims":
+				claims[0].lease += int64(time.Minute)
+				if _, err := store.db.ExecContext(t.Context(), `UPDATE outbox SET lease_until=? WHERE id=?`, claims[0].lease, claims[0].id); err != nil {
+					t.Fatal(err)
+				}
+				correct()
+			case "submitted":
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				submitted := false
+				store.deliver(ctx, pushFunc(func(context.Context, push.Target, push.Message) error {
+					submitted = true
+					correct()
+					cancel()
+					return context.Canceled
+				}), logger, claims[0])
+				if !submitted {
+					t.Fatal("fixture check-in did not reach transport")
+				}
+			default:
+				correct()
+			}
+			for _, claim := range claims {
+				if authorized, err := store.authorizeCheckIn(t.Context(), claim, time.Now()); err != nil || authorized {
+					t.Fatalf("corrected check-in lease authorized = %t, error = %v", authorized, err)
+				}
+			}
+			assertFlightAlertSends(t, store, claims)
+			flight.ScheduledDeparture = &departure
+			observeFlightAlertFixture(t, store, &flight)
+			want := []string{claims[1].target.Platform}
+			if firstClaim == "unsent" || firstClaim == "reclaimed unsent" {
+				want = append(want, claims[0].target.Platform)
+			}
+			var sent []string
+			for _, job := range claimFlightAlertJobs(t, store, len(want)) {
+				store.deliver(t.Context(), pushFunc(func(_ context.Context, target push.Target, message push.Message) error {
+					if message.Title != "Check-in reminder" || message.CollapseID != claims[0].message.CollapseID {
+						t.Fatalf("unexpected replacement alert %#v", message)
+					}
+					sent = append(sent, target.Platform)
+					return nil
+				}), logger, job)
+			}
+			slices.Sort(want)
+			slices.Sort(sent)
+			if !slices.Equal(sent, want) {
+				t.Fatalf("check-in recipients = %v, want %v", sent, want)
+			}
+		})
+	}
+}
+
 func flightAlertDispatchFixture(t *testing.T) (*Store, feeds.Flight) {
 	t.Helper()
 	store, owner, id := dispatcherFixture(t)

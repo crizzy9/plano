@@ -25,6 +25,8 @@ const (
 	googleOAuthEndpoint = "https://oauth2.googleapis.com/token"
 	fcmScope            = "https://www.googleapis.com/auth/firebase.messaging"
 	maxFCMTTL           = 28 * 24 * time.Hour
+	fcmRefreshLead      = time.Minute
+	fcmRefreshRetry     = 10 * time.Second
 )
 
 type FCMConfig struct {
@@ -51,9 +53,10 @@ type FCM struct {
 }
 
 type tokenRefresh struct {
-	done  chan struct{}
-	token string
-	err   error
+	done    chan struct{}
+	token   string
+	err     error
+	retryAt time.Time
 }
 
 var projectIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]$`)
@@ -126,23 +129,38 @@ func (f *FCM) accessToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 	f.mu.Lock()
-	if f.token != "" && time.Now().Add(time.Minute).Before(f.expires) {
-		token := f.token
+	now, token := time.Now(), f.token
+	sendDeadline := now.Add(providerRequestTimeout)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(sendDeadline) {
+		sendDeadline = deadline
+	}
+	usable := token != "" && sendDeadline.Before(f.expires)
+	if usable && now.Add(fcmRefreshLead).Before(f.expires) {
 		f.mu.Unlock()
 		return token, nil
 	}
 	refresh := f.refresh
-	if refresh == nil {
+	if refresh == nil || !refresh.retryAt.IsZero() && !now.Before(refresh.retryAt) {
 		refresh = &tokenRefresh{done: make(chan struct{})}
 		f.refresh = refresh
 		go f.refreshToken(refresh)
 	}
 	f.mu.Unlock()
+	// The refresh can proceed without making usable credentials wait on OAuth.
+	if usable {
+		return token, nil
+	}
 
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case <-refresh.done:
+		var failure *DeliveryError
+		if errors.As(refresh.err, &failure) && failure.Retryable {
+			remaining := *failure
+			remaining.RetryAfter = max(0, time.Until(refresh.retryAt))
+			return "", &remaining
+		}
 		return refresh.token, refresh.err
 	}
 }
@@ -156,10 +174,19 @@ func (f *FCM) refreshToken(refresh *tokenRefresh) {
 	if err == nil {
 		f.token = token
 		f.expires = expires
+		f.refresh = nil
+	} else {
+		// Keep the failed attempt until its retry deadline. This also paces
+		// concurrent sends when the cached bearer has expired or was rejected.
+		backoff := fcmRefreshRetry
+		var failure *DeliveryError
+		if errors.As(err, &failure) {
+			backoff = max(backoff, failure.RetryAfter)
+		}
+		refresh.retryAt = time.Now().Add(backoff)
 	}
 	refresh.token = token
 	refresh.err = err
-	f.refresh = nil
 	close(refresh.done)
 }
 

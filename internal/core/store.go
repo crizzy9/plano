@@ -198,6 +198,11 @@ CREATE TABLE IF NOT EXISTS check_in_queued (
   device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   flight_id TEXT NOT NULL REFERENCES flights(id), PRIMARY KEY(device_id, flight_id)
 );
+CREATE TABLE IF NOT EXISTS outbox_check_in_leases (
+  outbox_id INTEGER PRIMARY KEY REFERENCES outbox(id) ON DELETE CASCADE,
+  lease_until INTEGER NOT NULL,
+  may_have_sent INTEGER NOT NULL CHECK(may_have_sent IN (0,1))
+);
 ` + checkInScheduleSchema + `
 CREATE TABLE IF NOT EXISTS live_started (
   device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE, flight_id TEXT NOT NULL REFERENCES flights(id),
