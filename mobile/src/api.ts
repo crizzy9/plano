@@ -746,7 +746,11 @@ const friendPath = (id: string) => `/v1/friends/${encodeURIComponent(id)}`;
 const passportPath = '/v1/passport?limit=50';
 const passportManualPath = '/v1/passport/manual';
 
-export function createAPI(server: string, options: { access?: 'background' | 'existing-installation' } = {}) {
+type APIAccessOptions =
+  | { access: 'background'; withRequestAuthorization?: <T>(send: () => Promise<T>) => Promise<T> }
+  | { access?: 'existing-installation'; withRequestAuthorization?: never };
+
+export function createAPI(server: string, options: APIAccessOptions = {}) {
   // The canonical origin is part of the key, so two installations on different
   // hosts can never use each other's bearer token.
   const tokenKey = serverStorageKey('installation', server);
@@ -780,10 +784,21 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
 
   async function authenticated<T>(path: string, init: RequestInit = {}, timeoutMs?: number) {
     const token = await installationToken();
+    const send = () => request<T>(server, path, { ...init, headers: { ...init.headers, Authorization: `Bearer ${token}` } }, timeoutMs);
+    const authorize = options.withRequestAuthorization;
+    if (authorize) {
+      const { response } = await serializeRetirement(async () => {
+        if (await loadServer({ savedOnly: true }) !== server) throw new Error('Access for this server ended.');
+        // Keep the saved host stable through the final consent check and
+        // fetch invocation. The response settles outside the queue.
+        return authorize(async () => ({ response: send() }));
+      });
+      return response;
+    }
     if (options.access && await loadServer({ savedOnly: background }) !== server) {
       throw new Error('Access for this server ended.');
     }
-    return request<T>(server, path, { ...init, headers: { ...init.headers, Authorization: `Bearer ${token}` } }, timeoutMs);
+    return send();
   }
 
   async function withFlightCache<T>(token: string, revision: number | undefined, use: (scope: string) => T): Promise<T | undefined> {

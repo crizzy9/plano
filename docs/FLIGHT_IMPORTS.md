@@ -4,6 +4,8 @@ Open **Tools → Import flights**. Plano imports only uniquely matched flight in
 
 The mobile calendar integration requests permission before reading event titles and departure times. On-demand and optional automatic scans skip events the device marks canceled and send only recognized flight designators with departure dates or times to the selected self-host. Automatic sync checks the next 30 days in small batches when you open the app and about every 30 minutes while it stays open. iOS and Android decide when the background task can run. Background sync enabled in an earlier release keeps sending dates until you turn it off and back on.
 
+Plano rechecks permission and consent before submitting each automatic batch. Turning sync off retires pending batches and clears the local sync journal. A request already submitted can still finish.
+
 The server records a temporary receipt for each successfully matched automatic import. Retrying the same flight number, date, and optional departure time does not add that entry back after you untrack it. Unresolved entries can be retried. Receipts are scoped to your installation, expire after the entry's date passes, and contain a digest and expiry time. Update the app and server together for these guarantees. Older servers continue to support the app's legacy calendar import path.
 
 For an overnight flight, label the departure and arrival separately. Plano uses the departure date. If the confirmation supplies a local departure time, Plano matches the scheduled minute in the flight’s origin time zone. A missing origin time zone or multiple matching flights leaves that leg unresolved. Forwarded HTML tables with Flight, Departure, and Arrival headers can supply the same information.

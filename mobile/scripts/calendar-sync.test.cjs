@@ -12,12 +12,21 @@ const server = 'https://plano.example';
 const legacyKey = `calendar-imports:${server}`;
 const currentKey = `calendar-sync-imports:${server}`;
 const consentKey = `calendar-sync:${server}`;
+const renewedConsent = 'timed:00000000-0000-4000-8000-000000000002';
 const date = '2027-05-18';
 const key = ({ day, code, utcTime }) => [day, code, utcTime].filter(Boolean).join(' ');
 const flight = (number, status) => ({ title: `UA${number}`, startDate: `${date}T13:00:00Z`, timeZone: 'UTC', status });
 
-function client(events, send, consent = 'timed', importLegacy) {
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function client(events, send, consent = 'timed', importLegacy, { beforeAuth, beforeStore, beforeRead, beforeCalendars } = {}) {
   let now = Date.parse('2027-05-17T12:00:00Z');
+  let permissionGranted = true;
+  let calendarReads = 0;
   const storage = new Map([[consentKey, consent]]);
   const modern = [];
   const legacy = [];
@@ -28,40 +37,58 @@ function client(events, send, consent = 'timed', importLegacy) {
   }
   const modules = {
     'expo-background-task': {},
-    'expo-crypto': {},
+    'expo-crypto': { randomUUID: () => renewedConsent.slice('timed:'.length) },
     'expo-secure-store': {
-      getItemAsync: async (name) => storage.get(name),
-      setItemAsync: async (name, value) => storage.set(name, value),
+      getItemAsync: async (name) => {
+        await beforeRead?.(name);
+        return storage.get(name);
+      },
+      setItemAsync: async (name, value) => {
+        await beforeStore?.(name);
+        storage.set(name, value);
+      },
+      deleteItemAsync: async (name) => storage.delete(name),
     },
     'expo-task-manager': { isAvailableAsync: async () => false, isTaskDefined: () => true },
     'react-native': { Platform: { OS: 'android' } },
     'expo-calendar': {
       EntityTypes: { EVENT: 'event' },
-      getCalendarPermissions: async () => ({ granted: true }),
+      getCalendarPermissions: async () => ({ granted: permissionGranted }),
+      requestCalendarPermissions: async () => ({ granted: permissionGranted }),
       getCalendars: async (entity) => {
         assert.equal(entity, 'event');
+        await beforeCalendars?.();
         return [{ id: 'private calendar ID' }];
       },
-      listEvents: async () => events,
+      listEvents: async () => {
+        calendarReads += 1;
+        return events;
+      },
     },
     './api': {
       loadServer: async () => server,
+      prepareCalendarBackground: async () => {},
+      clearCalendarBackground: async () => {},
       serverStorageKey: (scope, host) => `${scope}:${host}`,
       createAPI: (_, options) => {
         assert.equal(options.access, 'background');
+        async function authenticated(kind, request) {
+          await beforeAuth?.(kind);
+          return options.withRequestAuthorization ? options.withRequestAuthorization(request) : request();
+        }
         return {
           hasSavedInstallationToken: async () => true,
-          syncCalendarFlights: async (flights) => {
+          syncCalendarFlights: (flights) => authenticated('modern', async () => {
             modern.push(JSON.parse(JSON.stringify(flights)));
             return send ? send(flights, storage) : flights.map(key);
-          },
-          importFlights: async (source, text) => {
+          }),
+          importFlights: (source, text) => authenticated('legacy', async () => {
             assert.equal(source, 'calendar');
             legacy.push(text);
             return importLegacy ? importLegacy(text) : {
               unmatched: [], flights: (text.match(/BEGIN:VEVENT/g) ?? []).map((_, index) => ({ id: `flight-${index}` })),
             };
-          },
+          }),
         };
       },
     },
@@ -78,6 +105,9 @@ function client(events, send, consent = 'timed', importLegacy) {
   return {
     storage, modern, legacy,
     resume: exports.resumeCalendarSync,
+    setEnabled: (enabled) => exports.setCalendarSyncEnabled(server, enabled),
+    setPermission: (granted) => { permissionGranted = granted; },
+    calendarReads: () => calendarReads,
     advance: () => { now += exports.calendarSyncIntervalMs; },
   };
 }
@@ -179,10 +209,129 @@ test('legacy sync leaves incomplete or inconsistent replies unacknowledged', asy
 
 test('a retired consent cannot retry through the legacy import path', async () => {
   const sync = client([flight(100)], (_, storage) => {
-    storage.set(consentKey, 'timed:00000000-0000-4000-8000-000000000002');
+    storage.set(consentKey, renewedConsent);
     return null;
   });
   await sync.resume();
   assert.equal(sync.modern.length, 1);
   assert.deepEqual(sync.legacy, []);
+});
+
+for (const kind of ['modern', 'legacy']) {
+  test(`renewed consent skips a pending ${kind} request and starts a fresh run`, async () => {
+    const events = [flight(100)];
+    const entered = deferred();
+    const release = deferred();
+    let paused = false;
+    const sync = client(events, kind === 'legacy' ? () => null : undefined, 'timed', undefined, {
+      async beforeAuth(requestKind) {
+        if (paused || requestKind !== kind) return;
+        paused = true;
+        entered.resolve();
+        await release.promise;
+      },
+    });
+    const pending = sync.resume();
+    await entered.promise;
+    await sync.setEnabled(false);
+    events.splice(0, 1, flight(200));
+    await sync.setEnabled(true);
+    release.resolve();
+    await pending;
+    await new Promise(setImmediate);
+
+    if (kind === 'modern') {
+      assert.deepEqual(sync.modern.flat().map(({ code }) => code), ['UA200']);
+      assert.deepEqual(sync.legacy, []);
+    } else {
+      assert.deepEqual(sync.modern.flat().map(({ code }) => code), ['UA100', 'UA200']);
+      assert.equal(sync.legacy.length, 1);
+      assert.match(sync.legacy[0], /SUMMARY:UA200/);
+    }
+    const log = JSON.parse(sync.storage.get(kind === 'legacy' ? legacyKey : currentKey));
+    assert.equal(log.consent, renewedConsent);
+    assert.deepEqual(log.imported, [`${date} UA200 130000`]);
+  });
+}
+
+test('calendar sync rechecks OS permission after authentication', async () => {
+  const entered = deferred();
+  const release = deferred();
+  const sync = client([flight(100)], undefined, 'timed', undefined, {
+    async beforeAuth() {
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  const pending = sync.resume();
+  await entered.promise;
+  sync.setPermission(false);
+  release.resolve();
+  await pending;
+  assert.deepEqual(sync.modern, []);
+  assert.deepEqual(sync.legacy, []);
+});
+
+test('calendar sync rechecks OS permission after the final saved consent read', { timeout: 2000 }, async () => {
+  const entered = deferred();
+  const release = deferred();
+  let authenticating = false;
+  const sync = client([flight(100)], undefined, 'timed', undefined, {
+    beforeAuth() { authenticating = true; },
+    async beforeRead(name) {
+      if (!authenticating || name !== consentKey) return;
+      authenticating = false;
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  const pending = sync.resume();
+  await entered.promise;
+  sync.setPermission(false);
+  release.resolve();
+  await pending;
+  assert.deepEqual(sync.modern, []);
+});
+
+test('disabling calendar sync retires a scan before it reads events', async () => {
+  const entered = deferred();
+  const release = deferred();
+  const sync = client([flight(100)], undefined, 'timed', undefined, {
+    async beforeCalendars() {
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  const pending = sync.resume();
+  await entered.promise;
+  await sync.setEnabled(false);
+  release.resolve();
+  await pending;
+  assert.equal(sync.calendarReads(), 0);
+  assert.deepEqual(sync.modern, []);
+});
+
+test('disabling calendar sync drains pending journal writes before deleting them', async () => {
+  const entered = deferred();
+  const release = deferred();
+  const sync = client([flight(100)], undefined, 'timed', undefined, {
+    async beforeStore(name) {
+      if (name !== currentKey) return;
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  const pending = sync.resume();
+  await entered.promise;
+  let disabled = false;
+  const off = sync.setEnabled(false).then(() => { disabled = true; });
+  await new Promise(setImmediate);
+  const drained = !disabled;
+  release.resolve();
+  await Promise.all([pending, off]);
+  assert.equal(drained, true);
+  assert.equal(sync.storage.has(currentKey), false);
+  assert.equal(sync.storage.has(legacyKey), false);
+  assert.equal(sync.storage.has(consentKey), false);
+  assert.deepEqual(sync.modern, []);
 });

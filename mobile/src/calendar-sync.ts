@@ -41,7 +41,10 @@ type SyncLog = {
 };
 
 let scheduleQueue = Promise.resolve();
+let calendarStorageQueue = Promise.resolve();
 let ongoingSync: Promise<void> | undefined;
+const consentGenerations = new Map<string, { pending: boolean }>();
+const retiredConsent = new Error('Calendar sync consent ended.');
 
 function calendarDate(departure: Date, timeZone?: string | null) {
   if (timeZone) {
@@ -139,9 +142,10 @@ export function importCalendarBatch(api: PlanoAPI, flights: CalendarFlight[]) {
   return api.importFlights('calendar', calendar.join('\r\n'));
 }
 
-async function readCalendarFlights(prompt: boolean, includeTimes = true) {
-  if (!native) return [];
+async function readCalendarFlights(prompt: boolean, includeTimes = true, current?: () => boolean) {
+  if (!native || current?.() === false) return [];
   const calendar = await import('expo-calendar');
+  if (current?.() === false) return [];
   const permission = prompt
     ? await calendar.requestCalendarPermissions()
     : await calendar.getCalendarPermissions();
@@ -149,8 +153,9 @@ async function readCalendarFlights(prompt: boolean, includeTimes = true) {
     if (prompt) throw new Error('Allow calendar access in device settings to import flight dates.');
     return [];
   }
+  if (current?.() === false) return [];
   const calendars = await calendar.getCalendars(calendar.EntityTypes.EVENT);
-  if (!calendars.length) return [];
+  if (!calendars.length || current?.() === false) return [];
   const from = new Date();
   const until = new Date(from);
   until.setDate(until.getDate() + lookaheadDays);
@@ -166,6 +171,7 @@ async function readCalendarFlights(prompt: boolean, includeTimes = true) {
     queryUntil.setTime(Math.max(queryUntil.getTime(), utcUntil));
   }
   const events = await calendar.listEvents(calendars, queryFrom, queryUntil);
+  if (current?.() === false) return [];
   return selectCalendarFlights(events, from, until, prompt ? 12 : Infinity, !prompt, includeTimes);
 }
 
@@ -204,30 +210,50 @@ function reconcileSchedule() {
   return next;
 }
 
+function serializeCalendarStorage<T>(operation: () => Promise<T>) {
+  const next = calendarStorageQueue.then(operation);
+  calendarStorageQueue = next.then(() => {}, () => {});
+  return next;
+}
+
 export async function setCalendarSyncEnabled(server: string, enabled: boolean) {
   if (!native || !server) throw new Error('Connect a Plano server on your device before changing calendar sync.');
-  if (!enabled) {
-    await SecureStore.deleteItemAsync(optInKey(server));
-    await SecureStore.deleteItemAsync(syncLogKey(server));
-    await SecureStore.deleteItemAsync(legacyLogKey(server));
-    await clearCalendarBackground(server);
-    await reconcileSchedule();
-    return;
-  }
-
-  const calendar = await import('expo-calendar');
-  const permission = await calendar.requestCalendarPermissions();
-  if (!permission.granted) throw new Error('Allow calendar access in device settings to enable sync.');
-  await prepareCalendarBackground(server);
+  const generation = { pending: true };
+  consentGenerations.set(server, generation);
   try {
-    await SecureStore.setItemAsync(optInKey(server), `timed:${randomUUID()}`, secureOptions);
-    await reconcileSchedule();
-  } catch (cause) {
-    await SecureStore.deleteItemAsync(optInKey(server));
-    await clearCalendarBackground(server);
-    throw cause;
+    if (enabled) {
+      const calendar = await import('expo-calendar');
+      const permission = await calendar.requestCalendarPermissions();
+      if (!permission.granted) throw new Error('Allow calendar access in device settings to enable sync.');
+    }
+    await serializeCalendarStorage(async () => {
+      if (!enabled) {
+        await SecureStore.deleteItemAsync(optInKey(server));
+        await SecureStore.deleteItemAsync(syncLogKey(server));
+        await SecureStore.deleteItemAsync(legacyLogKey(server));
+        await clearCalendarBackground(server);
+        await reconcileSchedule();
+      } else if (consentGenerations.get(server) === generation) {
+        await prepareCalendarBackground(server);
+        try {
+          await SecureStore.setItemAsync(optInKey(server), `timed:${randomUUID()}`, secureOptions);
+          await reconcileSchedule();
+        } catch (cause) {
+          await SecureStore.deleteItemAsync(optInKey(server));
+          await clearCalendarBackground(server);
+          throw cause;
+        }
+      }
+    });
+  } finally {
+    generation.pending = false;
   }
-  void synchronizeCalendar().catch(() => {});
+  if (!enabled) return;
+  // A pending run may belong to the previous consent on this same server.
+  const restart = () => {
+    if (consentGenerations.get(server) === generation) return synchronizeCalendar();
+  };
+  void Promise.resolve(ongoingSync).then(restart, restart).catch(() => {});
 }
 
 async function readLog(key: string, consent: string): Promise<SyncLog> {
@@ -253,10 +279,6 @@ async function storeLog(key: string, consent: string, attemptedAt: number, after
   // Calendar titles, event IDs, notes, and booking data never enter this log.
   const log = { consent, attemptedAt, after, nextBatch, imported: [...imported].slice(-maxLogEntries) };
   await SecureStore.setItemAsync(key, JSON.stringify(log), secureOptions);
-}
-
-async function activeConsent(server: string, consent: string) {
-  return (await loadServer({ savedOnly: true })) === server && await calendarSyncConsent(server) === consent;
 }
 
 function pendingCalendarBatches(candidates: CalendarFlight[], imported: Set<string>, otherImports: Set<string>, previous: SyncLog) {
@@ -298,8 +320,18 @@ async function runSync() {
   if (!native) return;
   const server = await loadServer({ savedOnly: true });
   if (!server) return;
+  const generation = consentGenerations.get(server);
+  const currentGeneration = () => !generation?.pending && consentGenerations.get(server) === generation;
+  if (!currentGeneration()) return;
   const consent = await calendarSyncConsent(server);
-  if (!consent) return;
+  if (!consent || !currentGeneration()) return;
+  const writeLog = (key: string, attemptedAt: number, after: string | undefined, imported: Set<string>, nextBatch?: number) =>
+    serializeCalendarStorage(async () => {
+      if (!currentGeneration() || await loadServer({ savedOnly: true }) !== server ||
+        await calendarSyncConsent(server) !== consent || !currentGeneration()) return false;
+      await storeLog(key, consent, attemptedAt, after, imported, nextBatch);
+      return true;
+    });
   const now = Date.now();
   const previous = await readLog(syncLogKey(server), consent);
   const previousLegacy = await readLog(legacyLogKey(server), consent);
@@ -316,33 +348,40 @@ async function runSync() {
   // them from re-tracking if their local entries are displaced.
   const legacyImported = new Set(previousLegacy.imported.filter((pair) => pair.slice(0, 10) >= recent));
   if (legacyImported.size < previousLegacy.imported.length) {
-    if (!await activeConsent(server, consent)) return;
-    await storeLog(legacyLogKey(server), consent, previousLegacy.attemptedAt, previousLegacy.after, legacyImported, previousLegacy.nextBatch);
+    if (!await writeLog(legacyLogKey(server), previousLegacy.attemptedAt, previousLegacy.after, legacyImported, previousLegacy.nextBatch)) return;
   }
   // Existing background consent covered flight numbers and dates.
-  const candidates = await readCalendarFlights(false, consent !== 'on');
+  if (!currentGeneration()) return;
+  const candidates = await readCalendarFlights(false, consent !== 'on', currentGeneration);
   let groups = pendingCalendarBatches(candidates, imported, legacyImported, previous);
-  if (!await activeConsent(server, consent)) return;
   if (!groups.length) {
-    await storeLog(syncLogKey(server), consent, now, undefined, imported);
+    await writeLog(syncLogKey(server), now, undefined, imported);
     return;
   }
 
   const calendar = await import('expo-calendar');
-  const api = createAPI(server, { access: 'background' });
+  const api = createAPI(server, {
+    access: 'background',
+    async withRequestAuthorization<T>(send: () => Promise<T>) {
+      // Authentication can yield while consent changes. Start the request in
+      // the same turn as this final generation check.
+      if (!currentGeneration() || await SecureStore.getItemAsync(optInKey(server)) !== consent ||
+        !(await calendar.getCalendarPermissions()).granted || !currentGeneration()) throw retiredConsent;
+      return send();
+    },
+  });
   let legacy = false;
   for (let sent = 0; sent < maxBatches; ) {
     const group = groups.shift();
     const first = group?.[0];
-    if (!group || !first || !await activeConsent(server, consent)) return;
+    if (!group || !first) return;
     const last = group.at(-1) ?? first;
     const checkpoint = calendarOrderKey(legacy ? last : first);
     const key = legacy ? legacyLogKey(server) : syncLogKey(server);
     const journal = legacy ? legacyImported : imported;
     // If a provider lookup stalls a batch, give the remaining flights a
     // chance to go first on the next run.
-    await storeLog(key, consent, now, checkpoint, journal);
-    if (!(await calendar.getCalendarPermissions()).granted || !await activeConsent(server, consent)) return;
+    if (!await writeLog(key, now, checkpoint, journal)) return;
     const completed = legacy ? await legacyCalendarBatch(api, group) : await api.syncCalendarFlights(group);
     if (completed === null) {
       legacy = true;
@@ -350,17 +389,18 @@ async function runSync() {
       continue;
     }
     sent += 1;
-    if (!await activeConsent(server, consent)) return;
     const keys = new Set(completed);
     const acknowledged = group.map(flightKey).filter((flight) => keys.has(flight));
     for (const flight of acknowledged) journal.add(flight);
     const after = legacy || acknowledged.length === group.length ? calendarOrderKey(last) : checkpoint;
-    await storeLog(key, consent, now, after, journal);
+    if (!await writeLog(key, now, after, journal)) return;
   }
 }
 
 function synchronizeCalendar() {
-  ongoingSync ??= runSync().finally(() => { ongoingSync = undefined; });
+  ongoingSync ??= runSync().catch((cause: unknown) => {
+    if (cause !== retiredConsent) throw cause;
+  }).finally(() => { ongoingSync = undefined; });
   return ongoingSync;
 }
 
