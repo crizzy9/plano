@@ -3,15 +3,17 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
 )
 
-// Refresher polls only tracked flights in an active window. A feed outage keeps
-// previously observed data available with its original observation timestamp.
+// Refresher polls tracked flights in an active window with up to two concurrent
+// flight refreshes. A feed outage retains earlier observations.
 type Refresher struct {
 	Store      *Store
 	Flights    feeds.FlightSource
@@ -74,43 +76,72 @@ func (r Refresher) refresh(ctx context.Context) error {
 			}
 		}
 	}
+	// One slow provider lookup can occupy a worker while the other continues
+	// through the queue. Store.observe still commits each flight atomically.
+	jobs := make(chan feeds.Flight)
+	var workers sync.WaitGroup
+	var firstError error
+	var recordError sync.Once
+	for range min(2, len(active)) {
+		workers.Go(func() {
+			for prior := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				if err := r.refreshFlight(ctx, prior, advisories); err != nil {
+					recordError.Do(func() {
+						firstError = fmt.Errorf("save observation for flight %s: %w", prior.ID, err)
+					})
+				}
+			}
+		})
+	}
+dispatch:
 	for _, prior := range active {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
 		if finished(prior) && prior.ObservedAt.Add(5*time.Minute).After(now) {
 			continue
 		}
-		flight, err := r.Flights.Get(ctx, prior.ID)
-		if err != nil {
-			r.Logger.Warn("flight refresh failed", "id", prior.ID, "error", err)
-			continue
-		}
-		var positions []feeds.Position
-		if (flight.ActualDeparture != nil || flight.ActualTakeoff != nil || flight.Status == "airborne") &&
-			(!finished(prior) || prior.ActualArrival == nil) {
-			trackID := flight.AeroProviderID()
-			if trackID == "" {
-				trackID = flight.ID
-			}
-			positions, err = r.Flights.Track(ctx, trackID)
-			if err != nil {
-				r.Logger.Warn("flight track refresh failed", "id", flight.ID, "error", err)
-			}
-		}
-		var inbound []feeds.Flight
-		if flightBeforeDeparture(flight) && (flight.InboundID != "" || flight.TailNumber != "") {
-			inbound, err = r.Flights.Rotation(ctx, flight)
-			if err != nil {
-				r.Logger.Warn("aircraft rotation refresh failed", "id", flight.ID, "error", err)
-				if len(inbound) == 0 {
-					inbound = nil
-				}
-			}
-		}
-		if err := r.Store.observe(ctx, flight, positions, inbound, advisories, observationPoll, aeroObservationScope{}); err != nil {
-			return err
+		select {
+		case jobs <- prior:
+		case <-ctx.Done():
+			break dispatch
 		}
 	}
-	return r.Store.Prune(ctx, now)
+	close(jobs)
+	workers.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return errors.Join(firstError, r.Store.Prune(ctx, now))
+}
+
+func (r Refresher) refreshFlight(ctx context.Context, prior feeds.Flight, advisories []feeds.Advisory) error {
+	flight, err := r.Flights.Get(ctx, prior.ID)
+	if err != nil {
+		r.Logger.Warn("flight refresh failed", "id", prior.ID, "error", err)
+		return nil
+	}
+	var positions []feeds.Position
+	if (flight.ActualDeparture != nil || flight.ActualTakeoff != nil || flight.Status == "airborne") &&
+		(!finished(prior) || prior.ActualArrival == nil) {
+		trackID := flight.AeroProviderID()
+		if trackID == "" {
+			trackID = flight.ID
+		}
+		positions, err = r.Flights.Track(ctx, trackID)
+		if err != nil {
+			r.Logger.Warn("flight track refresh failed", "id", flight.ID, "error", err)
+		}
+	}
+	var inbound []feeds.Flight
+	if flightBeforeDeparture(flight) && (flight.InboundID != "" || flight.TailNumber != "") {
+		inbound, err = r.Flights.Rotation(ctx, flight)
+		if err != nil {
+			r.Logger.Warn("aircraft rotation refresh failed", "id", flight.ID, "error", err)
+			if len(inbound) == 0 {
+				inbound = nil
+			}
+		}
+	}
+	return r.Store.observe(ctx, flight, positions, inbound, advisories, observationPoll, aeroObservationScope{})
 }

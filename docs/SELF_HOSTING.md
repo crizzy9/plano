@@ -164,7 +164,8 @@ published port if both projects run on the same host.
 | Firebase Cloud Messaging | Set `PLANO_FCM_SERVICE_ACCOUNT_FILE` for the project registered by the Android build. `PLANO_FCM_PROJECT_ID` can override the project ID in that file. |
 
 `PLANO_REFRESH_INTERVAL` defaults to `60s` and accepts durations from `5s` to
-`30m`. Shorter polling intervals can consume provider quotas faster. Set
+`30m`. Periodic polling refreshes up to two tracked flights concurrently.
+Shorter polling intervals can consume provider quotas faster. Set
 `PLANO_FCM_BANDWIDTH_CONSTRAINED=true` only after validating delivery with the
 Android build on a supported constrained network.
 

@@ -514,8 +514,13 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 	err = tx.QueryRowContext(ctx, `SELECT snapshot,inbound,prediction,telemetry,
 COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id),''),
 COALESCE((SELECT last_tail FROM radar_receiver_revisions WHERE flight_id=flights.id),''), anchors.departure, anchors.arrival
-FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flights.id WHERE flights.id=?`, flight.ID).
+FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flights.id
+WHERE flights.id=? AND (NOT ? OR EXISTS(SELECT 1 FROM tracked WHERE flight_id=flights.id))`, flight.ID, mode == observationPoll).
 		Scan(&raw, &oldInbound, &oldPrediction, &oldTrack, &previousProvider, &lastRadarTail, &estimateAnchors.departure, &estimateAnchors.arrival)
+	// Tracking can change while the poll is waiting on the provider.
+	if mode == observationPoll && errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
