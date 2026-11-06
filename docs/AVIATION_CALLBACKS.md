@@ -177,9 +177,9 @@ Mount a dedicated random key of at least 32 bytes, separate from other
 aviation signing keys and advisory gateway tokens. Use the [FAA radar JSON
 envelope](#faa-swim-radar-positions) with an additional top-level field
 `"observedAirborne": true`. The bridge sets this only for observed airborne
-fixes. Exclude estimated waypoints and modeled EFD trajectories. The bridge
-handles upstream credentials, decoding, observation-time resolution and
-correlation to the AeroAPI instance. Plano accepts normalized JSON at
+fixes. Exclude estimated waypoints and modeled EFD trajectories. For JSON
+input, the bridge handles decoding, observation-time resolution and correlation
+to the AeroAPI instance. Plano accepts normalized JSON at
 `POST /v1/webhooks/eurocontrol-position` using the same timestamp and HMAC
 headers as [signed flight snapshots](#signed-flight-snapshots).
 
@@ -193,6 +193,55 @@ The server uses `PLANO_EUROCONTROL_POSITION_KEY_FILE` to enable the live
 relay and private radar stream. Each source keeps an independent cursor and
 up to 2,048 fixes per flight for seven days. On the private map, EUROCONTROL
 positions carry their own source label.
+
+### ASTERIX CAT062 system track reports
+
+An authorized subscriber can pass complete CAT062 edition 1.21 binary data
+blocks to the relay. The relay reads supplementary track status using Appendix A
+edition 1.4. The subscriber manages the upstream connection, confirms the feed
+edition and verifies that the selected track represents an observed airborne
+aircraft. Apply the upstream data agreement and privacy filters before setting
+`displayAllowed` for all enrolled trackers of that flight. Bridge other formats,
+including legacy CPR editions, to the normalized JSON envelope.
+[CAT062 specification](https://www.eurocontrol.int/publication/cat062-eurocontrol-specification-surveillance-data-exchange-asterix-part-9-category-062) ·
+[Reserved expansion](https://www.eurocontrol.int/sites/default/files/2025-06/asterix-cat062-coding-rules-reserved-expansion-field-p9-appendix-a-edition1-4.pdf) ·
+[Surveillance Data Distribution System](https://www.eurocontrol.int/product/sdds)
+
+Create a version 1 JSON binding of up to 4 KiB for one independently verified
+AeroAPI instance. Match the source SAC and SIC, track number and six-digit
+hexadecimal aircraft address. Include `serviceId` to require a service ID
+match. Use AeroAPI's scheduled gate-out and actual wheels-off times. Supply
+the UTC day of the source records in `trackDate` and split batches at UTC midnight.
+Each invocation accepts up to 256 KiB, 128 records and 32 matching fixes.
+
+```json
+{
+  "version": 1,
+  "edition": "1.21",
+  "displayAllowed": true,
+  "observedAirborne": true,
+  "providerFlightId": "DLH431-example",
+  "originICAO": "KORD",
+  "destinationICAO": "EDDF",
+  "scheduledDeparture": "2026-11-05T22:15:00Z",
+  "actualTakeoff": "2026-11-05T22:37:10Z",
+  "trackDate": "2026-11-06",
+  "sac": 42,
+  "sic": 7,
+  "trackNumber": 1208,
+  "aircraftAddress": "3C1234"
+}
+```
+
+```sh
+plano forward-eurocontrol-position cat062-track /run/plano/cat062-binding.json < tracks.cat062
+```
+
+The relay uses the original UTC state-vector time and WGS84 position from
+matching records. It excludes stale fixes and records flagged as tentative,
+coasting, on the surface or derived from a flight plan without surveillance.
+It sends the converted JSON through the same signed callback, where Plano
+verifies the exact tracked airborne flight before storing the fixes.
 
 ## FAA SWIM and EUROCONTROL bridges
 

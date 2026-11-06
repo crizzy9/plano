@@ -199,8 +199,11 @@ The relay uses its own signing key and delivers fixes to private radar for
 verified tracked legs. [Radar relay](AVIATION_CALLBACKS.md#faa-swim-radar-positions)
 
 An authorized EUROCONTROL bridge can relay observed airborne fixes with
-`plano forward-eurocontrol-position`. Mount its dedicated signing key on the
-server. [Radar relay](AVIATION_CALLBACKS.md#eurocontrol-radar-positions)
+`plano forward-eurocontrol-position`. Its `cat062-track` mode accepts CAT062
+edition 1.21 binary blocks with an operator-supplied flight binding. Mount its
+dedicated signing key on the relay and server.
+[Radar relay](AVIATION_CALLBACKS.md#eurocontrol-radar-positions) ·
+[CAT062 input](AVIATION_CALLBACKS.md#asterix-cat062-system-track-reports)
 
 Keep credential files outside the checkout. Compose reads the `*_FILE`
 values as paths **inside** the container. For each credential with both

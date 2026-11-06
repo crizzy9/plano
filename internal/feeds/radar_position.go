@@ -12,6 +12,7 @@ import (
 const (
 	MaxRadarPositionBytes  = 16 << 10
 	RadarPositionFreshness = 5 * time.Minute
+	maxRadarPositionFixes  = 32
 )
 
 // RadarPositionReport binds operator-normalized airborne fixes to an exact
@@ -60,7 +61,7 @@ func DecodeRadarPositionReport(input io.Reader, now time.Time, source string) (R
 		!aeroAlertAirport.MatchString(wire.OriginICAO) || !aeroAlertAirport.MatchString(wire.DestinationICAO) ||
 		wire.ScheduledDeparture.Year() < 2000 || wire.ScheduledDeparture.Year() > 2100 ||
 		wire.ActualTakeoff.Year() < 2000 || wire.ActualTakeoff.After(now) ||
-		len(wire.Positions) < 1 || len(wire.Positions) > 32 {
+		len(wire.Positions) < 1 || len(wire.Positions) > maxRadarPositionFixes {
 		return RadarPositionReport{}, invalid
 	}
 	if wire.ObservedAirborne == nil && source == Eurocontrol || wire.ObservedAirborne != nil && !*wire.ObservedAirborne {
@@ -91,6 +92,13 @@ func DecodeRadarPositionReport(input io.Reader, now time.Time, source string) (R
 
 func radarPositionRange(value *float64, minimum, maximum float64) bool {
 	return value == nil || *value >= minimum && *value <= maximum
+}
+
+func sameRadarMeasurement(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func (r RadarPositionReport) MatchesFlight(f Flight) bool {

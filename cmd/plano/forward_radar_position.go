@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,22 +22,28 @@ type radarPositionRelay struct {
 	keyFile string
 	urlEnv  string
 	path    string
+	command string
+	mode    string
+	convert func(io.Reader, string, time.Time) (io.Reader, int, error)
 }
 
 var (
-	swimPositionRelay        = radarPositionRelay{feeds.FAASWIM, swimPositionKeyFile, "PLANO_SWIM_POSITION_RELAY_URL", "/v1/webhooks/swim-position"}
-	eurocontrolPositionRelay = radarPositionRelay{feeds.Eurocontrol, eurocontrolPositionKeyFile, "PLANO_EUROCONTROL_POSITION_RELAY_URL", "/v1/webhooks/eurocontrol-position"}
+	swimPositionRelay = radarPositionRelay{
+		source: feeds.FAASWIM, keyFile: swimPositionKeyFile, urlEnv: "PLANO_SWIM_POSITION_RELAY_URL", path: "/v1/webhooks/swim-position",
+		command: "forward-swim-position", mode: "sfdps-track", convert: sfdpsPositionRelayInput,
+	}
+	eurocontrolPositionRelay = radarPositionRelay{
+		source: feeds.Eurocontrol, keyFile: eurocontrolPositionKeyFile, urlEnv: "PLANO_EUROCONTROL_POSITION_RELAY_URL", path: "/v1/webhooks/eurocontrol-position",
+		command: "forward-eurocontrol-position", mode: "cat062-track", convert: cat062PositionRelayInput,
+	}
 )
 
 func (relay radarPositionRelay) fromEnv(ctx context.Context, input io.Reader, args []string) (int, error) {
 	if len(args) != 0 {
-		if relay.source != feeds.FAASWIM {
-			return relayConfigError, errors.New("usage: plano forward-eurocontrol-position")
+		if len(args) != 2 || args[0] != relay.mode {
+			return relayConfigError, fmt.Errorf("usage: plano %s [%s <binding-file>]", relay.command, relay.mode)
 		}
-		if len(args) != 2 || args[0] != "sfdps-track" {
-			return relayConfigError, errors.New("usage: plano forward-swim-position [sfdps-track <binding-file>]")
-		}
-		converted, status, err := sfdpsPositionRelayInput(input, args[1], time.Now().UTC())
+		converted, status, err := relay.convert(input, args[1], time.Now().UTC())
 		if converted == nil || err != nil {
 			return status, err
 		}
@@ -47,6 +54,44 @@ func (relay radarPositionRelay) fromEnv(ctx context.Context, input io.Reader, ar
 		return relayConfigError, err
 	}
 	return relay.forward(ctx, input, os.Getenv(relay.urlEnv), key, nil)
+}
+
+func encodeRadarPositionRelay(report feeds.RadarPositionReport) (io.Reader, int, error) {
+	type fix struct {
+		At               time.Time `json:"at"`
+		Latitude         float64   `json:"latitude"`
+		Longitude        float64   `json:"longitude"`
+		AltitudeFeet     *float64  `json:"altitudeFeet,omitempty"`
+		GroundSpeedKnots *float64  `json:"groundSpeedKnots,omitempty"`
+		VerticalRateFPM  *float64  `json:"verticalRateFpm,omitempty"`
+	}
+	wire := struct {
+		Version            int       `json:"version"`
+		DisplayAllowed     bool      `json:"displayAllowed"`
+		ObservedAirborne   bool      `json:"observedAirborne"`
+		ProviderFlightID   string    `json:"providerFlightId"`
+		OriginICAO         string    `json:"originICAO"`
+		DestinationICAO    string    `json:"destinationICAO"`
+		ScheduledDeparture time.Time `json:"scheduledDeparture"`
+		ActualTakeoff      time.Time `json:"actualTakeoff"`
+		Positions          []fix     `json:"positions"`
+	}{
+		Version: 1, DisplayAllowed: true, ObservedAirborne: true,
+		ProviderFlightID: report.ProviderFlightID, OriginICAO: report.OriginICAO, DestinationICAO: report.DestinationICAO,
+		ScheduledDeparture: report.ScheduledDeparture, ActualTakeoff: report.ActualTakeoff,
+		Positions: make([]fix, 0, len(report.Positions)),
+	}
+	for _, p := range report.Positions {
+		wire.Positions = append(wire.Positions, fix{
+			At: p.At, Latitude: p.Latitude, Longitude: p.Longitude,
+			AltitudeFeet: p.AltitudeFeet, GroundSpeedKnots: p.GroundSpeedKnots, VerticalRateFPM: p.VerticalRateFPM,
+		})
+	}
+	body, err := json.Marshal(wire)
+	if err != nil {
+		return nil, relayDataError, errors.New("could not encode the radar position report")
+	}
+	return bytes.NewReader(body), 0, nil
 }
 
 func (relay radarPositionRelay) forward(ctx context.Context, input io.Reader, endpoint string, key []byte, transport http.RoundTripper) (int, error) {

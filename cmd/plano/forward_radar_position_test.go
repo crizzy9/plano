@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -151,6 +154,39 @@ func TestForwardPositionsToPrivateRadar(t *testing.T) {
 	if p := bothPage.EurocontrolPositions[0]; p.Source != feeds.Eurocontrol || p.Kind != "radar" || !p.At.Equal(fix) {
 		t.Fatalf("unexpected EUROCONTROL position: %+v", p)
 	}
+	cat062At := now.Add(-500 * time.Millisecond)
+	bindingPath := filepath.Join(t.TempDir(), "cat062.json")
+	binding := fmt.Sprintf(`{"version":1,"edition":"1.21","displayAllowed":true,"observedAirborne":true,"providerFlightId":%q,"originICAO":"KSFO","destinationICAO":"KEWR","scheduledDeparture":%q,"actualTakeoff":%q,"trackDate":%q,"sac":3,"sic":17,"serviceId":7,"trackNumber":43981,"aircraftAddress":"A1B2C3"}`,
+		flight.ID, scheduled.Format(time.RFC3339), takeoff.Format(time.RFC3339), cat062At.Format(time.DateOnly))
+	if err := os.WriteFile(bindingPath, []byte(binding), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	block := radarCAT062Block(cat062At)
+	mismatch := bytes.Clone(block)
+	mismatch[25] = 0
+	t.Setenv(eurocontrolPositionRelay.keyFile, "")
+	if status, err := eurocontrolPositionRelay.fromEnv(ctx, bytes.NewReader(mismatch), []string{"cat062-track", bindingPath}); status != 0 || err != nil {
+		t.Fatalf("unmatched CAT062 should exit without the signing key, got status %d, error %v", status, err)
+	}
+	input, status, err := cat062PositionRelayInput(bytes.NewReader(block), bindingPath, now)
+	if input == nil || status != 0 || err != nil {
+		t.Fatalf("CAT062 normalization returned input present %v, status %d, error %v", input != nil, status, err)
+	}
+	normalized, err := io.ReadAll(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(eurocontrolPositionRelay, string(normalized), eurocontrolKey, false, http.StatusNoContent, 0)
+	if err := json.Unmarshal(get(ownerToken, both+"&eurocontrolAfter="+page.SWIMCursor, http.StatusOK).Body.Bytes(), &bothPage); err != nil ||
+		len(bothPage.EurocontrolPositions) != 1 || bothPage.EurocontrolCursor != cat062At.Format(time.RFC3339Nano) {
+		t.Fatalf("CAT062 traffic page = %+v (%v)", bothPage, err)
+	}
+	if p := bothPage.EurocontrolPositions[0]; p.Source != feeds.Eurocontrol || p.Kind != "radar" || !p.At.Equal(cat062At) ||
+		p.Latitude != 45 || p.Longitude != -90 || p.AltitudeFeet == nil || *p.AltitudeFeet != 32500 ||
+		p.GroundSpeedKnots == nil || math.Abs(*p.GroundSpeedKnots-200*3600.0/1852) > 1e-9 ||
+		p.VerticalRateFPM == nil || *p.VerticalRateFPM != -625 {
+		t.Fatalf("unexpected CAT062 position: %+v", p)
+	}
 	if raw := get(foreignToken, query, http.StatusOK).Body.String(); !strings.Contains(raw, `"swimPositions":[]`) || strings.Contains(raw, `"swimRevision"`) {
 		t.Fatalf("foreign installation got private radar: %s", raw)
 	}
@@ -174,4 +210,21 @@ func TestForwardPositionsToPrivateRadar(t *testing.T) {
 	if raw := get(ownerToken, both, http.StatusOK).Body.String(); strings.Contains(raw, `"eurocontrolPositions"`) {
 		t.Fatalf("disabled integration returned stored EUROCONTROL positions: %s", raw)
 	}
+}
+
+func radarCAT062Block(at time.Time) []byte {
+	ticks := uint32(at.Sub(at.Truncate(24*time.Hour)) / (time.Second / 128))
+	block := []byte{
+		62, 0, 0,
+		0xbb, 0x1d, 0x14, // FSPEC, including service and optional measurements.
+		3, 17, 7, // SAC, SIC, service.
+		byte(ticks >> 16), byte(ticks >> 8), byte(ticks),
+		0x00, 0x80, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, // 45° N, 90° W.
+		0xfe, 0x20, 0x02, 0x80, // -120 m/s east, 160 m/s north.
+		0x80, 0xa1, 0xb2, 0xc3, // I062/380 aircraft address.
+		0xab, 0xcd, 0x00, // Track number and confirmed status.
+		0x14, 0x50, 0xff, 0x9c, // 32500 ft geometric altitude, -625 fpm.
+	}
+	binary.BigEndian.PutUint16(block[1:3], uint16(len(block)))
+	return block
 }

@@ -18,7 +18,6 @@ const (
 	maxSFDPSDepth         = 48
 	maxSFDPSNodes         = 8192
 	maxSFDPSMessages      = 64
-	maxSFDPSFixes         = 32
 	sfdpsNAS              = "http://www.faa.aero/nas/3.0"
 	sfdpsFIXMFlight       = "http://www.fixm.aero/flight/3.0"
 	sfdpsFIXMBase         = "http://www.fixm.aero/base/3.0"
@@ -79,12 +78,12 @@ func DecodeSFDPSPositions(input io.Reader, binding SFDPSPositionBinding, now tim
 		}
 		if previous, exists := fixes[fix.At]; exists {
 			if previous.Latitude != fix.Latitude || previous.Longitude != fix.Longitude ||
-				!sameSFDPSMeasurement(previous.AltitudeFeet, fix.AltitudeFeet) || !sameSFDPSMeasurement(previous.GroundSpeedKnots, fix.GroundSpeedKnots) {
+				!sameRadarMeasurement(previous.AltitudeFeet, fix.AltitudeFeet) || !sameRadarMeasurement(previous.GroundSpeedKnots, fix.GroundSpeedKnots) {
 				return RadarPositionReport{}, errInvalidSFDPSPosition
 			}
 			continue
 		}
-		if len(fixes) == maxSFDPSFixes {
+		if len(fixes) == maxRadarPositionFixes {
 			return RadarPositionReport{}, errInvalidSFDPSPosition
 		}
 		fixes[fix.At] = *fix
@@ -101,13 +100,6 @@ func DecodeSFDPSPositions(input io.Reader, binding SFDPSPositionBinding, now tim
 		ProviderFlightID: binding.ProviderFlightID, OriginICAO: binding.OriginICAO, DestinationICAO: binding.DestinationICAO,
 		ScheduledDeparture: binding.ScheduledDeparture.UTC(), ActualTakeoff: binding.ActualTakeoff.UTC(), Positions: positions,
 	}, nil
-}
-
-func sameSFDPSMeasurement(a, b *float64) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
 }
 
 type sfdpsXMLNode struct {
