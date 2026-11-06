@@ -72,6 +72,30 @@ The pinned Expo version uses Android SDK 36, Build-Tools 36, and NDK
 `27.1.12297006`. Expo Notifications builds from source on Android so Plano's
 native messaging service can extend it.
 
+For an installable Android preview that runs without Metro, generate the
+Android project and assemble the release variant with preview signing.
+
+```sh
+cd mobile
+npm ci
+npx expo prebuild --platform android --no-install
+cd android
+PLANO_ANDROID_PREVIEW_BUILD=1 ./gradlew :app:assembleRelease
+```
+
+The preview APK uses the Android debug key. For a release signed with your
+own key, omit `PLANO_ANDROID_PREVIEW_BUILD` and set all four signing inputs.
+
+| Variable | Value |
+| --- | --- |
+| `PLANO_ANDROID_KEYSTORE_FILE` | Absolute path to the keystore |
+| `PLANO_ANDROID_KEY_ALIAS` | Alias of the signing key |
+| `PLANO_ANDROID_STORE_PASSWORD_FILE` | Absolute path to the keystore password file |
+| `PLANO_ANDROID_KEY_PASSWORD_FILE` | Absolute path to the signing key password file |
+
+Gradle reads the passwords at build time. A release with no signing inputs
+is unsigned. Keep the keystore and password files outside the source tree.
+
 For a live server reachable from the Internet, require an enrollment code
 before connecting devices. Generate a random code of 16 to 128 bytes and
 provide it through `PLANO_ENROLLMENT_CODE_FILE` or `PLANO_ENROLLMENT_CODE`.

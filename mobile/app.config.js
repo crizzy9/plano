@@ -24,5 +24,6 @@ module.exports = ({ config }) => ({
     'expo-notifications',
     '@bacons/apple-targets',
     './plugins/withPlanoMessaging',
+    './plugins/withPlanoAndroidSigning',
   ],
 });
