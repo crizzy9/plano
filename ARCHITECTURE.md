@@ -16,7 +16,7 @@ Plano uses original interfaces and an independent implementation. The Flighty fe
 ## Plano data flow
 
 ```text
-AeroAPI search / active-flight polling    FAA NAS / operator advisory gateways
+AeroAPI search / polling / callbacks     FAA NAS / signed advisory bridges
                          │                    │
                          └─────────┬──────────┘
                                    ▼
@@ -37,7 +37,8 @@ AeroAPI search / active-flight polling    FAA NAS / operator advisory gateways
 - SQLite stores authenticated installations, tracked flights, share capabilities, device registrations and the push outbox. Device fanout and event writes share a transaction. A leased push job can be retried after a worker restart. Delivery is at least once, subject to expiry, provider policy and retry limits.
 - User-visible changes include tail assignment, departure and arrival gate, baggage, significant ETD/ETA shifts, OOOI and matching advisories. Check-in is a 24-hour reminder with airline availability unverified. The operational departure estimate uses aircraft turnaround and applicable advisory constraints. Operators can train and deploy a local ridge-regression model from time-stamped observations. Its inputs, contributions and official flight times stay separate.
 - A push message carries enough state to render the flight without an immediate API fetch. The push client enforces a 2 KiB request envelope. The internal Live Activity contract is `PlanoActivityAttributes` plus `flightId`, `flightNumber`, `status`, origin and destination codes, gate and terminal fields, optional seat, and departure, arrival and observation epochs.
-- The default active-flight polling interval is 60 seconds. The 200 ms outbox poll governs pickup of a ready local job. Provider acceptance, device arrival, end-to-end alert latency and behavior on specific onboard networks require separate measurement.
+- The default active-flight polling interval is 60 seconds. FlightAware callbacks can wake a durable targeted refresh, and signed bridge advisories can enqueue airport alerts directly. Outbox commits wake the dispatcher immediately, while a 200 ms fallback recovers ready retries. Provider acceptance, device arrival, end-to-end alert latency and behavior on specific onboard networks require separate measurement.
+- The Android app widget shows a single flight’s phase, progress, and countdown. Compatible Android hosts can place it on the Lock Screen. It omits route, gate, terminal and seat details. [Android lock-screen widget support](https://android-developers.googleblog.com/2025/03/widgets-on-lock-screen-faq.html)
 - Every product route is available without a billing or entitlement check. External feed access, Apple signing and cloud push credentials belong to the instance operator. The self-host service can also run against explicitly labeled synthetic data for local evaluation. [Self-hosting](docs/SELF_HOSTING.md)
 
 ## Verification still required for full parity
@@ -46,7 +47,7 @@ AeroAPI search / active-flight polling    FAA NAS / operator advisory gateways
 | --- | --- |
 | Flighty internals | Lawfully available native package or runtime capture, with REA target identity and artifact or trace evidence for each claimed subsystem. |
 | Push and native activities | Signed iOS and Android builds, both live provider credentials, platform-version and lifecycle tests, device receipt timestamps, and tests on constrained onboard Wi-Fi. |
-| Aviation ingestion | Approved live source accounts and observed coverage for terminal, baggage, boarding, historical tracks, raw SWIM and EUROCONTROL data and aircraft registry enrichment. |
+| Aviation ingestion | Approved live source accounts and observed coverage for AeroAPI callbacks, terminal, baggage, boarding, historical tracks, raw SWIM and EUROCONTROL data and aircraft registry enrichment. |
 | Prediction | Versioned training observations, holdout/backtest metrics, and validation of turnaround, weather, ATC and NOTAM attribution. A live fitted artifact and production holdout are still required. |
 | Connections and sync | Verified airport route data and gate accuracy, calendar scheduling on devices, a live inbound mail transport and TripIt feed, and authorized airline-side PNR lookup. |
 | Passport and Friends | Complete history and coordinate coverage, share-sheet and rendered card verification on devices, and a multi-user friend graph if required beyond per-flight links. |

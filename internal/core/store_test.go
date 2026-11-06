@@ -154,3 +154,51 @@ func TestLocalLiveRegistrationSupersedesPendingRemoteStart(t *testing.T) {
 		t.Fatalf("unexpected live jobs: %v (%v)", jobs, err)
 	}
 }
+
+func TestAPNSLiveWritesUseDistinctOrderedWireTimestamps(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "ordered-live.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	dep := now.Add(20 * time.Minute)
+	f := feeds.Flight{ID: "live-ordered", Origin: "JFK", Destination: "EWR", Number: "UA2", Status: "scheduled", ScheduledDeparture: &dep, ObservedAt: now}
+	if err := s.Observe(ctx, f, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	token, err := s.CreateInstallation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := s.Installation(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Track(ctx, owner, f.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Register(ctx, owner, Device{Platform: "ios", Token: "same-live-token", Kind: "live_update", FlightID: f.ID}, now); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.claim(ctx, now, 8)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first %v %v", first, err)
+	}
+	f.DepartureGate, f.ObservedAt = "A1", now.Add(100*time.Millisecond)
+	if err := s.Observe(ctx, f, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	next := now.Add(time.Second)
+	if jobs, err := s.claim(ctx, next, 8); err != nil || len(jobs) != 0 {
+		t.Fatalf("parallel live job %v %v", jobs, err)
+	}
+	if err := s.resolve(ctx, first[0], nil, next); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.claim(ctx, next, 8)
+	if err != nil || len(second) != 1 || second[0].message.Timestamp.Unix() <= first[0].message.Timestamp.Unix() || second[0].message.State.DepartureGate != "A1" {
+		t.Fatalf("second %v %v", second, err)
+	}
+}

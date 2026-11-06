@@ -56,6 +56,11 @@ func (r Refresher) refresh(ctx context.Context) error {
 		}
 		advisories = append(advisories, result...)
 	}
+	pushed, err := r.Store.pushedAdvisories(ctx, now)
+	if err != nil {
+		return err
+	}
+	advisories = mergeAdvisories(advisories, pushed, now)
 	var adsb feeds.ADSBSnapshot
 	if r.Receiver != nil {
 		adsb, err = r.Receiver.Snapshot(ctx)

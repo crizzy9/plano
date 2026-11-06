@@ -24,7 +24,12 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(env("PLANO_LOG_LEVEL", "info"))); err != nil {
+		fmt.Fprintln(os.Stderr, "invalid PLANO_LOG_LEVEL")
+		os.Exit(1)
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
 		port := env("PLANO_HEALTH_URL", "http://127.0.0.1:8080/healthz")
 		resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(port)
@@ -86,6 +91,23 @@ func run(logger *slog.Logger) error {
 		_ = file.Close()
 		if err != nil {
 			return fmt.Errorf("load airport transfer rules: %w", err)
+		}
+	}
+	var aeroCallbackKey, advisoryIngressKey []byte
+	if !demo {
+		aeroCallbackKey, err = secret("", "PLANO_AEROALERTS_KEY_FILE")
+		if err != nil {
+			return err
+		}
+		if len(aeroCallbackKey) != 0 && len(aeroCallbackKey) < 32 {
+			return errors.New("PLANO_AEROALERTS_KEY_FILE requires at least 32 bytes")
+		}
+		advisoryIngressKey, err = secret("", "PLANO_ADVISORY_INGRESS_KEY_FILE")
+		if err != nil {
+			return err
+		}
+		if len(advisoryIngressKey) != 0 && len(advisoryIngressKey) < 32 {
+			return errors.New("PLANO_ADVISORY_INGRESS_KEY_FILE requires at least 32 bytes")
 		}
 	}
 	var flights feeds.FlightSource
@@ -179,22 +201,12 @@ func run(logger *slog.Logger) error {
 		(core.Refresher{Store: store, Flights: flights, Advisories: advisories, Receiver: receiver, Registry: registry, Logger: logger, Interval: interval}).Run(ctx)
 	})
 	if sender.APNs != nil || sender.FCM != nil {
-		workers.Go(func() {
-			ticker := time.NewTicker(200 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					if err := store.Dispatch(ctx, sender, logger); err != nil && ctx.Err() == nil {
-						logger.Error("push dispatcher failed", "error", err)
-					}
-				}
-			}
-		})
+		workers.Go(func() { store.RunDispatcher(ctx, sender, logger) })
 	}
-	handler := api.Server{Store: store, Source: flights, PublicURL: publicURL, EnrollmentCode: string(enrollment), BookingKey: bookingKey, ConnectionRules: connections, Demo: demo, Logger: logger}.Handler()
+	if len(aeroCallbackKey) != 0 {
+		workers.Go(func() { store.RunAeroRefresh(ctx, flights, logger) })
+	}
+	handler := api.Server{Store: store, Source: flights, PublicURL: publicURL, EnrollmentCode: string(enrollment), BookingKey: bookingKey, ConnectionRules: connections, AeroCallbackKey: aeroCallbackKey, AdvisoryIngressKey: advisoryIngressKey, Demo: demo, Logger: logger}.Handler()
 	server := &http.Server{Addr: env("PLANO_ADDR", ":8080"), Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()

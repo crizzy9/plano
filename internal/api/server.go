@@ -19,14 +19,16 @@ import (
 )
 
 type Server struct {
-	Store           *core.Store
-	Source          feeds.FlightSource
-	PublicURL       string
-	EnrollmentCode  string
-	BookingKey      []byte
-	ConnectionRules *ConnectionRules
-	Demo            bool
-	Logger          *slog.Logger
+	Store              *core.Store
+	Source             feeds.FlightSource
+	PublicURL          string
+	EnrollmentCode     string
+	BookingKey         []byte
+	ConnectionRules    *ConnectionRules
+	Demo               bool
+	Logger             *slog.Logger
+	AeroCallbackKey    []byte
+	AdvisoryIngressKey []byte
 }
 
 type ownerHandler func(http.ResponseWriter, *http.Request, string) error
@@ -90,6 +92,12 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/import/email-relay", s.auth(s.emailRelay))
 	mux.HandleFunc("POST /v1/webhooks/email", s.emailWebhook)
 	mux.HandleFunc("POST /v1/bookings/lookup", s.auth(s.booking))
+	if len(s.AeroCallbackKey) != 0 {
+		mux.HandleFunc("POST /v1/webhooks/aeroapi", s.aeroCallback)
+	}
+	if len(s.AdvisoryIngressKey) != 0 {
+		mux.HandleFunc("POST /v1/webhooks/advisory", s.advisoryCallback)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")

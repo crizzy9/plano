@@ -73,7 +73,7 @@ func (s *Store) CommitImport(ctx context.Context, owner string, flights []feeds.
 			}
 		}
 	}
-	return false, tx.Commit()
+	return false, s.commitOutbox(tx)
 }
 
 func (s *Store) BookedFlights(ctx context.Context, owner, locator string) ([]feeds.Flight, error) {

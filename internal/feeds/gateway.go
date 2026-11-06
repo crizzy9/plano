@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 )
 
@@ -51,8 +50,6 @@ func validFeedEndpoint(endpoint string) bool {
 	return parsed.Scheme == "http" && address != nil && address.IsLoopback()
 }
 
-var gatewayKind = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$\z`)
-
 func (g *AdvisoryGateway) Advisories(ctx context.Context) ([]Advisory, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, g.endpoint, nil)
 	if err != nil {
@@ -76,18 +73,9 @@ func (g *AdvisoryGateway) Advisories(ctx context.Context) ([]Advisory, error) {
 	seen := make(map[string]bool)
 	for i := range response.Advisories {
 		row := &response.Advisories[i]
-		row.ID = strings.TrimSpace(row.ID)
-		row.Airport = strings.ToUpper(strings.TrimSpace(row.Airport))
-		row.Area = strings.TrimSpace(row.Area)
-		if row.ID == "" || len(row.ID) > 128 || seen[row.ID] || !gatewayKind.MatchString(row.Kind) || row.ObservedAt.IsZero() ||
-			row.Airport == "" && row.Area == "" || row.Airport != "" && !airportCode.MatchString(row.Airport) || len(row.Area) > 128 ||
-			len(row.Reason) > 4096 || len(row.RawReason) > 8192 ||
-			row.Direction != "" && row.Direction != "arrival" && row.Direction != "departure" ||
-			row.DelayMinutes != nil && (*row.DelayMinutes < 0 || *row.DelayMinutes > 1440) ||
-			row.StartsAt != nil && row.EndsAt != nil && !row.EndsAt.After(*row.StartsAt) {
+		if !normalizeBridgeAdvisory(row, g.source) || seen[row.ID] {
 			return nil, fmt.Errorf("%w: %s gateway returned an invalid advisory at index %d", ErrUnavailable, g.source, i)
 		}
-		row.Source = g.source
 		seen[row.ID] = true
 	}
 	return response.Advisories, nil

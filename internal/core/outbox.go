@@ -100,7 +100,7 @@ AND julianday(COALESCE(json_extract(f.snapshot,'$.estimatedDeparture'),json_extr
 			}
 		}
 	}
-	return tx.Commit()
+	return s.commitOutbox(tx)
 }
 
 // A flight event can predate an installation's subscription. Track delivery
@@ -247,6 +247,24 @@ func queueDevice(ctx context.Context, tx *sql.Tx, deviceID int64, flightID strin
 			return err
 		}
 	}
+	if msg.Kind != push.Alert {
+		// ActivityKit orders updates by whole Unix seconds. Keep the wire clock
+		// per token and flight, even across process restarts.
+		var epoch int64
+		err := tx.QueryRowContext(ctx, `INSERT INTO live_wire_clocks(device_id,flight_id,wire_epoch)
+SELECT id,?,? FROM devices WHERE id=? AND platform='ios'
+ON CONFLICT(device_id,flight_id) DO UPDATE SET wire_epoch=MAX(excluded.wire_epoch,live_wire_clocks.wire_epoch+1)
+RETURNING wire_epoch`, flightID, msg.Timestamp.Unix(), deviceID).Scan(&epoch)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil && epoch > msg.Timestamp.Unix() {
+			msg.Timestamp = time.Unix(epoch, 0).UTC()
+		}
+		if !msg.Timestamp.Before(msg.ExpiresAt) {
+			return nil
+		}
+	}
 	return enqueue(ctx, tx, flightID, msg, `SELECT ? AS id`, deviceID)
 }
 
@@ -277,7 +295,7 @@ func (s *Store) claim(ctx context.Context, now time.Time, limit int) ([]delivery
 	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.device_id,d.registered,o.attempts,d.platform,d.token,o.message
 FROM outbox o JOIN devices d ON d.id=o.device_id
 WHERE o.done=0 AND o.due<=? AND o.expires>? AND o.lease_until<=?
-AND (d.platform <> 'android' OR json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
+AND (json_extract(o.message,'$.Kind') = 'alert' OR NOT EXISTS (
   SELECT 1 FROM outbox older WHERE older.device_id=o.device_id AND older.flight_id=o.flight_id AND older.id<o.id
   AND older.done=0 AND older.expires>? AND json_extract(older.message,'$.Kind') <> 'alert'
 )) ORDER BY o.due,o.id LIMIT ?`, t, t, t, t, limit)
@@ -356,28 +374,67 @@ type PushSender interface {
 	Send(context.Context, push.Target, push.Message) error
 }
 
-// Dispatch claims small batches durably and keeps remote IO outside transactions.
-func (s *Store) Dispatch(ctx context.Context, sender PushSender, logger *slog.Logger) error {
-	jobs, err := s.claim(ctx, time.Now(), 16)
-	if err != nil {
+// commitOutbox publishes a coalescing wake only after SQLite has committed.
+func (s *Store) commitOutbox(tx *sql.Tx) error {
+	if err := tx.Commit(); err != nil {
 		return err
 	}
-	var wg sync.WaitGroup
-	for _, job := range jobs {
-		wg.Go(func() {
-			attempt, cancel := context.WithTimeout(ctx, 10*time.Second)
-			err := sender.Send(attempt, job.target, job.message)
-			cancel()
-			if err != nil {
-				logger.Warn("push delivery failed", "job", job.id, "platform", job.target.Platform)
-			}
-			if err := s.resolve(ctx, job, err, time.Now()); err != nil {
-				logger.Error("could not resolve push job", "job", job.id, "error", err)
-			}
-		})
+	select {
+	case s.outboxWake <- struct{}{}:
+	default:
 	}
-	wg.Wait()
 	return nil
+}
+
+// RunDispatcher keeps independent sends in flight. A slow provider request
+// cannot stop ready work while a slot is available. The tick also recovers
+// persisted jobs and retries if a process-local wake was lost.
+func (s *Store) RunDispatcher(ctx context.Context, sender PushSender, logger *slog.Logger) {
+	const slots = 16
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	completed := make(chan struct{}, slots)
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	busy := 0
+	for ctx.Err() == nil {
+		if busy < slots {
+			jobs, err := s.claim(ctx, time.Now(), slots-busy)
+			if err != nil && ctx.Err() == nil {
+				logger.Error("push dispatcher failed", "error", err)
+			}
+			for _, job := range jobs {
+				busy++
+				workers.Go(func() {
+					defer func() { completed <- struct{}{} }()
+					s.deliver(ctx, sender, logger, job)
+				})
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-completed:
+			busy--
+		case <-s.outboxWake:
+		case <-tick.C:
+		}
+	}
+}
+
+func (s *Store) deliver(ctx context.Context, sender PushSender, logger *slog.Logger, job deliveryJob) {
+	start := time.Now()
+	attempt, cancel := context.WithTimeout(ctx, 10*time.Second)
+	err := sender.Send(attempt, job.target, job.message)
+	cancel()
+	if err != nil {
+		logger.Warn("push delivery failed", "job", job.id, "platform", job.target.Platform)
+	} else {
+		logger.Debug("push accepted by provider", "job", job.id, "platform", job.target.Platform, "request_ms", time.Since(start).Milliseconds(), "observation_to_send_ms", start.Sub(job.message.Timestamp).Milliseconds())
+	}
+	if err := s.resolve(ctx, job, err, time.Now()); err != nil && ctx.Err() == nil {
+		logger.Error("could not resolve push job", "job", job.id, "error", err)
+	}
 }
 
 func (s *Store) Prune(ctx context.Context, now time.Time) error {
@@ -393,6 +450,12 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM shares WHERE expires<=?`, now.UnixNano()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pushed_advisories WHERE expires_ns<=? AND observed_ns<=?`, now.UnixNano(), now.Add(-7*time.Hour).UnixNano()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM live_wire_clocks WHERE wire_epoch<=?`, now.Add(-7*24*time.Hour).Unix()); err != nil {
 		return err
 	}
 	return tx.Commit()

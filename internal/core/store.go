@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
@@ -29,6 +28,8 @@ type Store struct {
 	db                  *sql.DB
 	delayModel          *predict.Model
 	collectDelaySamples bool
+	outboxWake          chan struct{}
+	refreshWake         chan struct{}
 }
 
 type Details struct {
@@ -78,6 +79,20 @@ CREATE TABLE IF NOT EXISTS flights (
   id TEXT PRIMARY KEY, snapshot TEXT NOT NULL, observed_ns INTEGER NOT NULL,
   telemetry TEXT NOT NULL DEFAULT '[]', inbound TEXT NOT NULL DEFAULT '[]', prediction TEXT NOT NULL DEFAULT 'null'
 );
+CREATE TABLE IF NOT EXISTS pushed_advisories (
+  source TEXT NOT NULL, id TEXT NOT NULL, observed_ns INTEGER NOT NULL,
+  expires_ns INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(source,id)
+);
+CREATE INDEX IF NOT EXISTS pushed_advisories_expiry ON pushed_advisories(expires_ns);
+CREATE TABLE IF NOT EXISTS aero_instance_keys (
+  provider_id TEXT NOT NULL, flight_id TEXT NOT NULL REFERENCES flights(id) ON DELETE CASCADE,
+  PRIMARY KEY(provider_id,flight_id), UNIQUE(flight_id)
+);
+CREATE TABLE IF NOT EXISTS aero_refresh_jobs (
+  provider_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, due_ns INTEGER NOT NULL,
+  lease_ns INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS aero_refresh_due ON aero_refresh_jobs(due_ns);
 CREATE TABLE IF NOT EXISTS tracked (
   owner TEXT NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
   flight_id TEXT NOT NULL REFERENCES flights(id), seat TEXT NOT NULL DEFAULT '',
@@ -100,6 +115,11 @@ CREATE TABLE IF NOT EXISTS outbox (
   lease_until INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(due, id) WHERE done = 0;
+CREATE TABLE IF NOT EXISTS live_wire_clocks (
+  device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  flight_id TEXT NOT NULL REFERENCES flights(id) ON DELETE CASCADE, wire_epoch INTEGER NOT NULL,
+  PRIMARY KEY(device_id,flight_id)
+);
 CREATE TABLE IF NOT EXISTS live_token_requests (
   device_id INTEGER PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE
 );
@@ -135,7 +155,7 @@ CREATE TABLE IF NOT EXISTS shares (
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db, delayModel: options.DelayModel, collectDelaySamples: options.CollectDelaySamples}, nil
+	return &Store{db: db, delayModel: options.DelayModel, collectDelaySamples: options.CollectDelaySamples, outboxWake: make(chan struct{}, 1), refreshWake: make(chan struct{}, 1)}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -171,7 +191,7 @@ func (s *Store) Track(ctx context.Context, owner, id, seat string) error {
 	if err := trackFlight(ctx, tx, owner, id, seat, time.Now()); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitOutbox(tx)
 }
 
 func trackFlight(ctx context.Context, tx *sql.Tx, owner, id, seat string, now time.Time) error {
@@ -304,14 +324,14 @@ func (s *Store) Details(ctx context.Context, id string) (Details, error) {
 }
 
 func (s *Store) Observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory) error {
-	return s.observe(ctx, flight, track, inbound, advisories, false)
+	return s.observe(ctx, flight, track, inbound, advisories, false, "")
 }
 
 func (s *Store) observeTracked(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory) error {
-	return s.observe(ctx, flight, track, inbound, advisories, true)
+	return s.observe(ctx, flight, track, inbound, advisories, true, "")
 }
 
-func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory, trackedRefresh bool) error {
+func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.Position, inbound []feeds.Flight, advisories []feeds.Advisory, trackedRefresh bool, expectedAeroID string) error {
 	if flight.ID == "" || flight.ObservedAt.IsZero() {
 		return errors.New("missing flight identity or observation time")
 	}
@@ -320,6 +340,15 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 		return err
 	}
 	defer tx.Rollback()
+	if expectedAeroID != "" {
+		var tracked bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT id FROM (`+aeroTargetsSQL+`) WHERE id=?)`, expectedAeroID, expectedAeroID, flight.ID).Scan(&tracked); err != nil {
+			return err
+		}
+		if !tracked {
+			return nil
+		}
+	}
 	var prior feeds.Flight
 	var raw, oldInbound, oldPrediction, oldTrack []byte
 	err = tx.QueryRowContext(ctx, `SELECT snapshot,inbound,prediction,telemetry FROM flights WHERE id=?`, flight.ID).Scan(&raw, &oldInbound, &oldPrediction, &oldTrack)
@@ -338,6 +367,9 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 			if inbound == nil {
 				inbound = make([]feeds.Flight, 0)
 			}
+		}
+		if flight.AircraftAge == nil && flight.TailNumber != "" && flight.TailNumber == prior.TailNumber {
+			flight.AircraftAge = prior.AircraftAge
 		}
 		if inbound == nil {
 			if err := json.Unmarshal(oldInbound, &inbound); err != nil {
@@ -404,6 +436,13 @@ snapshot=excluded.snapshot, observed_ns=excluded.observed_ns, telemetry=COALESCE
 		return err
 	}
 
+	if provider := flight.AeroProviderID(); provider != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO aero_instance_keys(provider_id,flight_id) VALUES(?,?)
+ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider, flight.ID); err != nil {
+			return err
+		}
+	}
+
 	if s.collectDelaySamples && trackedRefresh {
 		if err := recordDelaySample(ctx, tx, flight, inbound, advisories, decisionAt); err != nil {
 			return err
@@ -422,15 +461,9 @@ snapshot=excluded.snapshot, observed_ns=excluded.observed_ns, telemetry=COALESCE
 		}
 	}
 	for _, a := range advisories {
-		at := advisoryTime(flight, a)
-		if at == nil || a.StartsAt != nil && a.StartsAt.After(*at) || a.EndsAt != nil && !a.EndsAt.After(*at) || at.Before(flight.ObservedAt.Add(-time.Hour)) {
-			continue
+		if event, ok := advisoryEvent(flight, a, flight.ObservedAt); ok {
+			events = append(events, event)
 		}
-		body := a.Reason
-		if body == "" {
-			body = flight.Number
-		}
-		events = append(events, Event{ID: hash(flight.ID + "\x00advisory\x00" + a.Source + "\x00" + a.ID), Kind: a.Kind, Title: fmt.Sprintf("%s · %s", a.Airport, strings.ReplaceAll(a.Kind, "_", " ")), Body: body, At: flight.ObservedAt})
 	}
 	if err := queueCheckIn(ctx, tx, flight, flight.ObservedAt); err != nil {
 		return err
@@ -443,7 +476,7 @@ snapshot=excluded.snapshot, observed_ns=excluded.observed_ns, telemetry=COALESCE
 	if err := enqueueLive(ctx, tx, prior, flight); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitOutbox(tx)
 }
 
 func optionalJSON[T any](values []T) (any, error) {

@@ -217,3 +217,9 @@ docker compose exec -T plano plano-train -input - -output - \
 The trainer reports holdout metrics on stderr and writes an artifact only if
 the default backtest gate passes. Mount a validated artifact read-only and
 set `PLANO_DELAY_MODEL_FILE` to its container path. [Delay model training](../cmd/plano-train/README.md)
+
+## Optional real-time callbacks
+
+Enable an HTTPS FlightAware callback or a signed FAA SWIM/EUROCONTROL bridge
+to supplement periodic ingestion. Each callback uses its own private mounted
+key file. [Aviation callbacks](AVIATION_CALLBACKS.md)

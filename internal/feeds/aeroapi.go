@@ -126,6 +126,7 @@ func (a *AeroAPI) getProviderFlight(ctx context.Context, id string) (Flight, err
 	}
 	path := "/flights/" + id
 	params := url.Values{"ident_type": {"fa_flight_id"}}
+	now := a.now().UTC()
 	rows, err := a.flightRows(ctx, path, params)
 	if errors.Is(err, ErrNotFound) {
 		rows, err = a.flightRows(ctx, "/history"+path, params)
@@ -146,7 +147,7 @@ func (a *AeroAPI) getProviderFlight(ctx context.Context, id string) (Flight, err
 	if original == nil {
 		return Flight{}, ErrNotFound
 	}
-	return original.normalize(a.now().UTC()), nil
+	return original.normalize(now), nil
 }
 
 func (a *AeroAPI) Track(ctx context.Context, id string) ([]Position, error) {
@@ -355,4 +356,19 @@ func (p aeroPosition) normalize() (Position, bool) {
 		GroundSpeedKnots: p.GroundSpeed, Heading: p.Heading, At: p.Timestamp.UTC(),
 		Source: aeroSource, Kind: kind,
 	}, true
+}
+
+// AeroProviderID returns a verified AeroAPI instance key when this flight has
+// resolved to one. A schedule-only placeholder has no callback identity.
+func (f Flight) AeroProviderID() string {
+	if f.Source != aeroSource {
+		return ""
+	}
+	if providerIdentifier.MatchString(f.providerID) {
+		return f.providerID
+	}
+	if !strings.HasPrefix(f.ID, schedulePrefix) && providerIdentifier.MatchString(f.ID) {
+		return f.ID
+	}
+	return ""
 }
