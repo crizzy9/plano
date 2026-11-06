@@ -922,6 +922,28 @@ SELECT o.id,1`+leasedRow+` ON CONFLICT(outbox_id) DO UPDATE SET may_have_sent=1`
 			return
 		}
 	}
+	if job.message.ATFMRevision != "" {
+		if job.target.Platform == "ios" {
+			key := hash("atfm-slot\x00" + strings.ToLower(job.target.Token) + "\x00" + job.message.APNsCollapseID)
+			if _, sending := s.apnsFlightAlerts.LoadOrStore(key, struct{}{}); sending {
+				s.deferAPNsFlightAlert(ctx, logger, job)
+				return
+			}
+			defer s.apnsFlightAlerts.Delete(key)
+		}
+		current, err := s.atfmAlertCurrent(attempt, job, time.Now())
+		if err != nil {
+			if attempt.Err() == nil {
+				logger.Error("could not validate ATFM push revision", "job", job.id, "error", err)
+			}
+			return
+		}
+		if !current {
+			s.removeObsoletePush(ctx, logger, job)
+			return
+		}
+		job.message.ATFMRevision = ""
+	}
 	err = sender.Send(attempt, job.target, job.message)
 	if err != nil {
 		logger.Warn("push delivery failed", "job", job.id, "platform", job.target.Platform)
@@ -1000,6 +1022,13 @@ AND newer.observed_ns>r.observed_ns AND newer.observed_ns<=?)`,
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM calendar_import_receipts WHERE expires<=?`, now.Unix()); err != nil {
+		return err
+	}
+	cutoff := now.Add(-atfmSlotRetention).UnixNano()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM atfm_slots WHERE observed_ns<=?`, cutoff); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM atfm_scope_floors WHERE changed_ns<=?`, cutoff); err != nil {
 		return err
 	}
 	return tx.Commit()

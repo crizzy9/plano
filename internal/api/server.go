@@ -121,6 +121,9 @@ func (s Server) Handler() http.Handler {
 	}
 	if len(s.AdvisoryIngressKey) != 0 {
 		mux.HandleFunc("POST /v1/webhooks/advisory", s.advisoryCallback)
+		if !s.Demo {
+			mux.HandleFunc("POST /v1/webhooks/atfm-slot", s.atfmSlotCallback)
+		}
 	}
 	if !s.Demo && len(s.FlightObservationKey) != 0 {
 		mux.HandleFunc("POST /v1/webhooks/flight-observation", s.flightObservationCallback)
@@ -243,6 +246,7 @@ func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) er
 	}
 	var weather []core.AirportWeather
 	var notices []core.FlightNotice
+	var atfmSlots []core.ATFMSlotView
 	now := time.Now()
 	if d.Tracked {
 		weather = s.Weather.ForFlight(d.Flight, now)
@@ -251,6 +255,13 @@ func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) er
 			notices = nil
 			if r.Context().Err() == nil && s.Logger != nil {
 				s.Logger.Warn("flight notice context unavailable")
+			}
+		}
+		atfmSlots, err = s.Store.ATFMSlotsForFlight(r.Context(), owner, d.Flight, now)
+		if err != nil {
+			atfmSlots = nil
+			if r.Context().Err() == nil && s.Logger != nil {
+				s.Logger.Warn("flight takeoff slot context unavailable")
 			}
 		}
 	}
@@ -262,9 +273,10 @@ func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) er
 		core.Details
 		Weather                 []core.AirportWeather    `json:"weather,omitempty"`
 		Notices                 []core.FlightNotice      `json:"notices,omitempty"`
+		ATFMSlots               []core.ATFMSlotView      `json:"atfmSlots,omitempty"`
 		RotationSnapshot        bool                     `json:"rotationSnapshot,omitempty"`
 		HistoricalDepartureRisk *historicalrisk.Estimate `json:"historicalDepartureRisk,omitempty"`
-	}{d, weather, notices, rotationSnapshot, historicalRisk})
+	}{d, weather, notices, atfmSlots, rotationSnapshot, historicalRisk})
 	return nil
 }
 

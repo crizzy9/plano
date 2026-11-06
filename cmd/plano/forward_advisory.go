@@ -19,13 +19,18 @@ import (
 
 const maxAdvisoryRelayNotices = 32
 
-func forwardAdvisoryFromEnv(ctx context.Context, input io.Reader, convert func(io.Reader) ([][]byte, error)) (int, error) {
-	const keyFile = "PLANO_ADVISORY_INGRESS_KEY_FILE"
-	info, err := os.Stat(os.Getenv(keyFile))
+const advisoryIngressKeyFile = "PLANO_ADVISORY_INGRESS_KEY_FILE"
+
+func readAdvisoryRelayKey() ([]byte, error) {
+	info, err := os.Stat(os.Getenv(advisoryIngressKeyFile))
 	if err != nil || !info.Mode().IsRegular() {
-		return relayConfigError, errors.New("PLANO_ADVISORY_INGRESS_KEY_FILE must name a readable key file")
+		return nil, errors.New("PLANO_ADVISORY_INGRESS_KEY_FILE must name a readable key file")
 	}
-	key, err := secret("", keyFile)
+	return secret("", advisoryIngressKeyFile)
+}
+
+func forwardAdvisoryFromEnv(ctx context.Context, input io.Reader, convert func(io.Reader) ([][]byte, error)) (int, error) {
+	key, err := readAdvisoryRelayKey()
 	if err != nil {
 		return relayConfigError, err
 	}

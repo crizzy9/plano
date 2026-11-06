@@ -102,6 +102,56 @@ deduplicates notices it already accepted. Exit `65` means rejected input,
 `77` means the relay key was refused, and `78` means configuration or an
 unexpected endpoint response.
 
+### Flight-specific takeoff slots
+
+An authorized bridge can report an FAA EDCT or EUROCONTROL CTOT with
+`POST /v1/webhooks/atfm-slot`. The live-mode endpoint uses the advisory signing
+key and the same signature headers. Use one authoritative bridge per source.
+
+```sh
+export PLANO_ATFM_SLOT_RELAY_URL=https://plano.example.net/v1/webhooks/atfm-slot
+export PLANO_ADVISORY_INGRESS_KEY_FILE=/run/secrets/plano-advisory-key
+plano forward-atfm-slot < slot.json
+```
+
+Send one normalized JSON envelope of up to 4 KiB. The bridge matches its
+source flight record to an exact AeroAPI `fa_flight_id` using verified flight
+identity. Use the tracked flight's two ICAO airports and airline scheduled
+departure instant. All times use RFC 3339, including the resolved UTC date of
+the slot if the upstream field supplies only a time of day. [FAA flight identity](https://cdm.fly.faa.gov/faq/required-elements-tfmdata-flight-request) · [EUROCONTROL ADEXP 4.0](https://www.eurocontrol.int/sites/default/files/2026-04/eurocontrol-adexp-specification-4-0.pdf)
+
+```json
+{
+  "version": 1,
+  "source": "faa_swim",
+  "providerFlightId": "example-UAL88-provider-id",
+  "originIcao": "KSFO",
+  "destinationIcao": "KEWR",
+  "scheduledDeparture": "2026-11-06T18:00:00Z",
+  "observedAt": "2026-11-06T17:50:00Z",
+  "status": "assigned",
+  "takeoffAt": "2026-11-06T18:45:00Z",
+  "reason": "Arrival capacity reduced by thunderstorms"
+}
+```
+
+Use `eurocontrol_nm` for a CTOT. For a revision, send the new assignment
+with its observation time. For a withdrawal, send `status` as `withdrawn`
+and omit `takeoffAt`. An offer of an improved EUROCONTROL slot is still a
+proposal. Supply `reason` only when the upstream source attributes it to the
+flight. The relay accepts this normalized JSON from an authorized bridge.
+[FAA EDCT](https://www.faa.gov/air_traffic/publications/aim_html/chap5_section_2.html) · [EUROCONTROL slot messages](https://www.eurocontrol.int/archive_download/all/node/10578)
+
+Preserve the original `observedAt` on retries. It must be within the preceding
+30 minutes, and the flight's scheduled departure must be between 12 hours ago
+and 24 hours ahead. HTTP `204` acknowledges receipt, including duplicates and
+updates without an eligible tracked match. Plano shows current assignments to
+installations tracking the verified flight and can send them a private alert.
+The displayed slot expires after 30 minutes or the end of the assigned slot
+window, whichever is earlier. It also disappears after takeoff or a withdrawal.
+The slot describes wheels-off timing. Airline gate times and Plano's delay
+estimates remain separate.
+
 ### FAA TFMData airport programs
 
 Pass one Flow Information XML message of up to 2 MiB from an authorized SWIM

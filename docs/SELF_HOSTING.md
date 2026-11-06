@@ -184,6 +184,10 @@ For signed delivery, run `plano forward-advisory` alongside your authorized
 subscriber. It accepts normalized JSON or supported AIXM Digital NOTAM XML.
 [Advisory relay setup](AVIATION_CALLBACKS.md#faa-swim-and-eurocontrol-bridges)
 
+An authorized bridge can also forward flight-specific FAA EDCT and EUROCONTROL
+CTOT assignments with `plano forward-atfm-slot`. It uses the same advisory
+key and requires a verified flight instance match. [Takeoff slot relay](AVIATION_CALLBACKS.md#flight-specific-takeoff-slots)
+
 Keep credential files outside the checkout. Compose reads the `*_FILE`
 values as paths **inside** the container. For each credential with both
 inputs, choose either the direct value or the file input. An optional

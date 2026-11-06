@@ -113,6 +113,14 @@ export interface FlightNotice {
   validUntil: string;
 }
 
+export interface ATFMSlot {
+  source: 'faa_swim' | 'eurocontrol_nm';
+  takeoffAt: string;
+  observedAt: string;
+  validUntil: string;
+  reason?: string;
+}
+
 export interface FlightDetail {
   flight: Flight;
   rotationSnapshot?: boolean;
@@ -124,6 +132,7 @@ export interface FlightDetail {
   historicalDepartureRisk?: HistoricalDepartureRisk;
   weather?: AirportWeather[];
   notices?: FlightNotice[];
+  atfmSlots?: ATFMSlot[];
 }
 
 interface FlightOverview {

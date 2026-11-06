@@ -8,6 +8,7 @@ package app.plano.live
 fun main() {
   checkAlertMetadata()
   checkAlertOrdering()
+  checkTakeoffSlotOrdering()
   println("Flight alert metadata and ordering fixtures passed")
 }
 
@@ -93,4 +94,32 @@ private fun checkAlertOrdering() {
   check(tag == flightStateAlertTag("flight-1", "departure_gate"))
   check(tag != flightStateAlertTag("flight-1", "arrival_gate"))
   check(tag != flightStateAlertTag("flight-2", "departure_gate"))
+}
+
+private fun checkTakeoffSlotOrdering() {
+  val edct = "faa_edct"
+  val ctot = "eurocontrol_ctot"
+  val faa = requireNotNull(updateFlightAlertOrder(emptyMap(), edct, 20))
+  val both = requireNotNull(updateFlightAlertOrder(faa.revisions, ctot, 15))
+  check(both.revisions == mapOf(edct to 20L, ctot to 15L))
+  check(flightStateAlertTag("flight-1", edct) != flightStateAlertTag("flight-1", ctot))
+
+  val taxi = requireNotNull(updateFlightAlertOrder(both.revisions, "taxi_out", 25))
+  check(taxi.supersededKinds.isEmpty())
+  for ((kind, observed) in both.revisions) {
+    check(taxi.revisions[kind] == observed)
+    check(updateFlightAlertOrder(taxi.revisions, kind, observed - 1) == null)
+    check(updateFlightAlertOrder(taxi.revisions, kind, observed) == null)
+    check(updateFlightAlertOrder(taxi.revisions, kind, 26)?.revisions?.get(kind) == 26L)
+  }
+
+  for (phase in listOf("airborne", "landed", "arrived", "cancelled", "diverted")) {
+    val update = requireNotNull(updateFlightAlertOrder(taxi.revisions, phase, 30))
+    check(update.supersededKinds.containsAll(listOf(edct, ctot)))
+    for (kind in listOf(edct, ctot)) {
+      check(update.revisions[kind] == 30L)
+      check(updateFlightAlertOrder(update.revisions, kind, 29) == null)
+      check(updateFlightAlertOrder(update.revisions, kind, 30) == null)
+    }
+  }
 }

@@ -5,10 +5,11 @@ private const val NANOS_PER_SECOND = 1_000_000_000L
 private const val MAX_ALERT_EXPIRY_LEAD_MILLIS = 28 * 24 * 60 * 60 * 1000L + PUSH_CLOCK_SKEW_MILLIS
 private val alertKindPattern = Regex("[a-z][a-z0-9_]{0,31}")
 private val departureAlertKinds = setOf("boarding", "check_in", "departure_gate", "etd", "delay_prediction")
+private val preTakeoffAlertKinds = departureAlertKinds + setOf("faa_edct", "eurocontrol_ctot")
 private val arrivalAlertKinds = setOf("arrival_gate", "eta", "baggage")
 private val terminalAlertKinds = setOf("cancelled", "diverted")
 private val movementPhases = setOf("taxi_out", "airborne", "landed", "arrived")
-internal val flightStateAlertKinds = departureAlertKinds + arrivalAlertKinds + terminalAlertKinds + "tail"
+internal val flightStateAlertKinds = preTakeoffAlertKinds + arrivalAlertKinds + terminalAlertKinds + "tail"
 
 internal data class FlightAlertMetadata(
   val expiresAt: Long?,
@@ -52,10 +53,11 @@ internal fun updateFlightAlertOrder(
   if (stateAlert && observedNs <= (revisions[kind] ?: 0L)) return null
 
   val invalidated = when (kind) {
-    "taxi_out", "airborne", "landed" -> departureAlertKinds
-    "arrived" -> departureAlertKinds + "eta"
+    "taxi_out" -> departureAlertKinds
+    "airborne", "landed" -> preTakeoffAlertKinds
+    "arrived" -> preTakeoffAlertKinds + "eta"
     "cancelled" -> flightStateAlertKinds - kind
-    "diverted" -> departureAlertKinds + arrivalAlertKinds + "cancelled"
+    "diverted" -> preTakeoffAlertKinds + arrivalAlertKinds + "cancelled"
     else -> emptySet()
   }
   // OOOI facts can accompany a diversion or cancellation. Clear terminal

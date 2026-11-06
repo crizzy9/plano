@@ -224,7 +224,7 @@ CREATE INDEX IF NOT EXISTS bookings_by_locator ON bookings(owner, locator_hash);
 CREATE TABLE IF NOT EXISTS shares (
   token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, flight_id TEXT NOT NULL, expires INTEGER NOT NULL,
   FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
-);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema + passportArchiveSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema + delayProviderSamplesSchema + delayEarlySamplesSchema + tfmsProgramCancellationSchema + calendarSyncSchema); err != nil {
+);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema + passportArchiveSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema + delayProviderSamplesSchema + delayEarlySamplesSchema + tfmsProgramCancellationSchema + calendarSyncSchema + atfmSlotSchema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -654,6 +654,11 @@ snapshot=excluded.snapshot, observed_ns=excluded.observed_ns, telemetry=COALESCE
 	if provider != "" {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO aero_instance_keys(provider_id,flight_id) VALUES(?,?)
 ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider, flight.ID); err != nil {
+			return err
+		}
+	}
+	if previousProvider != "" || prior.AeroProviderID() != "" {
+		if err := retireATFMSlotScope(ctx, tx, prior, flight, providerChanged); err != nil {
 			return err
 		}
 	}

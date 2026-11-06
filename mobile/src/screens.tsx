@@ -3,7 +3,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { AppState, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { saveServer, type Flight, type FlightNotice, type HistoricalDepartureRisk, type PassportFlight, type PlanoAPI, type Position } from './api';
+import { saveServer, type ATFMSlot, type Flight, type FlightNotice, type HistoricalDepartureRisk, type PassportFlight, type PlanoAPI, type Position } from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
 import { usePalette } from './theme';
 import { PickupLinks } from './pickup-links';
@@ -226,6 +226,12 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const weather = detail?.weather?.filter((report) => Date.parse(report.validUntil) > Date.now()) ?? [];
   const notices = value?.tracked && detail?.flight.id === id ? detail.notices : undefined;
   const noticeRows = useMemo(() => notices?.slice(0, 8).map((notice) => ({ notice, expires: Date.parse(notice.validUntil) })) ?? [], [notices]);
+  const slots = value?.tracked && !savedAt && !error && !rotationSnapshot && detail?.flight.id === id && flight &&
+    !flight.actualTakeoff && !flight.actualLanding && !flight.actualArrival &&
+    !['airborne', 'landed', 'arrived', 'cancelled', 'diverted'].includes(flight.status) ? detail.atfmSlots : undefined;
+  const slotRows = useMemo(() => slots?.map((slot) => ({
+    slot, takeoff: Date.parse(slot.takeoffAt), observed: Date.parse(slot.observedAt), expires: Date.parse(slot.validUntil),
+  })) ?? [], [slots]);
   const predictionExpiry = detail?.prediction?.validUntil;
   const predictionExpiresAt = predictionExpiry === undefined ? Infinity : Date.parse(predictionExpiry);
   const historicalRisk = !savedAt && !error && !rotationOf && !rotationSnapshot && detail?.flight.id === id
@@ -234,12 +240,14 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
     (flight.status === 'scheduled' || flight.status === 'boarding') &&
     !flight.actualDeparture && !flight.actualTakeoff && !flight.actualLanding && !flight.actualArrival
     ? Date.parse(flight.scheduledDeparture ?? '') : NaN;
-  const expiries = useMemo(() => [predictionExpiresAt, historicalRiskExpiresAt, ...noticeRows.map(({ expires }) => expires)]
-    .filter(Number.isFinite), [predictionExpiresAt, historicalRiskExpiresAt, noticeRows]);
+  const expiries = useMemo(() => [predictionExpiresAt, historicalRiskExpiresAt,
+    ...noticeRows.map(({ expires }) => expires), ...slotRows.map(({ expires }) => expires)]
+    .filter(Number.isFinite), [predictionExpiresAt, historicalRiskExpiresAt, noticeRows, slotRows]);
   const now = useExpiryClock(expiries);
   const prediction = predictionExpiresAt > now ? detail?.prediction : undefined;
   const currentHistoricalRisk = historicalRiskExpiresAt > now ? historicalRisk : undefined;
   const currentNotices = noticeRows.filter(({ expires }) => expires > now).map(({ notice }) => notice);
+  const currentSlots = slotRows.filter(({ takeoff, expires }) => Number.isFinite(takeoff) && expires > now);
 
   async function toggleTrack() {
     if (!value || savedAt || rotationSnapshot || operation) return;
@@ -250,7 +258,8 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
         await api.untrack(id);
         refresh();
         setValue((old) => old && ({
-          ...old, tracked: false, detail: { ...old.detail, telemetry: undefined, weather: undefined, notices: undefined },
+          ...old, tracked: false,
+          detail: { ...old.detail, telemetry: undefined, weather: undefined, notices: undefined, atfmSlots: undefined },
         }));
         await stopLiveActivity(id);
       } else {
@@ -323,6 +332,21 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
               </View>
             </View>
           )}
+          {currentSlots.length > 0 && (
+            <View style={layout.section}>
+              <Heading>Assigned takeoff time</Heading>
+              {currentSlots.map(({ slot, takeoff, observed }) => (
+                <View key={slot.source} style={[styles.event, { borderColor: colors.divider }]}>
+                  <Text style={[styles.strong, { color: colors.text }]}>
+                    {atfmSlotLabels[slot.source]} · {airportDateTime(takeoff, flight.originTimeZone)}
+                  </Text>
+                  {slot.reason && <Body>{slot.reason}</Body>}
+                  {Number.isFinite(observed) && <Body>Reported {airportDateTime(observed, flight.originTimeZone)}</Body>}
+                </View>
+              ))}
+              <Body>Check your airline for gate and boarding times.</Body>
+            </View>
+          )}
           {(prediction || currentHistoricalRisk || weather.length > 0) && (
             <View style={layout.section}>
               <Heading>Delay outlook</Heading>
@@ -387,6 +411,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
 const riskPercent = new Intl.NumberFormat(undefined, { style: 'percent' });
 const riskSampleCount = new Intl.NumberFormat();
 const riskTrainingDay = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+const atfmSlotLabels: Record<ATFMSlot['source'], string> = { faa_swim: 'FAA EDCT', eurocontrol_nm: 'EUROCONTROL CTOT' };
 
 function validHistoricalDepartureRisk(risk: HistoricalDepartureRisk | undefined): boolean {
   return !!risk && Number.isFinite(risk.probability) && risk.probability >= 0 && risk.probability <= 1 &&
@@ -415,7 +440,7 @@ function directRotationLeg(flight: Flight, leg: Flight | undefined) {
   if (linked) return { leg, source: 'Provider-linked inbound' };
 }
 
-function rotationTime(time: number, zone?: string) {
+function airportDateTime(time: number, zone?: string) {
   const options: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
   if (zone) {
     try { return new Intl.DateTimeFormat(undefined, { ...options, timeZone: zone }).format(time); } catch { /* use UTC */ }
@@ -457,10 +482,10 @@ function AircraftRotation({ flight, legs, open }: { flight: Flight; legs: Flight
             <Text accessibilityRole="header" style={[styles.strong, { color: colors.text }]}>
               Inbound to {flight.origin || flight.originICAO}
             </Text>
-            {timing ? <Body>{timing.label} · {rotationTime(timing.time, zone)}</Body> : <Body>Arrival time unavailable.</Body>}
+            {timing ? <Body>{timing.label} · {airportDateTime(timing.time, zone)}</Body> : <Body>Arrival time unavailable.</Body>}
             <Body>{immediate.source}</Body>
             {Number.isFinite(observed) ? (
-              <Body>{stale ? 'Last reported' : 'Reported'} {rotationTime(observed, zone)}</Body>
+              <Body>{stale ? 'Last reported' : 'Reported'} {airportDateTime(observed, zone)}</Body>
             ) : <Body>Report time unavailable.</Body>}
           </View>
           <FlightRow flight={immediate.leg} onPress={open && (() => open(immediate.leg))} />

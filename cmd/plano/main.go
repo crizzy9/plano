@@ -47,6 +47,17 @@ func main() {
 		}
 		os.Exit(status)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "forward-atfm-slot" {
+		if len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: plano forward-atfm-slot")
+			os.Exit(relayConfigError)
+		}
+		status, err := forwardATFMSlotFromEnv(context.Background(), os.Stdin)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		os.Exit(status)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "forward-flight-observation" {
 		if len(os.Args) != 2 {
 			fmt.Fprintln(os.Stderr, "usage: plano forward-flight-observation")
@@ -100,7 +111,7 @@ func main() {
 	}
 	checkOnly := len(os.Args) == 2 && os.Args[1] == "check-config"
 	if len(os.Args) > 1 && !checkOnly {
-		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples [--early]|forward-email|forward-advisory|forward-flight-observation]")
+		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples [--early]|forward-email|forward-advisory|forward-atfm-slot|forward-flight-observation]")
 		os.Exit(2)
 	}
 	if err := run(logger, checkOnly); err != nil {
