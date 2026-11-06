@@ -9,6 +9,7 @@ fun main() {
   checkAlertMetadata()
   checkAlertOrdering()
   checkTakeoffSlotOrdering()
+  checkInboundMilestoneOrdering()
   println("Flight alert metadata and ordering fixtures passed")
 }
 
@@ -117,6 +118,36 @@ private fun checkTakeoffSlotOrdering() {
     val update = requireNotNull(updateFlightAlertOrder(taxi.revisions, phase, 30))
     check(update.supersededKinds.containsAll(listOf(edct, ctot)))
     for (kind in listOf(edct, ctot)) {
+      check(update.revisions[kind] == 30L)
+      check(updateFlightAlertOrder(update.revisions, kind, 29) == null)
+      check(updateFlightAlertOrder(update.revisions, kind, 30) == null)
+    }
+  }
+}
+
+private fun checkInboundMilestoneOrdering() {
+  val takeoff = "inbound_takeoff"
+  val landing = "inbound_landing"
+  val departed = requireNotNull(updateFlightAlertOrder(emptyMap(), takeoff, 20))
+  val arrived = requireNotNull(updateFlightAlertOrder(departed.revisions, landing, 25))
+  check(arrived.supersededKinds == listOf(takeoff))
+  check(arrived.revisions == mapOf(takeoff to 25L, landing to 25L))
+  check(flightStateAlertTag("flight-1", takeoff) != flightStateAlertTag("flight-1", landing))
+  check(updateFlightAlertOrder(arrived.revisions, takeoff, 24) == null)
+  check(updateFlightAlertOrder(arrived.revisions, takeoff, 25) == null)
+  check(updateFlightAlertOrder(arrived.revisions, landing, 25) == null)
+
+  val landingFirst = requireNotNull(updateFlightAlertOrder(emptyMap(), landing, 25))
+  check(updateFlightAlertOrder(landingFirst.revisions, takeoff, 20) == null)
+  val nextTakeoff = requireNotNull(updateFlightAlertOrder(arrived.revisions, takeoff, 27))
+  val tail = requireNotNull(updateFlightAlertOrder(nextTakeoff.revisions, "tail", 28))
+  check(tail.supersededKinds.isEmpty())
+  check(tail.revisions[takeoff] == 27L && tail.revisions[landing] == 25L)
+
+  for (phase in listOf("taxi_out", "airborne", "landed", "arrived", "cancelled", "diverted")) {
+    val update = requireNotNull(updateFlightAlertOrder(tail.revisions, phase, 30))
+    check(update.supersededKinds.containsAll(listOf(takeoff, landing)))
+    for (kind in listOf(takeoff, landing)) {
       check(update.revisions[kind] == 30L)
       check(updateFlightAlertOrder(update.revisions, kind, 29) == null)
       check(updateFlightAlertOrder(update.revisions, kind, 30) == null)

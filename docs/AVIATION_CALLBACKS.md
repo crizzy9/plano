@@ -18,7 +18,12 @@ Plano creates a scope only while its departure-local day and its date at UTC mid
 
 Plano responds with HTTP `200` after durably accepting an eligible refresh hint. Unknown or provider-blocked flights also receive `200` without a refresh. The provider callback has no issue time or delivery ID, so Plano uses the instance ID to fetch the authoritative FlightAware record. A leased worker writes changes and push jobs transactionally. A callback arriving during the fetch schedules another refresh. Periodic polling remains enabled.
 
-A subscription can also deliver an update for a direct inbound flight that AeroAPI explicitly links to an active tracked departure. Plano uses the fetched inbound record to update the rotation and forecast with current cached airport advisories. It retains the onward flight's observation timestamp.
+A subscription can also deliver an update for a direct inbound flight that AeroAPI explicitly links to an active tracked departure. Plano uses the fetched inbound record to update the rotation and forecast with current cached airport advisories. A newer record can replace a tail-matched fallback when it verifies the aircraft, airport and chronology. It retains the onward flight's observation timestamp.
+
+After Plano has seen the linked leg, a newly reported takeoff or landing can
+alert installations tracking the onward departure. Signed snapshots and
+periodic refresh can also report those milestones. An alert expires 15 minutes
+after the movement and requires the same direct assignment at dispatch.
 
 ## Signed flight snapshots
 

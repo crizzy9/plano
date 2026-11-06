@@ -59,15 +59,25 @@ func (s *Store) applyAeroInbound(ctx context.Context, providerID string, incomin
 		if err := json.Unmarshal(t.rotation, &previous); err != nil {
 			return err
 		}
-		if len(previous) != 0 && (previous[0].ID != providerID || !incoming.ObservedAt.After(previous[0].ObservedAt)) {
-			continue
+		sameDirect := len(previous) != 0 && previous[0].ID == providerID
+		if len(previous) != 0 {
+			if !incoming.ObservedAt.After(previous[0].ObservedAt) {
+				continue
+			}
+			if !sameDirect {
+				// Displace an inferred leg only with a current, usable inbound.
+				leg, _, _ := inboundLeg(flight, []feeds.Flight{incoming}, now)
+				if leg == nil || firstTime(incoming.ScheduledDeparture, incoming.ActualDeparture, incoming.ActualTakeoff, incoming.EstimatedDeparture) == nil {
+					continue
+				}
+			}
 		}
 		direct := incoming
-		if len(previous) != 0 {
+		if sameDirect {
 			retainAircraftMetadata(&direct, previous[0], "")
 		}
 		rotation := []feeds.Flight{direct}
-		if len(previous) > 1 && connectsAeroInbound(flight, incoming) && sameInboundHistory(previous[0], incoming) {
+		if sameDirect && len(previous) > 1 && connectsAeroInbound(flight, incoming) && sameInboundHistory(previous[0], incoming) {
 			rotation = append(rotation, previous[1:]...)
 		}
 		advisories, deadlines, err := readCurrentFlightAdvisories(ctx, tx, flight, now)
@@ -89,6 +99,9 @@ func (s *Store) applyAeroInbound(ctx context.Context, providerID string, incomin
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE flights SET inbound=?,prediction=? WHERE id=?`, string(rawRotation), string(rawForecast), flight.ID); err != nil {
+			return err
+		}
+		if err := saveInboundMilestones(ctx, tx, flight, previous, rotation, now); err != nil {
 			return err
 		}
 		changed = true
@@ -143,13 +156,9 @@ func keepNewerAeroInbound(flight feeds.Flight, rotation []feeds.Flight, previous
 		return rotation, false, nil
 	}
 	if len(rotation) == 0 || !isExactAeroInbound(flight, rotation[0]) {
-		// An empty response has no inbound timestamp of its own. Compare it
-		// with the outbound observation taken before the rotation fetch.
-		observedAt := flight.ObservedAt
-		if len(rotation) != 0 {
-			observedAt = rotation[0].ObservedAt
-		}
-		if !previous[0].ObservedAt.After(observedAt) {
+		// The outbound observation predates the explicit inbound lookup. A
+		// later fallback lookup time cannot establish when that lookup failed.
+		if !previous[0].ObservedAt.After(flight.ObservedAt) {
 			return rotation, false, nil
 		}
 		if !connectsAeroInbound(flight, previous[0]) {

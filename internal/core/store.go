@@ -424,7 +424,8 @@ EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flight
 		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT e.data FROM events e LEFT JOIN event_revisions r ON r.event_id=e.id
-WHERE e.flight_id=? AND COALESCE(r.revision,0)=? ORDER BY e.at_ns DESC,e.id LIMIT 200`, id, eventRevision)
+WHERE e.flight_id=? AND COALESCE(r.revision,0)=? AND (? OR json_extract(e.data,'$.kind') NOT IN ('inbound_takeoff','inbound_landing'))
+ORDER BY e.at_ns DESC,e.id LIMIT 200`, id, eventRevision, d.Tracked)
 	if err != nil {
 		return d, err
 	}
@@ -726,6 +727,15 @@ ON CONFLICT(flight_id) DO UPDATE SET revision=flight_event_revisions.revision+1`
 			return err
 		}
 	}
+	if !providerChanged && flight.InboundID != "" && prior.InboundID == flight.InboundID && len(inbound) != 0 {
+		var previous []feeds.Flight
+		if err := json.Unmarshal(oldInbound, &previous); err != nil {
+			return err
+		}
+		if err := saveInboundMilestones(ctx, tx, flight, previous, inbound, decisionAt); err != nil {
+			return err
+		}
+	}
 	var cancellations []tfmsProgramCancellation
 	if slices.ContainsFunc(advisories, feeds.Advisory.IsTFMSAirportProgram) {
 		cancellations, err = loadTFMSProgramCancellations(ctx, tx, flight.Destination, flight.DestinationICAO, flight.ObservedAt)
@@ -802,9 +812,12 @@ func saveEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event, no
 		collapseID = event.ID
 	}
 	msg := push.Message{Kind: push.Alert, FlightID: flightID, Title: event.Title, Body: truncate(event.Body, 180),
-		Timestamp: event.At, ExpiresAt: expires, CollapseID: collapseID, AdvisoryWindow: event.advisoryWindow}
+		Timestamp: event.At, ExpiresAt: expires, CollapseID: collapseID, AdvisoryWindow: event.advisoryWindow, InboundLegID: event.inboundLegID}
 	if err := enqueueWithAdvisories(ctx, tx, flightID, msg, event.advisoryEvidence, `SELECT d.id FROM devices d JOIN tracked t ON t.owner=d.owner WHERE t.flight_id=? AND d.kind='alert'`, flightID); err != nil {
 		return err
+	}
+	if event.inboundLegID != "" {
+		return nil
 	}
 	return enqueueFriendFlightAlert(ctx, tx, flightID, msg, event)
 }

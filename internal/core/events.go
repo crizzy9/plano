@@ -19,6 +19,7 @@ type Event struct {
 	collapseID       string
 	advisoryEvidence []forecastAdvisory
 	advisoryWindow   *push.AdvisoryWindow
+	inboundLegID     string
 }
 
 func changes(before, after feeds.Flight, anchors estimateAlertAnchors) ([]Event, estimateAlertAnchors) {

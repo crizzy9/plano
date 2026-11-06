@@ -76,6 +76,7 @@ type Message struct {
 	APNsCollapseID      string          `json:",omitempty"`
 	AdvisoryWindow      *AdvisoryWindow `json:",omitempty"`
 	ATFMRevision        string          `json:",omitempty"` // Private outbox evidence.
+	InboundLegID        string          `json:",omitempty"` // Private outbox evidence.
 	State               *LiveState
 	Timestamp           time.Time
 	ExpiresAt           time.Time

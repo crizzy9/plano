@@ -18,14 +18,17 @@ AND (f.id IN (SELECT flight_id FROM aero_instance_keys WHERE provider_id=?) OR
 (f.id=? AND json_extract(f.snapshot,'$.source')='flightaware_aeroapi' AND NOT EXISTS(SELECT 1 FROM aero_instance_keys WHERE flight_id=f.id)))`
 
 // Only an explicit direct link from a tracked, predeparture flight authorizes
-// an inbound callback. A cached first leg must agree with that link.
+// an inbound callback. An inferred first leg may be replaced, but a provider
+// ID already known to be an earlier leg cannot be promoted by a callback.
 const aeroInboundTargetsSQL = `SELECT f.id FROM flights f
 WHERE json_extract(f.snapshot,'$.inboundId')=?
 AND json_extract(f.snapshot,'$.source') IN ('flightaware_aeroapi','flightaware_schedule')
 AND julianday(json_extract(f.snapshot,'$.scheduledDeparture')) BETWEEN julianday(?) AND julianday(?)
 AND json_extract(f.snapshot,'$.inboundId')<>f.id
 AND NOT EXISTS(SELECT 1 FROM aero_instance_keys k WHERE k.flight_id=f.id AND k.provider_id=json_extract(f.snapshot,'$.inboundId'))
-AND COALESCE(json_extract(f.inbound,'$[0].id'),'') IN ('',json_extract(f.snapshot,'$.inboundId'))
+AND (json_extract(f.inbound,'$[0].id')=json_extract(f.snapshot,'$.inboundId') OR NOT EXISTS (
+  SELECT 1 FROM json_each(f.inbound) leg WHERE json_extract(leg.value,'$.id')=json_extract(f.snapshot,'$.inboundId')
+))
 AND json_extract(f.snapshot,'$.status') NOT IN ('cancelled','taxi_out','airborne','landed','arrived','diverted')
 AND json_extract(f.snapshot,'$.actualDeparture') IS NULL AND json_extract(f.snapshot,'$.actualTakeoff') IS NULL
 AND json_extract(f.snapshot,'$.actualLanding') IS NULL AND json_extract(f.snapshot,'$.actualArrival') IS NULL

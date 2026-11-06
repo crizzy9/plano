@@ -969,6 +969,20 @@ SELECT o.id,1`+leasedRow+` ON CONFLICT(outbox_id) DO UPDATE SET may_have_sent=1`
 		}
 		job.message.ATFMRevision = ""
 	}
+	if job.message.InboundLegID != "" {
+		current, err := s.inboundMilestoneCurrent(attempt, job, flightEventKind, time.Now())
+		if err != nil {
+			if attempt.Err() == nil {
+				logger.Error("could not validate inbound alert scope", "job", job.id, "error", err)
+			}
+			return
+		}
+		if !current {
+			s.removeObsoletePush(ctx, logger, job)
+			return
+		}
+		job.message.InboundLegID = ""
+	}
 	err = sender.Send(attempt, job.target, job.message)
 	if err != nil {
 		logger.Warn("push delivery failed", "job", job.id, "platform", job.target.Platform)
