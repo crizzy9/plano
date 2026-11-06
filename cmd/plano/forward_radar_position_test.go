@@ -18,7 +18,7 @@ import (
 	"github.com/crizzy9/plano/internal/feeds"
 )
 
-func TestForwardSWIMPositionToPrivateRadar(t *testing.T) {
+func TestForwardPositionsToPrivateRadar(t *testing.T) {
 	ctx := t.Context()
 	store, err := core.Open(filepath.Join(t.TempDir(), "swim.db"))
 	if err != nil {
@@ -53,14 +53,14 @@ func TestForwardSWIMPositionToPrivateRadar(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := bytes.Repeat([]byte("s"), 32)
+	eurocontrolKey := bytes.Repeat([]byte("e"), 32)
 	logger := slog.New(slog.DiscardHandler)
-	service := api.Server{Store: store, SWIMPositionKey: key, Logger: logger}
+	service := api.Server{Store: store, SWIMPositionKey: key, EurocontrolPositionKey: eurocontrolKey, Logger: logger}
 	handler := service.Handler()
 	const path = "/v1/webhooks/swim-position"
-	const endpoint = "https://plano.invalid" + path
 	body := fmt.Sprintf(`{"version":1,"displayAllowed":true,"providerFlightId":%q,"originICAO":"KSFO","destinationICAO":"KEWR","scheduledDeparture":%q,"actualTakeoff":%q,"positions":[{"at":%q,"latitude":0,"longitude":-119.02,"altitudeFeet":32000}]}`,
 		flight.ID, scheduled.Format(time.RFC3339), takeoff.Format(time.RFC3339), fix.Format(time.RFC3339Nano))
-	send := func(raw string, signingKey []byte, alter bool, wantHTTP, wantExit int) {
+	send := func(relay radarPositionRelay, raw string, signingKey []byte, alter bool, wantHTTP, wantExit int) {
 		t.Helper()
 		called := false
 		transport := relayTransport(func(r *http.Request) (*http.Response, error) {
@@ -81,7 +81,7 @@ func TestForwardSWIMPositionToPrivateRadar(t *testing.T) {
 			}
 			return w.Result(), nil
 		})
-		status, err := forwardSWIMPosition(ctx, strings.NewReader(raw), endpoint, signingKey, transport)
+		status, err := relay.forward(ctx, strings.NewReader(raw), "https://plano.invalid"+relay.path, signingKey, transport)
 		if status != wantExit || (err != nil) != (wantExit != 0) || called != (wantHTTP != 0) {
 			t.Fatalf("relay returned %d (%v), invoked transport %v", status, err, called)
 		}
@@ -97,25 +97,32 @@ func TestForwardSWIMPositionToPrivateRadar(t *testing.T) {
 		}
 		return w
 	}
-	for _, disabled := range []api.Server{{Logger: logger}, {Demo: true, SWIMPositionKey: key, Logger: logger}} {
-		w := httptest.NewRecorder()
-		disabled.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
-		if w.Code != http.StatusNotFound {
-			t.Fatalf("disabled callback returned %d", w.Code)
+	for _, disabled := range []api.Server{{Logger: logger}, {Demo: true, SWIMPositionKey: key, EurocontrolPositionKey: eurocontrolKey, Logger: logger}} {
+		for _, path := range []string{path, eurocontrolPositionRelay.path} {
+			w := httptest.NewRecorder()
+			disabled.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("disabled callback returned %d", w.Code)
+			}
 		}
 	}
-	send(strings.Replace(body, `"displayAllowed":true`, `"displayAllowed":false`, 1), key, false, 0, relayDataError)
-	send(strings.Replace(body, `"latitude":0,`, "", 1), key, false, 0, relayDataError)
-	send(strings.Replace(body, fix.Format(time.RFC3339Nano), now.Add(-6*time.Minute).Format(time.RFC3339), 1), key, false, 0, relayDataError)
-	send(body, bytes.Repeat([]byte("x"), 32), false, http.StatusUnauthorized, relayPermission)
-	send(body, key, true, http.StatusUnauthorized, relayPermission)
-	send(strings.Replace(body, `"KSFO"`, `"KOAK"`, 1), key, false, http.StatusNoContent, 0)
+	send(swimPositionRelay, strings.Replace(body, `"displayAllowed":true`, `"displayAllowed":false`, 1), key, false, 0, relayDataError)
+	send(swimPositionRelay, strings.Replace(body, `"latitude":0,`, "", 1), key, false, 0, relayDataError)
+	send(swimPositionRelay, strings.Replace(body, fix.Format(time.RFC3339Nano), now.Add(-6*time.Minute).Format(time.RFC3339), 1), key, false, 0, relayDataError)
+	send(swimPositionRelay, body, bytes.Repeat([]byte("x"), 32), false, http.StatusUnauthorized, relayPermission)
+	send(swimPositionRelay, body, key, true, http.StatusUnauthorized, relayPermission)
+	send(swimPositionRelay, strings.Replace(body, `"KSFO"`, `"KOAK"`, 1), key, false, http.StatusNoContent, 0)
 	const query = "provider=1&swim=1"
 	if raw := get(ownerToken, query, http.StatusOK).Body.String(); !strings.Contains(raw, `"swimPositions":[]`) {
 		t.Fatalf("mismatched report reached private radar: %s", raw)
 	}
-	send(body, key, false, http.StatusNoContent, 0)
-	send(body, key, false, http.StatusNoContent, 0)
+	send(swimPositionRelay, body, key, false, http.StatusNoContent, 0)
+	send(swimPositionRelay, body, key, false, http.StatusNoContent, 0)
+	send(eurocontrolPositionRelay, body, eurocontrolKey, false, 0, relayDataError)
+	eurocontrolBody := strings.Replace(body, `"displayAllowed":true`, `"displayAllowed":true,"observedAirborne":true`, 1)
+	send(eurocontrolPositionRelay, strings.Replace(eurocontrolBody, `"observedAirborne":true`, `"observedAirborne":false`, 1), eurocontrolKey, false, 0, relayDataError)
+	send(eurocontrolPositionRelay, eurocontrolBody, key, false, http.StatusUnauthorized, relayPermission)
+	send(eurocontrolPositionRelay, eurocontrolBody, eurocontrolKey, false, http.StatusNoContent, 0)
 	var page struct {
 		SWIMPositions     []feeds.Position
 		SWIMCursor        string
@@ -130,18 +137,41 @@ func TestForwardSWIMPositionToPrivateRadar(t *testing.T) {
 	if p := page.SWIMPositions[0]; p.Source != feeds.FAASWIM || p.Kind != "radar" || p.Latitude != 0 || !p.At.Equal(fix) {
 		t.Fatalf("unexpected normalized position: %+v", p)
 	}
+	const both = query + "&eurocontrol=1"
+	var bothPage struct {
+		SWIMPositions        []feeds.Position
+		EurocontrolPositions []feeds.Position
+		EurocontrolCursor    string
+		EurocontrolRevision  string
+	}
+	if err := json.Unmarshal(get(ownerToken, both+"&swimAfter="+page.SWIMCursor, http.StatusOK).Body.Bytes(), &bothPage); err != nil ||
+		len(bothPage.SWIMPositions) != 0 || len(bothPage.EurocontrolPositions) != 1 || bothPage.EurocontrolCursor != page.SWIMCursor || bothPage.EurocontrolRevision == "" {
+		t.Fatalf("independent traffic page = %+v (%v)", bothPage, err)
+	}
+	if p := bothPage.EurocontrolPositions[0]; p.Source != feeds.Eurocontrol || p.Kind != "radar" || !p.At.Equal(fix) {
+		t.Fatalf("unexpected EUROCONTROL position: %+v", p)
+	}
 	if raw := get(foreignToken, query, http.StatusOK).Body.String(); !strings.Contains(raw, `"swimPositions":[]`) || strings.Contains(raw, `"swimRevision"`) {
 		t.Fatalf("foreign installation got private radar: %s", raw)
+	}
+	if raw := get(foreignToken, both, http.StatusOK).Body.String(); !strings.Contains(raw, `"eurocontrolPositions":[]`) || strings.Contains(raw, `"eurocontrolRevision"`) {
+		t.Fatalf("foreign installation got private EUROCONTROL radar: %s", raw)
 	}
 	if raw := get(ownerToken, "provider=1", http.StatusOK).Body.String(); strings.Contains(raw, `"swimPositions"`) {
 		t.Fatalf("legacy radar response changed: %s", raw)
 	}
-	for _, invalid := range []string{"swim=1", "provider=1&swim=2", "provider=1&swimAfter=bad", query + "&swimAfter=bad", query + "&swimRevision=-1"} {
+	for _, invalid := range []string{"swim=1", "provider=1&swim=2", "provider=1&swimAfter=bad", query + "&swimAfter=bad", query + "&swimRevision=-1",
+		"eurocontrol=1", "provider=1&eurocontrolRevision=0", both + "&eurocontrolAfter=bad"} {
 		get(ownerToken, invalid, http.StatusBadRequest)
 	}
 	service.SWIMPositionKey = nil
 	handler = service.Handler()
 	if raw := get(ownerToken, query, http.StatusOK).Body.String(); strings.Contains(raw, `"swimPositions"`) {
 		t.Fatalf("disabled integration returned stored SWIM positions: %s", raw)
+	}
+	service.EurocontrolPositionKey = nil
+	handler = service.Handler()
+	if raw := get(ownerToken, both, http.StatusOK).Body.String(); strings.Contains(raw, `"eurocontrolPositions"`) {
+		t.Fatalf("disabled integration returned stored EUROCONTROL positions: %s", raw)
 	}
 }

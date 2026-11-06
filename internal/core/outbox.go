@@ -1015,7 +1015,7 @@ AND newer.observed_ns>r.observed_ns AND newer.observed_ns<=?)`,
 	if _, err := tx.ExecContext(ctx, `DELETE FROM radar_positions WHERE at_ns<=?`, now.Add(-7*24*time.Hour).UnixNano()); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM swim_radar_positions WHERE at_ns<=?`, now.Add(-swimRadarRetention).UnixNano()); err != nil {
+	if err := pruneTrafficRadarPositions(ctx, tx, now); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM rotation_radar_positions WHERE at_ns<=?`, now.Add(-7*24*time.Hour).UnixNano()); err != nil {

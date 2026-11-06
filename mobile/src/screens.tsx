@@ -3,7 +3,9 @@ import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { AppState, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { saveServer, type ATFMSlot, type Flight, type FlightNotice, type HistoricalDepartureRisk, type PassportFlight, type PlanoAPI, type Position } from './api';
+import {
+  saveServer, type ATFMSlot, type Flight, type FlightNotice, type HistoricalDepartureRisk, type PassportFlight, type PlanoAPI, type Position, type RadarCursor,
+} from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
 import { usePalette } from './theme';
 import { PickupLinks } from './pickup-links';
@@ -560,6 +562,7 @@ const radarMaxPoints = 512;
 const radarPageSize = 256;
 
 const radarSources: Record<string, string> = {
+  eurocontrol_nm: 'EUROCONTROL',
   faa_swim: 'FAA SWIM',
   flightaware_aeroapi: 'FlightAware',
   operator_readsb: 'Local ADS-B receiver',
@@ -602,6 +605,19 @@ export function mergeRadarPositions(...groups: (readonly Position[] | undefined)
   }
   return [...byTime.values()].sort((a, b) => a.millis - b.millis || a.nanos - b.nanos)
     .slice(-radarMaxPoints).map(({ point }) => point);
+}
+
+function privateRadarUpdate(known: RadarCursor, revision?: string, cursor?: string, positions?: Position[]) {
+  const replace = revision !== known.revision;
+  const page = revision === undefined ? [] : positions ?? [];
+  if (!replace && page.length === 0) return;
+  const after = page.length ? cursor ?? mergeRadarPositions(page).at(-1)?.at : undefined;
+  return {
+    cursor: { after: replace ? after : after ?? known.after, revision },
+    page,
+    replace,
+    hasMore: !replace && page.length === radarPageSize && !!after && after !== known.after,
+  };
 }
 
 function radarValue(value: number | undefined, unit: string) {
@@ -650,24 +666,30 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
   const id = flight.id;
   const inFlight = tracked && (flight.status === 'airborne' || flight.status === 'diverted') && !flight.actualLanding && !flight.actualArrival;
   const canReadRadar = inFlight || tracked && !!flight.actualTakeoff;
-  const receiverCursor = useRef<{ after?: string; revision?: string }>({});
-  const swimCursor = useRef<{ after?: string; revision?: string }>({});
+  const receiverCursor = useRef<RadarCursor>({});
+  const swimCursor = useRef<RadarCursor>({});
+  const eurocontrolCursor = useRef<RadarCursor>({});
   const providerRevision = useRef<string>(undefined);
   const [receiver, setReceiver] = useState<{ revision?: string; positions: Position[] }>({ positions: [] });
   const [swimPositions, setSWIMPositions] = useState<Position[]>([]);
+  const [eurocontrolPositions, setEurocontrolPositions] = useState<Position[]>([]);
   const [provider, setProvider] = useState<{ revision: string; positions: Position[] }>();
+  const [privateScopeObservedAt, setPrivateScopeObservedAt] = useState<string>();
   const [stream, setStream] = useState<'ready' | 'unavailable' | 'interrupted'>();
   const [checkedAt, setCheckedAt] = useState(0);
   const replacingAircraft = receiver.revision !== undefined && detailRevision !== receiver.revision;
+  const waitingForPrivateScope = privateScopeObservedAt !== undefined && radarAfter(privateScopeObservedAt, flight.observedAt);
   const points = useMemo(() => {
     if (replacingAircraft) return [];
+    const eurocontrol = waitingForPrivateScope ? undefined : eurocontrolPositions;
+    const swim = waitingForPrivateScope ? undefined : swimPositions;
     if (provider && radarAfter(provider.revision, flight.observedAt)) {
       // A newer provider snapshot can correct or remove an earlier fix.
       const localHistory = history?.filter((point) => point.source === 'operator_readsb');
-      return mergeRadarPositions(swimPositions, provider.positions, localHistory, receiver.positions);
+      return mergeRadarPositions(eurocontrol, swim, provider.positions, localHistory, receiver.positions);
     }
-    return mergeRadarPositions(swimPositions, history, receiver.positions);
-  }, [provider, flight.observedAt, history, receiver.positions, swimPositions, replacingAircraft]);
+    return mergeRadarPositions(eurocontrol, swim, history, receiver.positions);
+  }, [provider, flight.observedAt, history, receiver.positions, swimPositions, eurocontrolPositions, replacingAircraft, waitingForPrivateScope]);
 
   useFocusEffect(useCallback(() => {
     if (!canReadRadar) return;
@@ -685,7 +707,8 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
         const revision = knownRevision && radarAfter(knownRevision, flight.observedAt) ? knownRevision : flight.observedAt;
         const knownReceiver = receiverCursor.current;
         const knownSWIM = swimCursor.current;
-        const result = await api.radar(id, knownReceiver.after, revision, knownReceiver.revision, knownSWIM);
+        const knownEurocontrol = eurocontrolCursor.current;
+        const result = await api.radar(id, knownReceiver.after, revision, knownReceiver.revision, knownSWIM, knownEurocontrol);
         if (!focused || !foreground) return;
         setCheckedAt(Date.now());
         if (!result) {
@@ -693,6 +716,8 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
           setStream('unavailable');
           swimCursor.current = {};
           setSWIMPositions([]);
+          eurocontrolCursor.current = {};
+          setEurocontrolPositions([]);
           return;
         }
         setStream('ready');
@@ -712,17 +737,23 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
             revision: receiverRevision,
             positions: mergeRadarPositions(replaceReceiver ? undefined : previous.positions, result.positions),
           }));
-          if (replaceReceiver && detailRevision !== receiverRevision) refreshFlight();
         }
-        const nextSWIMRevision = result.swimRevision;
-        const replaceSWIM = nextSWIMRevision !== knownSWIM.revision;
-        const swimPage = nextSWIMRevision === undefined ? [] : result.swimPositions ?? [];
-        if (replaceSWIM || swimPage.length) {
-          const after = swimPage.length ? result.swimCursor ?? mergeRadarPositions(swimPage).at(-1)?.at : undefined;
-          if (!replaceSWIM && swimPage.length === radarPageSize && after && after !== knownSWIM.after) delay = radarPageInterval;
-          swimCursor.current = { after: replaceSWIM ? after : after ?? knownSWIM.after, revision: nextSWIMRevision };
-          setSWIMPositions((previous) => mergeRadarPositions(replaceSWIM ? undefined : previous, swimPage));
+        const swim = privateRadarUpdate(knownSWIM, result.swimRevision, result.swimCursor, result.swimPositions);
+        if (swim) {
+          swimCursor.current = swim.cursor;
+          setSWIMPositions((previous) => mergeRadarPositions(swim.replace ? undefined : previous, swim.page));
         }
+        const eurocontrol = privateRadarUpdate(knownEurocontrol, result.eurocontrolRevision, result.eurocontrolCursor, result.eurocontrolPositions);
+        if (eurocontrol) {
+          eurocontrolCursor.current = eurocontrol.cursor;
+          setEurocontrolPositions((previous) => mergeRadarPositions(eurocontrol.replace ? undefined : previous, eurocontrol.page));
+        }
+        if (swim?.hasMore || eurocontrol?.hasMore) delay = radarPageInterval;
+        const changedPrivateScope = (swim?.replace && knownSWIM.revision !== undefined && result.swimRevision !== undefined) ||
+          (eurocontrol?.replace && knownEurocontrol.revision !== undefined && result.eurocontrolRevision !== undefined);
+        const refreshPrivateScope = changedPrivateScope && result.providerRevision && radarAfter(result.providerRevision, flight.observedAt);
+        if (refreshPrivateScope) setPrivateScopeObservedAt(result.providerRevision);
+        if ((replaceReceiver && detailRevision !== nextReceiverRevision) || refreshPrivateScope) refreshFlight();
       } catch {
         delay *= 3;
         if (focused && foreground) {

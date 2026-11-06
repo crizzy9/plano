@@ -65,12 +65,16 @@ func main() {
 		}
 		os.Exit(status)
 	}
-	if len(os.Args) > 1 && os.Args[1] == "forward-swim-position" {
+	if len(os.Args) > 1 && (os.Args[1] == "forward-swim-position" || os.Args[1] == "forward-eurocontrol-position") {
 		if len(os.Args) != 2 {
-			fmt.Fprintln(os.Stderr, "usage: plano forward-swim-position")
+			fmt.Fprintf(os.Stderr, "usage: plano %s\n", os.Args[1])
 			os.Exit(relayConfigError)
 		}
-		status, err := forwardSWIMPositionFromEnv(context.Background(), os.Stdin)
+		relay := swimPositionRelay
+		if os.Args[1] == "forward-eurocontrol-position" {
+			relay = eurocontrolPositionRelay
+		}
+		status, err := relay.fromEnv(context.Background(), os.Stdin)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
@@ -118,7 +122,7 @@ func main() {
 	}
 	checkOnly := len(os.Args) == 2 && os.Args[1] == "check-config"
 	if len(os.Args) > 1 && !checkOnly {
-		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples [--early]|forward-email|forward-advisory|forward-atfm-slot|forward-flight-observation|forward-swim-position]")
+		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples [--early]|forward-email|forward-advisory|forward-atfm-slot|forward-flight-observation|forward-swim-position|forward-eurocontrol-position]")
 		os.Exit(2)
 	}
 	if err := run(logger, checkOnly); err != nil {
@@ -212,7 +216,7 @@ func run(logger *slog.Logger, checkOnly bool) error {
 			return fmt.Errorf("load airport transfer rules: %w", err)
 		}
 	}
-	var aeroCallbackKey, advisoryIngressKey, flightObservationKey, swimPositionKey []byte
+	var aeroCallbackKey, advisoryIngressKey, flightObservationKey, swimPositionKey, eurocontrolPositionKey []byte
 	if !demo {
 		aeroCallbackKey, err = secret("", "PLANO_AEROALERTS_KEY_FILE")
 		if err != nil {
@@ -241,6 +245,13 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		}
 		if len(swimPositionKey) != 0 && (bytes.Equal(swimPositionKey, aeroCallbackKey) || bytes.Equal(swimPositionKey, advisoryIngressKey) || bytes.Equal(swimPositionKey, flightObservationKey)) {
 			return errors.New("PLANO_SWIM_POSITION_KEY_FILE must use a distinct key from other aviation callback keys")
+		}
+		eurocontrolPositionKey, err = readWebhookKeyFile(eurocontrolPositionKeyFile)
+		if err != nil {
+			return err
+		}
+		if len(eurocontrolPositionKey) != 0 && (bytes.Equal(eurocontrolPositionKey, aeroCallbackKey) || bytes.Equal(eurocontrolPositionKey, advisoryIngressKey) || bytes.Equal(eurocontrolPositionKey, flightObservationKey) || bytes.Equal(eurocontrolPositionKey, swimPositionKey)) {
+			return errors.New("PLANO_EUROCONTROL_POSITION_KEY_FILE must use a distinct key from other aviation callback keys")
 		}
 	}
 	var flights feeds.FlightSource
@@ -345,6 +356,9 @@ func run(logger *slog.Logger, checkOnly bool) error {
 				if len(swimPositionKey) != 0 && bytes.Equal(swimPositionKey, token) {
 					return errors.New("PLANO_SWIM_POSITION_KEY_FILE must use a distinct key from advisory gateway tokens")
 				}
+				if len(eurocontrolPositionKey) != 0 && bytes.Equal(eurocontrolPositionKey, token) {
+					return errors.New("PLANO_EUROCONTROL_POSITION_KEY_FILE must use a distinct key from advisory gateway tokens")
+				}
 				client, err := feeds.NewAdvisoryGateway(endpoint, string(token), gateway.source, nil)
 				if err != nil {
 					return fmt.Errorf("%s advisory gateway configuration: %w", gateway.source, err)
@@ -432,7 +446,7 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		BookingKey: bookingKey, ReservationSource: reservationSource, TripItSync: tripItSync, ConnectionRules: connections, Weather: weather,
 		HistoricalRisk:  historicalRisk,
 		AeroCallbackKey: aeroCallbackKey, AdvisoryIngressKey: advisoryIngressKey, Demo: demo, Logger: logger,
-		FlightObservationKey: flightObservationKey, SWIMPositionKey: swimPositionKey,
+		FlightObservationKey: flightObservationKey, SWIMPositionKey: swimPositionKey, EurocontrolPositionKey: eurocontrolPositionKey,
 	}
 	server := &http.Server{Addr: net.JoinHostPort(host, port), Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	listener, err := net.Listen("tcp", server.Addr)

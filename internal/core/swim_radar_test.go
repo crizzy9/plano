@@ -24,12 +24,12 @@ func TestSWIMRadarPrivateIndependentPaging(t *testing.T) {
 	if err := storeRadarSamples(ctx, s, []radarSample{{flight, receiver}}); err != nil {
 		t.Fatal(err)
 	}
-	for _, wrong := range []func(*feeds.SWIMPositionReport){
-		func(r *feeds.SWIMPositionReport) { r.ProviderFlightID = "unknown-instance" },
-		func(r *feeds.SWIMPositionReport) { r.OriginICAO = "KOAK" },
-		func(r *feeds.SWIMPositionReport) { r.DestinationICAO = "KJFK" },
-		func(r *feeds.SWIMPositionReport) { r.ScheduledDeparture = r.ScheduledDeparture.Add(time.Nanosecond) },
-		func(r *feeds.SWIMPositionReport) { r.ActualTakeoff = r.ActualTakeoff.Add(time.Nanosecond) },
+	for _, wrong := range []func(*feeds.RadarPositionReport){
+		func(r *feeds.RadarPositionReport) { r.ProviderFlightID = "unknown-instance" },
+		func(r *feeds.RadarPositionReport) { r.OriginICAO = "KOAK" },
+		func(r *feeds.RadarPositionReport) { r.DestinationICAO = "KJFK" },
+		func(r *feeds.RadarPositionReport) { r.ScheduledDeparture = r.ScheduledDeparture.Add(time.Nanosecond) },
+		func(r *feeds.RadarPositionReport) { r.ActualTakeoff = r.ActualTakeoff.Add(time.Nanosecond) },
 	} {
 		mismatch := report
 		wrong(&mismatch)
@@ -172,7 +172,7 @@ func TestSWIMRadarScopeResetAndLanding(t *testing.T) {
 		!landed.SWIMPositions[0].At.Equal(replaced.SWIMPositions[0].At) {
 		t.Fatalf("landing did not preserve the last airborne fix: %+v", landed)
 	}
-	if err := s.Prune(ctx, now.Add(swimRadarRetention+time.Minute)); err != nil {
+	if err := s.Prune(ctx, now.Add(trafficRadarRetention+time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if page := readSWIMRadarFixture(t, s, owner, flight.ID, nil, nil); len(page.SWIMPositions) != 0 {
@@ -202,7 +202,7 @@ func TestSWIMRadarDelayedScopeChangeRejectsErasedFixReplay(t *testing.T) {
 func TestSWIMRadarReadSkipsExpiredFixesBeforePrune(t *testing.T) {
 	s, flight, report, now := swimRadarFixture(t)
 	ctx := t.Context()
-	ago := -(swimRadarRetention + time.Hour)
+	ago := -(trafficRadarRetention + time.Hour)
 	flight.ObservedAt = flight.ObservedAt.Add(ago)
 	flight.ScheduledDeparture = new(flight.ScheduledDeparture.Add(ago))
 	flight.ActualTakeoff = new(flight.ActualTakeoff.Add(ago))
@@ -223,7 +223,7 @@ func TestSWIMRadarReadSkipsExpiredFixesBeforePrune(t *testing.T) {
 	}
 }
 
-func swimRadarFixture(t *testing.T) (*Store, feeds.Flight, feeds.SWIMPositionReport, time.Time) {
+func swimRadarFixture(t *testing.T) (*Store, feeds.Flight, feeds.RadarPositionReport, time.Time) {
 	t.Helper()
 	s, err := Open(filepath.Join(t.TempDir(), "swim-radar.db"))
 	if err != nil {
@@ -236,7 +236,7 @@ func swimRadarFixture(t *testing.T) (*Store, feeds.Flight, feeds.SWIMPositionRep
 		Origin: "SFO", Destination: "EWR", OriginICAO: "KSFO", DestinationICAO: "KEWR", ObservedAt: now.Add(-time.Minute),
 		ScheduledDeparture: new(now.Add(-time.Hour)), ActualTakeoff: new(now.Add(-50 * time.Minute)),
 	}
-	report := feeds.SWIMPositionReport{
+	report := feeds.RadarPositionReport{
 		ProviderFlightID: flight.ID, OriginICAO: flight.OriginICAO, DestinationICAO: flight.DestinationICAO,
 		ScheduledDeparture: *flight.ScheduledDeparture, ActualTakeoff: *flight.ActualTakeoff,
 		Positions: []feeds.Position{{Latitude: 42, Longitude: -96, At: now.Add(-time.Second)}},
@@ -261,7 +261,7 @@ func trackSWIMRadarFixture(t *testing.T, s *Store, id string) string {
 	return owner
 }
 
-func recordSWIMRadarFixture(t *testing.T, s *Store, report feeds.SWIMPositionReport, now time.Time) {
+func recordSWIMRadarFixture(t *testing.T, s *Store, report feeds.RadarPositionReport, now time.Time) {
 	t.Helper()
 	if err := s.RecordSWIMPositions(t.Context(), report, now); err != nil {
 		t.Fatal(err)
@@ -270,7 +270,7 @@ func recordSWIMRadarFixture(t *testing.T, s *Store, report feeds.SWIMPositionRep
 
 func readSWIMRadarFixture(t *testing.T, s *Store, owner, id string, after *time.Time, known *int64) RadarPage {
 	t.Helper()
-	page, err := s.RadarPageWithSWIM(t.Context(), owner, id, nil, nil, nil, nil, 256, 256, after, known)
+	page, err := s.RadarPageWithTraffic(t.Context(), owner, id, nil, nil, nil, nil, 256, 256, &RadarCursor{After: after, Revision: known}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

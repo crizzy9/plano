@@ -20,22 +20,23 @@ import (
 )
 
 type Server struct {
-	Store                *core.Store
-	Source               feeds.FlightSource
-	PublicURL            string
-	EnrollmentCode       string
-	BookingKey           []byte
-	ReservationSource    feeds.ReservationSource
-	TripItSync           *TripItSync
-	Weather              *core.WeatherCache
-	ConnectionRules      *ConnectionRules
-	HistoricalRisk       *historicalrisk.Model
-	Demo                 bool
-	Logger               *slog.Logger
-	AeroCallbackKey      []byte
-	AdvisoryIngressKey   []byte
-	FlightObservationKey []byte
-	SWIMPositionKey      []byte
+	Store                  *core.Store
+	Source                 feeds.FlightSource
+	PublicURL              string
+	EnrollmentCode         string
+	BookingKey             []byte
+	ReservationSource      feeds.ReservationSource
+	TripItSync             *TripItSync
+	Weather                *core.WeatherCache
+	ConnectionRules        *ConnectionRules
+	HistoricalRisk         *historicalrisk.Model
+	Demo                   bool
+	Logger                 *slog.Logger
+	AeroCallbackKey        []byte
+	AdvisoryIngressKey     []byte
+	FlightObservationKey   []byte
+	SWIMPositionKey        []byte
+	EurocontrolPositionKey []byte
 }
 
 type ownerHandler func(http.ResponseWriter, *http.Request, string) error
@@ -130,7 +131,10 @@ func (s Server) Handler() http.Handler {
 		mux.HandleFunc("POST /v1/webhooks/flight-observation", s.flightObservationCallback)
 	}
 	if !s.Demo && len(s.SWIMPositionKey) >= 32 {
-		mux.HandleFunc("POST /v1/webhooks/swim-position", s.swimPositionCallback)
+		mux.HandleFunc("POST /v1/webhooks/swim-position", s.radarPositionCallback(s.SWIMPositionKey, feeds.FAASWIM, s.Store.RecordSWIMPositions))
+	}
+	if !s.Demo && len(s.EurocontrolPositionKey) >= 32 {
+		mux.HandleFunc("POST /v1/webhooks/eurocontrol-position", s.radarPositionCallback(s.EurocontrolPositionKey, feeds.Eurocontrol, s.Store.RecordEurocontrolPositions))
 	}
 	s.registerFriendRoutes(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

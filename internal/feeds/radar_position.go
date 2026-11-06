@@ -10,13 +10,13 @@ import (
 )
 
 const (
-	MaxSWIMPositionBytes  = 16 << 10
-	SWIMPositionFreshness = 5 * time.Minute
+	MaxRadarPositionBytes  = 16 << 10
+	RadarPositionFreshness = 5 * time.Minute
 )
 
-// SWIMPositionReport binds operator-normalized airborne fixes to an exact
+// RadarPositionReport binds operator-normalized airborne fixes to an exact
 // provider instance. The bridge must already have filtered restricted data.
-type SWIMPositionReport struct {
+type RadarPositionReport struct {
 	ProviderFlightID   string
 	OriginICAO         string
 	DestinationICAO    string
@@ -25,15 +25,19 @@ type SWIMPositionReport struct {
 	Positions          []Position
 }
 
-func DecodeSWIMPositionReport(input io.Reader, now time.Time) (SWIMPositionReport, error) {
-	invalid := fmt.Errorf("%w: invalid SWIM position report", ErrInvalidQuery)
-	body, err := io.ReadAll(io.LimitReader(input, MaxSWIMPositionBytes+1))
-	if err != nil || len(body) > MaxSWIMPositionBytes || !utf8.Valid(body) {
-		return SWIMPositionReport{}, invalid
+func DecodeRadarPositionReport(input io.Reader, now time.Time, source string) (RadarPositionReport, error) {
+	invalid := fmt.Errorf("%w: invalid radar position report", ErrInvalidQuery)
+	if source != FAASWIM && source != Eurocontrol {
+		return RadarPositionReport{}, invalid
+	}
+	body, err := io.ReadAll(io.LimitReader(input, MaxRadarPositionBytes+1))
+	if err != nil || len(body) > MaxRadarPositionBytes || !utf8.Valid(body) {
+		return RadarPositionReport{}, invalid
 	}
 	var wire struct {
 		Version            int       `json:"version"`
 		DisplayAllowed     bool      `json:"displayAllowed"`
+		ObservedAirborne   *bool     `json:"observedAirborne"`
 		ProviderFlightID   string    `json:"providerFlightId"`
 		OriginICAO         string    `json:"originICAO"`
 		DestinationICAO    string    `json:"destinationICAO"`
@@ -57,36 +61,39 @@ func DecodeSWIMPositionReport(input io.Reader, now time.Time) (SWIMPositionRepor
 		wire.ScheduledDeparture.Year() < 2000 || wire.ScheduledDeparture.Year() > 2100 ||
 		wire.ActualTakeoff.Year() < 2000 || wire.ActualTakeoff.After(now) ||
 		len(wire.Positions) < 1 || len(wire.Positions) > 32 {
-		return SWIMPositionReport{}, invalid
+		return RadarPositionReport{}, invalid
 	}
-	report := SWIMPositionReport{
+	if wire.ObservedAirborne == nil && source == Eurocontrol || wire.ObservedAirborne != nil && !*wire.ObservedAirborne {
+		return RadarPositionReport{}, invalid
+	}
+	report := RadarPositionReport{
 		ProviderFlightID: wire.ProviderFlightID, OriginICAO: wire.OriginICAO, DestinationICAO: wire.DestinationICAO,
 		ScheduledDeparture: wire.ScheduledDeparture.UTC(), ActualTakeoff: wire.ActualTakeoff.UTC(),
 		Positions: make([]Position, 0, len(wire.Positions)),
 	}
 	var previous time.Time
 	for _, p := range wire.Positions {
-		if p.Latitude == nil || p.Longitude == nil || !swimPositionRange(p.Latitude, -90, 90) || !swimPositionRange(p.Longitude, -180, 180) ||
-			!swimPositionRange(p.AltitudeFeet, -2000, 100000) || !swimPositionRange(p.GroundSpeedKnots, 0, 2500) ||
-			!swimPositionRange(p.VerticalRateFPM, -25000, 25000) || !swimPositionRange(p.Heading, 0, 360) ||
-			p.At.Before(report.ActualTakeoff) || p.At.Before(now.Add(-SWIMPositionFreshness)) || p.At.After(now) || !p.At.After(previous) {
-			return SWIMPositionReport{}, invalid
+		if p.Latitude == nil || p.Longitude == nil || !radarPositionRange(p.Latitude, -90, 90) || !radarPositionRange(p.Longitude, -180, 180) ||
+			!radarPositionRange(p.AltitudeFeet, -2000, 100000) || !radarPositionRange(p.GroundSpeedKnots, 0, 2500) ||
+			!radarPositionRange(p.VerticalRateFPM, -25000, 25000) || !radarPositionRange(p.Heading, 0, 360) ||
+			p.At.Before(report.ActualTakeoff) || p.At.Before(now.Add(-RadarPositionFreshness)) || p.At.After(now) || !p.At.After(previous) {
+			return RadarPositionReport{}, invalid
 		}
 		report.Positions = append(report.Positions, Position{
 			Latitude: *p.Latitude, Longitude: *p.Longitude, AltitudeFeet: p.AltitudeFeet,
 			GroundSpeedKnots: p.GroundSpeedKnots, VerticalRateFPM: p.VerticalRateFPM, Heading: p.Heading,
-			At: p.At.UTC(), Source: FAASWIM, Kind: "radar",
+			At: p.At.UTC(), Source: source, Kind: "radar",
 		})
 		previous = p.At
 	}
 	return report, nil
 }
 
-func swimPositionRange(value *float64, minimum, maximum float64) bool {
+func radarPositionRange(value *float64, minimum, maximum float64) bool {
 	return value == nil || *value >= minimum && *value <= maximum
 }
 
-func (r SWIMPositionReport) MatchesFlight(f Flight) bool {
+func (r RadarPositionReport) MatchesFlight(f Flight) bool {
 	return f.OriginICAO == r.OriginICAO && f.DestinationICAO == r.DestinationICAO &&
 		f.ScheduledDeparture != nil && f.ScheduledDeparture.Equal(r.ScheduledDeparture) &&
 		f.ActualTakeoff != nil && f.ActualTakeoff.Equal(r.ActualTakeoff) &&

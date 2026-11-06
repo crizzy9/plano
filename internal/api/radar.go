@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -19,11 +20,6 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 	if (provider != "" || query.Get("providerAfter") != "" || query.Get("providerRevision") != "" || query.Get("receiverRevision") != "") && provider != "1" {
 		return errInvalid
 	}
-	swim := query.Get("swim")
-	if swim != "" && (swim != "1" || provider != "1") || swim == "" && (query.Has("swimAfter") || query.Has("swimRevision")) {
-		return errInvalid
-	}
-	withSWIM := swim == "1" && !s.Demo && len(s.SWIMPositionKey) >= 32
 	after, err := parseRadarCursor(query.Get("after"))
 	if err != nil {
 		return err
@@ -40,13 +36,19 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 	if err != nil {
 		return err
 	}
-	swimAfter, err := parseRadarCursor(query.Get("swimAfter"))
+	swim, err := parseTrafficRadarCursor(query, provider, "swim")
 	if err != nil {
 		return err
 	}
-	swimRevision, err := parseReceiverRevision(query.Get("swimRevision"))
+	eurocontrol, err := parseTrafficRadarCursor(query, provider, "eurocontrol")
 	if err != nil {
 		return err
+	}
+	if s.Demo || len(s.SWIMPositionKey) < 32 {
+		swim = nil
+	}
+	if s.Demo || len(s.EurocontrolPositionKey) < 32 {
+		eurocontrol = nil
 	}
 	const pageSize = 256
 	result := make(map[string]any)
@@ -57,12 +59,7 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 			// A replacement can fill the client's entire visible history.
 			providerLimit = 512
 		}
-		var page core.RadarPage
-		if withSWIM {
-			page, err = s.Store.RadarPageWithSWIM(r.Context(), owner, id, after, receiverRevision, providerAfter, providerRevision, pageSize, providerLimit, swimAfter, swimRevision)
-		} else {
-			page, err = s.Store.RadarPage(r.Context(), owner, id, after, receiverRevision, providerAfter, providerRevision, pageSize, providerLimit)
-		}
+		page, err := s.Store.RadarPageWithTraffic(r.Context(), owner, id, after, receiverRevision, providerAfter, providerRevision, pageSize, providerLimit, swim, eurocontrol)
 		if err != nil {
 			return err
 		}
@@ -77,14 +74,11 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 		if len(page.ProviderPositions) > 0 {
 			result["providerCursor"] = page.ProviderPositions[len(page.ProviderPositions)-1].At.UTC().Format(time.RFC3339Nano)
 		}
-		if withSWIM {
-			result["swimPositions"] = page.SWIMPositions
-			if page.SWIMRevision != nil {
-				result["swimRevision"] = strconv.FormatInt(*page.SWIMRevision, 10)
-			}
-			if len(page.SWIMPositions) > 0 {
-				result["swimCursor"] = page.SWIMPositions[len(page.SWIMPositions)-1].At.UTC().Format(time.RFC3339Nano)
-			}
+		if swim != nil {
+			addTrafficRadarPage(result, "swim", page.SWIMPositions, page.SWIMRevision)
+		}
+		if eurocontrol != nil {
+			addTrafficRadarPage(result, "eurocontrol", page.EurocontrolPositions, page.EurocontrolRevision)
 		}
 	} else {
 		positions, err = s.Store.RadarPositions(r.Context(), owner, id, after, pageSize)
@@ -98,6 +92,41 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 	}
 	respond(w, 200, result)
 	return nil
+}
+
+func parseTrafficRadarCursor(query url.Values, provider, name string) (*core.RadarCursor, error) {
+	switch query.Get(name) {
+	case "":
+		if query.Has(name+"After") || query.Has(name+"Revision") {
+			return nil, errInvalid
+		}
+		return nil, nil
+	case "1":
+		if provider != "1" {
+			return nil, errInvalid
+		}
+	default:
+		return nil, errInvalid
+	}
+	after, err := parseRadarCursor(query.Get(name + "After"))
+	if err != nil {
+		return nil, err
+	}
+	revision, err := parseReceiverRevision(query.Get(name + "Revision"))
+	if err != nil {
+		return nil, err
+	}
+	return &core.RadarCursor{After: after, Revision: revision}, nil
+}
+
+func addTrafficRadarPage(result map[string]any, name string, positions []feeds.Position, revision *int64) {
+	result[name+"Positions"] = positions
+	if revision != nil {
+		result[name+"Revision"] = strconv.FormatInt(*revision, 10)
+	}
+	if len(positions) > 0 {
+		result[name+"Cursor"] = positions[len(positions)-1].At.UTC().Format(time.RFC3339Nano)
+	}
 }
 
 func parseReceiverRevision(value string) (*int64, error) {

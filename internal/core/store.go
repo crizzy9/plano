@@ -657,7 +657,7 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 			return err
 		}
 	}
-	if err := retireSWIMRadarScope(ctx, tx, prior, flight, previousProvider, provider); err != nil {
+	if err := retireTrafficRadarScope(ctx, tx, prior, flight, previousProvider, provider); err != nil {
 		return err
 	}
 	if previousProvider != "" || prior.AeroProviderID() != "" {

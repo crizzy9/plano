@@ -221,6 +221,11 @@ func TestCheckConfigSWIMPositionKey(t *testing.T) {
 	if err := run(slog.New(slog.DiscardHandler), true); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv(eurocontrolPositionKeyFile, path)
+	if err := run(slog.New(slog.DiscardHandler), true); err == nil || !strings.Contains(err.Error(), eurocontrolPositionKeyFile+" must use a distinct key") {
+		t.Fatalf("shared position callback key, got %v", err)
+	}
+	t.Setenv(eurocontrolPositionKeyFile, "")
 	t.Setenv(flightObservationKeyFile, path)
 	if err := run(slog.New(slog.DiscardHandler), true); err == nil || !strings.Contains(err.Error(), swimPositionKeyFile+" must use a distinct key") {
 		t.Fatalf("shared aviation callback key, got %v", err)
@@ -232,7 +237,7 @@ func isolateStartupEnvironment(t *testing.T) {
 	// Preflight must only see fixture settings, including on an operator host.
 	for _, name := range []string{
 		"PLANO_PUBLIC_URL", "PLANO_REQUIRE_ENROLLMENT", "PLANO_ENROLLMENT_CODE_FILE", "PLANO_BOOKING_KEY_FILE", "PLANO_AIRPORT_TRANSFERS_FILE",
-		"PLANO_AEROALERTS_KEY_FILE", "PLANO_ADVISORY_INGRESS_KEY_FILE", flightObservationKeyFile, swimPositionKeyFile, "PLANO_AEROAPI_KEY_FILE",
+		"PLANO_AEROALERTS_KEY_FILE", "PLANO_ADVISORY_INGRESS_KEY_FILE", flightObservationKeyFile, swimPositionKeyFile, eurocontrolPositionKeyFile, "PLANO_AEROAPI_KEY_FILE",
 		"PLANO_METAR", "PLANO_AERO_SUBSCRIPTIONS", "PLANO_AERO_SUBSCRIPTIONS_INBOUND", "PLANO_AERO_SUBSCRIPTIONS_MAX", "PLANO_AERO_SUBSCRIPTIONS_INTERVAL",
 		"PLANO_TRIPIT_SYNC_KEY_FILE", "PLANO_RESERVATION_GATEWAY_URL",
 		"PLANO_FAA_NAS", "PLANO_SWIM_URL", "PLANO_EUROCONTROL_URL", "PLANO_ADSB_URL", "PLANO_FAA_REGISTRY_FILE",

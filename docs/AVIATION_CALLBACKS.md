@@ -116,6 +116,39 @@ or flight identity change clears the earlier SWIM track. Plano retains up to
 2,048 SWIM fixes per flight for seven days in private radar storage separate
 from flight status, notifications, offline detail, Friends and public pickup links.
 
+## EUROCONTROL radar positions
+
+The EUROCONTROL FlightManagement service documents airborne position in
+per-flight retrieval. EUROCONTROL also documents correlated airborne
+surveillance reports from air navigation service providers. Use an authorized
+bridge with access to actual airborne fixes and their original UTC track times.
+Forward only positions with a verified flight-instance match and permission
+to display the data to every enrolled installation tracking the flight.
+[FlightManagement service](https://eur-registry.swim.aero/service-description/flightmanagement) ·
+[Flight Progress Messages, §2.2.2.2.5](https://www.eurocontrol.int/sites/default/files/2026-04/eurocontrol-flight-progress-msg-update-1-3100.pdf#page=57) ·
+[NM data rules](https://www.eurocontrol.int/info/agreements-rules-and-policies)
+
+Mount a dedicated random key of at least 32 bytes, separate from other
+aviation signing keys and advisory gateway tokens. Use the [FAA radar JSON
+envelope](#faa-swim-radar-positions) with an additional top-level field
+`"observedAirborne": true`. The bridge sets this only for observed airborne
+fixes. Exclude estimated waypoints and modeled EFD trajectories. The bridge
+handles upstream credentials, decoding, observation-time resolution and
+correlation to the AeroAPI instance. Plano accepts normalized JSON at
+`POST /v1/webhooks/eurocontrol-position` using the same timestamp and HMAC
+headers as [signed flight snapshots](#signed-flight-snapshots).
+
+```sh
+export PLANO_EUROCONTROL_POSITION_RELAY_URL=https://plano.example.net/v1/webhooks/eurocontrol-position
+export PLANO_EUROCONTROL_POSITION_KEY_FILE=/run/secrets/plano-eurocontrol-position-key
+plano forward-eurocontrol-position < positions.json
+```
+
+The server uses `PLANO_EUROCONTROL_POSITION_KEY_FILE` to enable the live
+relay and private radar stream. Each source keeps an independent cursor and
+up to 2,048 fixes per flight for seven days. On the private map, EUROCONTROL
+positions carry their own source label.
+
 ## FAA SWIM and EUROCONTROL bridges
 
 Set `PLANO_ADVISORY_INGRESS_KEY_FILE` to a different mounted random secret of at least 32 bytes. Authorized operator bridges can send normalized observations to `POST /v1/webhooks/advisory` as `application/json`.

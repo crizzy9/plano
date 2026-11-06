@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS radar_receiver_revisions (
   flight_id TEXT PRIMARY KEY REFERENCES flights(id) ON DELETE CASCADE,
   revision_ns INTEGER NOT NULL, last_tail TEXT NOT NULL
 );
-` + rotationRadarSchema + swimRadarSchema
+` + rotationRadarSchema + trafficRadarSchema
 
 const radarFlightStatus = `json_extract(snapshot,'$.status') IN ('airborne','diverted')
 AND json_extract(snapshot,'$.actualTakeoff') IS NOT NULL
@@ -52,12 +52,14 @@ type radarReceiverMatch struct {
 }
 
 type RadarPage struct {
-	Positions         []feeds.Position
-	ReceiverRevision  *int64
-	ProviderPositions []feeds.Position
-	ProviderRevision  *time.Time
-	SWIMPositions     []feeds.Position
-	SWIMRevision      *int64
+	Positions            []feeds.Position
+	ReceiverRevision     *int64
+	ProviderPositions    []feeds.Position
+	ProviderRevision     *time.Time
+	SWIMPositions        []feeds.Position
+	SWIMRevision         *int64
+	EurocontrolPositions []feeds.Position
+	EurocontrolRevision  *int64
 }
 
 func resetRadarReceiver(ctx context.Context, tx *sql.Tx, flight feeds.Flight, lastTail string) error {
@@ -339,16 +341,12 @@ WHERE f.id=?`, knownNS, owner, id).Scan(&revision, &telemetry)
 // RadarPage reads both feeds from one snapshot so a receiver reset cannot
 // pair fixes from the previous aircraft with a newer provider revision.
 func (s *Store) RadarPage(ctx context.Context, owner, id string, receiverAfter *time.Time, receiverKnown *int64, providerAfter, providerKnown *time.Time, receiverLimit, providerLimit int) (RadarPage, error) {
-	return s.radarPage(ctx, owner, id, receiverAfter, receiverKnown, providerAfter, providerKnown, receiverLimit, providerLimit, nil)
+	return s.RadarPageWithTraffic(ctx, owner, id, receiverAfter, receiverKnown, providerAfter, providerKnown, receiverLimit, providerLimit, nil, nil)
 }
 
-// RadarPageWithSWIM reads the private SWIM stream alongside the existing
-// feeds, with a separate cursor and generation in the same snapshot.
-func (s *Store) RadarPageWithSWIM(ctx context.Context, owner, id string, receiverAfter *time.Time, receiverKnown *int64, providerAfter, providerKnown *time.Time, receiverLimit, providerLimit int, swimAfter *time.Time, swimKnown *int64) (RadarPage, error) {
-	return s.radarPage(ctx, owner, id, receiverAfter, receiverKnown, providerAfter, providerKnown, receiverLimit, providerLimit, &swimRadarCursor{after: swimAfter, known: swimKnown})
-}
-
-func (s *Store) radarPage(ctx context.Context, owner, id string, receiverAfter *time.Time, receiverKnown *int64, providerAfter, providerKnown *time.Time, receiverLimit, providerLimit int, swim *swimRadarCursor) (RadarPage, error) {
+// RadarPageWithTraffic also reads each requested surveillance stream, using
+// a separate cursor and revision for each in the same database snapshot.
+func (s *Store) RadarPageWithTraffic(ctx context.Context, owner, id string, receiverAfter *time.Time, receiverKnown *int64, providerAfter, providerKnown *time.Time, receiverLimit, providerLimit int, swim, eurocontrol *RadarCursor) (RadarPage, error) {
 	if receiverLimit < 1 || receiverLimit > 2000 || providerLimit < 1 || providerLimit > 2000 {
 		return RadarPage{}, errors.New("invalid radar page size")
 	}
@@ -372,6 +370,9 @@ LEFT JOIN radar_receiver_revisions r ON r.flight_id=f.id WHERE f.id=?`, owner, i
 		if swim != nil {
 			page.SWIMPositions = []feeds.Position{}
 		}
+		if eurocontrol != nil {
+			page.EurocontrolPositions = []feeds.Position{}
+		}
 		return page, nil
 	}
 	page := RadarPage{ReceiverRevision: &revision.Int64}
@@ -387,7 +388,13 @@ LEFT JOIN radar_receiver_revisions r ON r.flight_id=f.id WHERE f.id=?`, owner, i
 		return RadarPage{}, err
 	}
 	if swim != nil {
-		page.SWIMPositions, page.SWIMRevision, err = readSWIMRadarPositions(ctx, tx, id, *swim, receiverLimit)
+		page.SWIMPositions, page.SWIMRevision, err = readTrafficRadarPositions(ctx, tx, id, *swim, receiverLimit, swimRadarStream)
+		if err != nil {
+			return RadarPage{}, err
+		}
+	}
+	if eurocontrol != nil {
+		page.EurocontrolPositions, page.EurocontrolRevision, err = readTrafficRadarPositions(ctx, tx, id, *eurocontrol, receiverLimit, eurocontrolRadarStream)
 		if err != nil {
 			return RadarPage{}, err
 		}
