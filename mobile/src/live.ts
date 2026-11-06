@@ -1,7 +1,7 @@
 import { requireOptionalNativeModule } from 'expo';
 import { Platform } from 'react-native';
 import type { Flight, PlanoAPI } from './api';
-import { arrival, departure } from './flight';
+import { arrival } from './flight';
 
 export type AndroidPushGeneration = {
   generation: string;
@@ -101,11 +101,12 @@ export async function startLiveActivity(api: PlanoAPI, flight: Flight, seat: str
   if (!native?.start) throw new Error('Live Activities require a native Plano build on iOS.');
   await configureLiveActivities(api);
   const epoch = (value: string | undefined) => Math.floor(Date.parse(value ?? '') / 1000) || 0;
+  const progressStart = flight.actualDeparture || flight.actualTakeoff || flight.estimatedDeparture || flight.scheduledDeparture;
   await native.start(JSON.stringify({
     flightId: flight.id, flightNumber: flight.number, status: flight.status, origin: flight.origin,
     destination: flight.destination, departureGate: flight.departureGate, arrivalGate: flight.arrivalGate,
     departureTerminal: flight.departureTerminal, arrivalTerminal: flight.arrivalTerminal,
-    departureEpoch: epoch(departure(flight)), arrivalEpoch: epoch(arrival(flight)),
+    departureEpoch: epoch(progressStart), arrivalEpoch: epoch(arrival(flight)),
     observedEpoch: epoch(flight.observedAt), seat: seat.trim().toUpperCase() || undefined,
   }));
 }

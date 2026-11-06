@@ -331,7 +331,7 @@ const (
 
 func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time) push.Message {
 	state := &push.LiveState{FlightID: flight.ID, FlightNumber: flight.Number, Status: flight.Status, Origin: flight.Origin, Destination: flight.Destination, DepartureGate: flight.DepartureGate, ArrivalGate: flight.ArrivalGate, DepartureTerminal: flight.DepartureTerminal, ArrivalTerminal: flight.ArrivalTerminal, Seat: seat, ObservedEpoch: flight.ObservedAt.Unix()}
-	if dep := effectiveDeparture(flight); dep != nil {
+	if dep := firstTime(flight.ActualDeparture, flight.ActualTakeoff, flight.EstimatedDeparture, flight.ScheduledDeparture); dep != nil {
 		state.DepartureEpoch = dep.Unix()
 	}
 	if arr := effectiveArrival(flight); arr != nil {

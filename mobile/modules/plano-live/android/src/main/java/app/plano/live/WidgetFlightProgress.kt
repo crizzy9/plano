@@ -8,7 +8,7 @@ private const val MIN_PROGRESS_REFRESH_MILLIS = 60_000L
 internal enum class WidgetFlightPhase(val priority: Int, val arrivalCountdown: Boolean = false) {
   SCHEDULED(0),
   BOARDING(1),
-  TAXI_OUT(2),
+  TAXI_OUT(2, true),
   LANDED(3),
   AIRBORNE(4, true),
   DIVERTED(4, true);
@@ -69,17 +69,21 @@ internal data class WidgetFlightProgress(
 
   fun isFresh(now: Long) = observedAt <= now + CLOCK_SKEW_MILLIS && expiresAt > now
 
+  private val hasValidFlightInterval: Boolean
+    get() = departureAt > 0 && arrivalAt > departureAt && arrivalAt - departureAt <= MAX_COUNTDOWN_MILLIS
+
   fun percent(now: Long): Int? = when {
     phase == WidgetFlightPhase.LANDED -> 100
     !phase.arrivalCountdown -> 0
-    departureAt <= 0 || arrivalAt <= departureAt -> null
+    !hasValidFlightInterval -> null
     else -> ((now - departureAt).toDouble() / (arrivalAt - departureAt) * 100).toInt().coerceIn(0, 99)
   }
 
   fun countdownTarget(now: Long): Long? {
     if (phase == WidgetFlightPhase.LANDED) return null
+    if (phase.arrivalCountdown && departureAt > 0 && !hasValidFlightInterval) return null
     val target = if (phase.arrivalCountdown) arrivalAt else departureAt
-    return target.takeIf { it > now && it - now <= MAX_COUNTDOWN_MILLIS }
+    return target.takeIf { it > 0 && it > now && it - now <= MAX_COUNTDOWN_MILLIS }
   }
 
   fun displayDeadline(now: Long): Long = minOf(expiresAt, countdownTarget(now) ?: expiresAt)

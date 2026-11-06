@@ -15,6 +15,32 @@ fun main() {
   check(later.countdownTarget(departure) == later.departureAt)
   check(later.displayDeadline(departure) == later.departureAt)
 
+  val taxiing = checkNotNull(WidgetFlightProgress.fromEpochs("taxi_out", now / 1000,
+    (now - 300_000L) / 1000, (now + 900_000L) / 1000))
+  check(taxiing.phase == WidgetFlightPhase.TAXI_OUT)
+  check(taxiing.countdownTarget(now) == taxiing.arrivalAt)
+  check(taxiing.percent(now) == 25)
+  check(taxiing.displayDeadline(now) == taxiing.arrivalAt)
+  check(taxiing.nextRefreshAt(now) == now + 60_000L)
+  check(taxiing.countdownTarget(taxiing.arrivalAt) == null)
+  check(taxiing.percent(taxiing.arrivalAt) == 99)
+  check(taxiing.copy(arrivalAt = now + 3_600_000L).displayDeadline(now) == taxiing.expiresAt)
+  check(selectWidgetFlight(listOf(taxiing), taxiing.expiresAt) == null)
+
+  val noDeparture = taxiing.copy(departureAt = 0)
+  check(noDeparture.countdownTarget(now) == taxiing.arrivalAt)
+  check(noDeparture.percent(now) == null)
+  for (invalid in listOf(
+    taxiing.copy(arrivalAt = 0),
+    taxiing.copy(arrivalAt = -1),
+    taxiing.copy(departureAt = now + 600_000L, arrivalAt = now + 300_000L),
+    taxiing.copy(departureAt = now - 48 * 60 * 60 * 1000L),
+  )) {
+    check(invalid.countdownTarget(now) == null)
+    check(invalid.percent(now) == null)
+    check(invalid.nextRefreshAt(now) == taxiing.expiresAt)
+  }
+
   val airborne = WidgetFlightProgress(WidgetFlightPhase.AIRBORNE, now, now - 900_000L, now + 1_800_000L)
   check(airborne.countdownTarget(now) == airborne.arrivalAt)
   check(airborne.displayDeadline(now) == airborne.expiresAt)

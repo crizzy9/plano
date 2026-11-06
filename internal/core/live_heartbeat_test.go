@@ -9,6 +9,24 @@ import (
 	"github.com/crizzy9/plano/internal/push"
 )
 
+func TestLiveProgressStartsFromObservedDeparture(t *testing.T) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	planned, gateOut, takeoff, arrival := now.Add(-2*time.Hour), now.Add(-25*time.Minute), now.Add(-10*time.Minute), now.Add(2*time.Hour)
+	flight := feeds.Flight{ID: "live-flight", Number: "UA123", Status: "airborne", ObservedAt: now,
+		ScheduledDeparture: &planned, ActualDeparture: &gateOut, ActualTakeoff: &takeoff, EstimatedArrival: &arrival}
+	for _, want := range []time.Time{gateOut, takeoff, planned} {
+		state := liveMessage(flight, push.LiveUpdate, "", now).State
+		if state.DepartureEpoch != want.Unix() || state.ArrivalEpoch != arrival.Unix() {
+			t.Fatalf("progress time window %d to %d, want %d to %d", state.DepartureEpoch, state.ArrivalEpoch, want.Unix(), arrival.Unix())
+		}
+		if flight.ActualDeparture != nil {
+			flight.ActualDeparture = nil
+		} else {
+			flight.ActualTakeoff = nil
+		}
+	}
+}
+
 func TestLiveHeartbeatWithFiveSecondObservations(t *testing.T) {
 	for _, platform := range []string{"ios", "android"} {
 		t.Run(platform, func(t *testing.T) {
