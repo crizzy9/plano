@@ -1,0 +1,16 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'app.plano.live'
+version = '0.1.0'
+
+android {
+  namespace 'app.plano.live'
+}
+
+dependencies {
+  implementation project(':expo-notifications')
+  implementation 'com.google.firebase:firebase-messaging:25.0.1'
+}

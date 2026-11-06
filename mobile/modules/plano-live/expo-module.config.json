@@ -1,0 +1,10 @@
+{
+  "platforms": ["ios", "android"],
+  "apple": {
+    "modules": ["PlanoLiveModule"],
+    "appDelegateSubscribers": ["PlanoLiveAppDelegateSubscriber"]
+  },
+  "android": {
+    "modules": ["app.plano.live.PlanoLiveModule"]
+  }
+}

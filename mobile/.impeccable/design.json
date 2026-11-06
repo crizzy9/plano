@@ -1,0 +1,12 @@
+{
+  "color": {
+    "ground": {"light": "#F5F7F4", "dark": "#111B19"},
+    "surface": {"light": "#FFFFFF", "dark": "#182724"},
+    "text": {"light": "#132522", "dark": "#EDF6F1"},
+    "secondaryText": {"light": "#435C56", "dark": "#B2C8C0"},
+    "tint": {"light": "#006952", "dark": "#6CE0B8"},
+    "divider": {"light": "#CFDBD4", "dark": "#3D524B"}
+  },
+  "spacing": [4, 8, 12, 16, 24, 32],
+  "minimumTarget": 48
+}

@@ -1,0 +1,11 @@
+/node_modules/
+/.expo/
+/.expo-shared/
+/android/
+/ios/
+/dist/
+/.impeccable/questions/
+/.impeccable/review/
+google-services.json
+*.xcuserstate
+.env.local
