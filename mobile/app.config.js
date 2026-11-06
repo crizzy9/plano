@@ -20,7 +20,7 @@ module.exports = ({ config }) => ({
   plugins: [
     'expo-secure-store',
     'expo-background-task',
-    ['expo-calendar', { calendarPermission: 'Allow Plano to find flight numbers and departure dates in calendar titles.' }],
+    ['expo-calendar', { calendarPermission: 'Allow Plano to find flight numbers and departure times in your calendar.' }],
     'expo-notifications',
     '@bacons/apple-targets',
     './plugins/withPlanoMessaging',

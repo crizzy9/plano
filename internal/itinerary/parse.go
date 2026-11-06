@@ -24,7 +24,7 @@ type Itinerary struct {
 }
 
 var (
-	flightPattern = regexp.MustCompile(`\b([A-Z][A-Z0-9]{1,2})[ -]?([0-9]{1,5}[A-Z]?)\b`)
+	flightPattern = regexp.MustCompile(`\b([A-Z][A-Z0-9]{1,2}|[0-9][A-Z])[ -]?([0-9]{1,5}[A-Z]?)\b`)
 	isoPattern    = regexp.MustCompile(`\b[0-9]{4}-[0-9]{2}-[0-9]{2}\b`)
 	wordDate      = regexp.MustCompile(`(?i)\b(?:[0-9]{1,2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* [0-9]{1,2}),? [0-9]{4}\b`)
 	booking       = regexp.MustCompile(`(?im)\b(?:booking reference|record locator|reservation code|PNR|confirmation(?: number| code|[ \t]*#))\s*[:#-]?\s*([a-z0-9]{6})\b`)

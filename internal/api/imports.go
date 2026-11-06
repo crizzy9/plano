@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -71,32 +72,60 @@ func (s Server) resolveItinerary(ctx context.Context, parsed itinerary.Itinerary
 }
 
 func (s Server) lookupLeg(ctx context.Context, leg itinerary.Leg) ([]feeds.Flight, error) {
-	flights, err := s.lookup(ctx, leg.Number, leg.Date)
-	if err != nil || leg.UTCDeparture.IsZero() {
-		return flights, err
+	if leg.UTCDeparture.IsZero() {
+		return s.lookup(ctx, leg.Number, leg.Date)
 	}
-	matching := func(flights []feeds.Flight) []feeds.Flight {
-		var found []feeds.Flight
+	utc := leg.UTCDeparture.UTC()
+	dates := []string{utc.Format(time.DateOnly), utc.AddDate(0, 0, -1).Format(time.DateOnly), utc.AddDate(0, 0, 1).Format(time.DateOnly)}
+	primary := leg.Date
+	if !slices.Contains(dates, primary) {
+		// An airport-local date can differ from the UTC date by at most one day.
+		primary = dates[0]
+	}
+	var exact, nearby []feeds.Flight
+	seenExact, seenNearby := make(map[string]bool), make(map[string]bool)
+	addMatches := func(flights []feeds.Flight) {
 		for _, f := range flights {
-			if f.ScheduledDeparture != nil && f.ScheduledDeparture.Sub(leg.UTCDeparture).Abs() <= 45*time.Minute {
-				found = append(found, f)
+			if f.ScheduledDeparture == nil {
+				continue
+			}
+			difference := f.ScheduledDeparture.Sub(utc).Abs()
+			switch {
+			case difference == 0 && !seenExact[f.ID]:
+				seenExact[f.ID] = true
+				exact = append(exact, f)
+			case difference > 0 && difference <= 45*time.Minute && !seenNearby[f.ID]:
+				seenNearby[f.ID] = true
+				nearby = append(nearby, f)
 			}
 		}
-		return found
 	}
-	if candidates := matching(flights); len(candidates) != 0 {
-		return candidates, nil
+	flights, err := s.lookup(ctx, leg.Number, primary)
+	if err != nil {
+		return nil, err
 	}
-	// The UTC calendar date can be a day apart from the departure airport's date.
-	var candidates []feeds.Flight
-	for _, offset := range []int{-1, 1} {
-		adjacent, err := s.lookup(ctx, leg.Number, leg.UTCDeparture.AddDate(0, 0, offset).Format(time.DateOnly))
+	addMatches(flights)
+	if len(exact) != 0 {
+		return exact, nil
+	}
+	// A nearby flight on the source date can mask an exact match on an adjacent date.
+	for _, date := range dates {
+		if date == primary {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		flights, err := s.lookup(ctx, leg.Number, date)
 		if err != nil {
 			return nil, err
 		}
-		candidates = append(candidates, matching(adjacent)...)
+		addMatches(flights)
 	}
-	return candidates, nil
+	if len(exact) != 0 {
+		return exact, nil
+	}
+	return nearby, nil
 }
 
 func (s Server) emailRelay(w http.ResponseWriter, r *http.Request, owner string) error {

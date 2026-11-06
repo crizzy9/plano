@@ -3,7 +3,7 @@ import * as SecureStore from 'expo-secure-store';
 import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 import {
-  clearCalendarBackground, createAPI, loadServer, prepareCalendarBackground, serverStorageKey,
+  clearCalendarBackground, createAPI, loadServer, prepareCalendarBackground, serverStorageKey, type PlanoAPI,
 } from './api';
 import { dateKey } from './flight';
 
@@ -19,9 +19,16 @@ const codePattern = /\b(?:[A-Z]{2,3}|[A-Z][0-9]|[0-9][A-Z])[ -]?\d{1,4}[A-Z]?\b/
 const routePattern = /\b[A-Z]{3}\b\s*(?:→|[-–]|to)\s*\b[A-Z]{3}\b/i;
 
 type CalendarEvent = {
-  title: string;
+  title?: string | null;
   startDate: string | Date;
   timeZone?: string;
+  allDay?: boolean;
+};
+
+type CalendarFlight = {
+  day: string;
+  code: string;
+  utcTime?: string;
 };
 
 type SyncLog = {
@@ -47,50 +54,104 @@ function calendarDate(departure: Date, timeZone?: string) {
   return dateKey(departure);
 }
 
-export function selectCalendarFlights(events: CalendarEvent[], from: Date, until: Date, limit: number, automatic: boolean) {
-  const candidates = new Map<string, { day: string; code: string; timestamp: number }>();
+function flightKey({ day, code, utcTime }: CalendarFlight) {
+  return utcTime ? `${day} ${code} ${utcTime}` : `${day} ${code}`;
+}
+
+function flightLabel({ day, code }: CalendarFlight) {
+  return `${code} · ${day}`;
+}
+
+export function selectCalendarFlights(events: CalendarEvent[], from: Date, until: Date, limit: number, automatic: boolean, includeTimes = true) {
+  const candidates = new Map<string, { flight: CalendarFlight; timestamp: number }>();
+  const firstDay = dateKey(from);
+  const lastDay = dateKey(until);
   for (const event of events) {
-    const title = event.title.trim();
+    const title = event.title?.trim() ?? '';
     const match = title.match(codePattern);
     if (!match) continue;
     if (automatic && title !== match[0] && !/\bflight\b/i.test(title) && !routePattern.test(title)) continue;
     const departure = new Date(event.startDate);
     const timestamp = departure.getTime();
-    if (!Number.isFinite(timestamp) || departure < from || departure > until) continue;
-    const day = calendarDate(departure, event.timeZone);
+    if (!Number.isFinite(timestamp)) continue;
     const code = match[0].replace(/[ -]/g, '');
-    const pair = `${day} ${code}`;
-    const existing = candidates.get(pair);
-    if (!existing || timestamp < existing.timestamp) candidates.set(pair, { day, code, timestamp });
+    const iso = departure.toISOString();
+    const absolute = typeof event.startDate !== 'string' || /T.*(?:Z|[+-]\d{2}:?\d{2})$/.test(event.startDate);
+    const timed = !event.allDay && absolute;
+    if (timed && (departure < from || departure > until)) continue;
+    let flight: CalendarFlight;
+    if (timed && includeTimes) {
+      flight = { day: iso.slice(0, 10), code, utcTime: iso.slice(11, 19).replaceAll(':', '') };
+    } else {
+      const day = !absolute && typeof event.startDate === 'string' && /^\d{4}-\d{2}-\d{2}(?:T|$)/.test(event.startDate)
+        ? event.startDate.slice(0, 10)
+        : event.allDay && Platform.OS === 'android' ? iso.slice(0, 10) : calendarDate(departure, event.timeZone);
+      if (!timed && (day < firstDay || day > lastDay)) continue;
+      flight = { day, code };
+    }
+    const key = flightKey(flight);
+    if (!candidates.has(key)) candidates.set(key, { flight, timestamp });
   }
-  const ordered = [...candidates.values()].sort((a, b) => a.timestamp - b.timestamp);
-  const byDate = new Map<string, string[]>();
-  for (const { day, code } of ordered.slice(0, limit)) {
-    const codes = byDate.get(day) ?? [];
-    codes.push(code);
-    byDate.set(day, codes);
-  }
-  return byDate;
+  return [...candidates.values()].sort((a, b) => a.timestamp - b.timestamp).slice(0, limit).map(({ flight }) => flight);
 }
 
-async function readCalendarFlights(prompt: boolean) {
-  const byDate = new Map<string, string[]>();
-  if (!native) return byDate;
+export function calendarImportBatches(flights: CalendarFlight[], size: number) {
+  const batches: CalendarFlight[][] = [];
+  let batch: CalendarFlight[] = [];
+  let codes = new Set<string>();
+  for (const flight of flights) {
+    // A timed event and a date-only event can resolve to the same flight across UTC midnight.
+    if (batch.length === size || codes.has(flight.code)) {
+      batches.push(batch);
+      batch = [];
+      codes = new Set();
+    }
+    batch.push(flight);
+    codes.add(flight.code);
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
+export function importCalendarBatch(api: PlanoAPI, flights: CalendarFlight[]) {
+  const calendar = ['BEGIN:VCALENDAR', 'VERSION:2.0'];
+  for (const { day, code, utcTime } of flights) {
+    const date = day.replaceAll('-', '');
+    const start = utcTime ? `DTSTART:${date}T${utcTime}Z` : `DTSTART;VALUE=DATE:${date}`;
+    calendar.push('BEGIN:VEVENT', start, `SUMMARY:${code}`, 'END:VEVENT');
+  }
+  calendar.push('END:VCALENDAR');
+  return api.importFlights('calendar', calendar.join('\r\n'));
+}
+
+async function readCalendarFlights(prompt: boolean, includeTimes = true) {
+  if (!native) return [];
   const calendar = await import('expo-calendar/legacy');
   const permission = prompt
     ? await calendar.requestCalendarPermissionsAsync()
     : await calendar.getCalendarPermissionsAsync();
   if (!permission.granted) {
     if (prompt) throw new Error('Allow calendar access in device settings to import flight dates.');
-    return byDate;
+    return [];
   }
   const calendars = await calendar.getCalendarsAsync(calendar.EntityTypes.EVENT);
-  if (!calendars.length) return byDate;
+  if (!calendars.length) return [];
   const from = new Date();
   const until = new Date(from);
   until.setDate(until.getDate() + lookaheadDays);
-  const events = await calendar.getEventsAsync(calendars.map(({ id }) => id), from, until);
-  return selectCalendarFlights(events, from, until, prompt ? 12 : maxCandidates, !prompt);
+  const queryFrom = new Date(from);
+  const queryUntil = new Date(until);
+  queryFrom.setHours(0, 0, 0, 0);
+  queryUntil.setHours(24, 0, 0, 0);
+  if (Platform.OS === 'android') {
+    // Android stores all-day events at UTC midnight and filters both endpoints.
+    const utcFrom = Date.parse(`${dateKey(from)}T00:00:00Z`);
+    const utcUntil = Date.parse(`${dateKey(until)}T00:00:00Z`) + 86_400_000;
+    queryFrom.setTime(Math.min(queryFrom.getTime(), utcFrom));
+    queryUntil.setTime(Math.max(queryUntil.getTime(), utcUntil));
+  }
+  const events = await calendar.getEventsAsync(calendars.map(({ id }) => id), queryFrom, queryUntil);
+  return selectCalendarFlights(events, from, until, prompt ? 12 : maxCandidates, !prompt, includeTimes);
 }
 
 export function calendarFlights() {
@@ -100,9 +161,15 @@ export function calendarFlights() {
 const optInKey = (server: string) => serverStorageKey('calendar-sync', server);
 const syncLogKey = (server: string) => serverStorageKey('calendar-imports', server);
 
+async function calendarSyncMode(server: string) {
+  if (!native || !server) return undefined;
+  const mode = await SecureStore.getItemAsync(optInKey(server));
+  if (mode !== 'on' && mode !== 'timed') return undefined;
+  return await createAPI(server, { access: 'background' }).hasSavedInstallationToken() ? mode : undefined;
+}
+
 export async function calendarSyncEnabled(server: string) {
-  if (!native || !server || await SecureStore.getItemAsync(optInKey(server)) !== 'on') return false;
-  return createAPI(server, { access: 'background' }).hasSavedInstallationToken();
+  return (await calendarSyncMode(server)) !== undefined;
 }
 
 function reconcileSchedule() {
@@ -136,7 +203,7 @@ export async function setCalendarSyncEnabled(server: string, enabled: boolean) {
   if (!permission.granted) throw new Error('Allow calendar access in device settings to enable sync.');
   await prepareCalendarBackground(server);
   try {
-    await SecureStore.setItemAsync(optInKey(server), 'on', secureOptions);
+    await SecureStore.setItemAsync(optInKey(server), 'timed', secureOptions);
     await reconcileSchedule();
   } catch (cause) {
     await SecureStore.deleteItemAsync(optInKey(server));
@@ -153,7 +220,7 @@ async function readLog(server: string): Promise<SyncLog> {
       const log = JSON.parse(stored) as Partial<SyncLog>;
       if (typeof log.attemptedAt === 'number' && Array.isArray(log.imported)) {
         const imported = log.imported.filter((pair) => typeof pair === 'string'
-          && /^\d{4}-\d{2}-\d{2} [A-Z0-9]{3,8}$/.test(pair));
+          && /^\d{4}-\d{2}-\d{2} [A-Z0-9]{3,8}(?: \d{6})?$/.test(pair));
         const nextBatch = Number.isSafeInteger(log.nextBatch) && (log.nextBatch ?? 0) >= 0 ? log.nextBatch ?? 0 : 0;
         return { attemptedAt: log.attemptedAt, nextBatch, imported: imported.slice(-maxCandidates) };
       }
@@ -170,14 +237,16 @@ async function storeLog(server: string, attemptedAt: number, nextBatch: number, 
   await SecureStore.setItemAsync(syncLogKey(server), JSON.stringify(log), secureOptions);
 }
 
-async function activeConsent(server: string) {
-  return (await loadServer({ savedOnly: true })) === server && await calendarSyncEnabled(server);
+async function activeConsent(server: string, mode: 'on' | 'timed') {
+  return (await loadServer({ savedOnly: true })) === server && await calendarSyncMode(server) === mode;
 }
 
 async function runSync() {
   if (!native) return;
   const server = await loadServer({ savedOnly: true });
-  if (!server || !await calendarSyncEnabled(server)) return;
+  if (!server) return;
+  const mode = await calendarSyncMode(server);
+  if (!mode) return;
   const now = Date.now();
   const previous = await readLog(server);
   if (now >= previous.attemptedAt && now - previous.attemptedAt < cadenceMinutes * 60_000) return;
@@ -185,15 +254,10 @@ async function runSync() {
   yesterday.setDate(yesterday.getDate() - 1);
   const recent = dateKey(yesterday);
   const imported = new Set(previous.imported.filter((pair) => pair.slice(0, 10) >= recent));
-  const candidates = await readCalendarFlights(false);
-  const groups: { day: string; codes: string[] }[] = [];
-  for (const [day, codes] of candidates) {
-    const pending = codes.filter((code) => !imported.has(`${day} ${code}`));
-    for (let offset = 0; offset < pending.length; offset += maxFlightsPerBatch) {
-      groups.push({ day, codes: pending.slice(offset, offset + maxFlightsPerBatch) });
-    }
-  }
-  if (!await activeConsent(server)) return;
+  // Existing background consent covered flight numbers and dates.
+  const candidates = await readCalendarFlights(false, mode === 'timed');
+  const groups = calendarImportBatches(candidates.filter((flight) => !imported.has(flightKey(flight))), maxFlightsPerBatch);
+  if (!await activeConsent(server, mode)) return;
   if (!groups.length) {
     await storeLog(server, now, 0, imported);
     return;
@@ -201,7 +265,7 @@ async function runSync() {
 
   const start = previous.nextBatch % groups.length;
   for (let offset = 0; offset < Math.min(maxBatches, groups.length); offset += 1) {
-    if (!await activeConsent(server)) return;
+    if (!await activeConsent(server, mode)) return;
     const current = (start + offset) % groups.length;
     const group = groups[current];
     if (!group) continue;
@@ -209,14 +273,14 @@ async function runSync() {
     // Move past an unresolved or failed batch on the next run so it cannot
     // prevent new flights from syncing.
     await storeLog(server, now, next, imported);
-    const result = await createAPI(server, { access: 'background' }).importFlights('calendar', group.codes.join('\n'), group.day);
-    const missed = new Set(result.unmatched.map((entry) => entry.split(' · ')[0]));
-    const matched = group.codes.filter((code) => !missed.has(code));
+    const result = await importCalendarBatch(createAPI(server, { access: 'background' }), group);
+    const missed = new Set(result.unmatched);
+    const matched = group.filter((flight) => !missed.has(flightLabel(flight)));
     // Multiple designators may resolve to one flight. Store a batch only when
     // the reply accounts for every submitted pair.
     if (result.flights.length !== matched.length) continue;
-    if (!await activeConsent(server)) return;
-    for (const code of matched) imported.add(`${group.day} ${code}`);
+    if (!await activeConsent(server, mode)) return;
+    for (const flight of matched) imported.add(flightKey(flight));
     await storeLog(server, now, next, imported);
   }
 }

@@ -777,7 +777,7 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
     importFlights: (source: ImportSource, text: string, date?: string) =>
       authenticated<ImportResult>('/v1/import', {
         method: 'POST', body: JSON.stringify({ source, text, date }),
-      }),
+      }, 22_000),
     async revokeDevices(binding?: string) {
       if (binding !== undefined && !androidBindingPattern.test(binding)) throw new Error('Invalid Android alert binding.');
       const token = await savedToken();

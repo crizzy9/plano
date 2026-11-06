@@ -1,8 +1,8 @@
 # Import flights into Plano
 
-Open **Tools → Import flights**. Plano imports only uniquely matched flight instances, up to eight distinct dated legs per request. Split larger pasted itineraries into separate requests. A pasted confirmation can contain separate dates for each leg. iCalendar files use the event's start date. When an event provides a UTC start, Plano matches the scheduled departure instant and checks adjacent origin dates if necessary. The parser skips cancelled and recurring calendar entries. [iCalendar specification](https://www.rfc-editor.org/rfc/rfc5545.html)
+Open **Tools → Import flights**. Plano imports only uniquely matched flight instances, up to eight distinct dated legs per request. Split larger pasted itineraries into separate requests. A pasted confirmation can contain separate dates for each leg. For iCalendar files, a UTC start or recognized IANA time zone lets Plano match the scheduled departure instant and check adjacent origin dates when needed. All-day events, floating times, and unrecognized time zones use the event date. The parser skips cancelled and recurring calendar entries. [iCalendar specification](https://www.rfc-editor.org/rfc/rfc5545.html)
 
-The mobile calendar integration requests permission before reading event titles and departure times. The optional background task sends only recognized flight designators and dates to the selected self-host. iOS and Android decide when the task can run. The import screen can also run a calendar scan on demand.
+The mobile calendar integration requests permission before reading event titles and departure times. On-demand and optional background scans send only recognized flight designators with departure dates or times to the selected self-host. Background sync enabled in an earlier release keeps sending dates until you turn it off and back on. iOS and Android decide when the background task can run.
 
 ## Forward confirmation emails
 

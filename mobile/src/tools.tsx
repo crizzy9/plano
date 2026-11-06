@@ -4,7 +4,7 @@ import type { Connection, ConnectionSuggestion, Flight, ImportResult, ImportSour
 import { errorText, formatDay, validDate } from './flight';
 import { Page, useRemote, type Routes, type Screen } from './screens';
 import { usePalette } from './theme';
-import { calendarFlights, calendarSyncEnabled, setCalendarSyncEnabled } from './calendar-sync';
+import { calendarFlights, calendarImportBatches, calendarSyncEnabled, importCalendarBatch, setCalendarSyncEnabled } from './calendar-sync';
 import { PassportCard } from './passport-card';
 import { PassportMaps } from './passport-maps';
 import { TripItSync } from './tripit-sync';
@@ -77,19 +77,17 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
     try {
       if (fromCalendar) {
         const entries = await calendarFlights();
-        if (entries.size === 0) {
+        if (entries.length === 0) {
           setError('No flight numbers found in your calendar titles for the next 30 days.');
           return;
         }
         const flights = new Map<string, Flight>();
         const unmatched: string[] = [];
-        for (const [day, codes] of entries) {
-          for (let offset = 0; offset < codes.length; offset += 8) {
-            const response = await api.importFlights('calendar', codes.slice(offset, offset + 8).join('\n'), day);
-            for (const flight of response.flights) flights.set(flight.id, flight);
-            unmatched.push(...response.unmatched);
-            setResult({ flights: [...flights.values()], unmatched: [...unmatched] });
-          }
+        for (const batch of calendarImportBatches(entries, 8)) {
+          const response = await importCalendarBatch(api, batch);
+          for (const flight of response.flights) flights.set(flight.id, flight);
+          unmatched.push(...response.unmatched);
+          setResult({ flights: [...flights.values()], unmatched: [...unmatched] });
         }
       } else {
         setResult(await api.importFlights(source, text, date || undefined));
@@ -124,7 +122,7 @@ export function ImportFlights({ api, navigation }: Screen<'Import'> & { api: Pla
       {Platform.OS !== 'web' && (
         <>
           <Action label="Read upcoming calendar flights" icon="download" onPress={() => submit(true)} busy={pending} />
-          <Body>Plano checks calendar titles on this device and sends matching flight numbers and dates to your server.</Body>
+          <Body>Plano checks calendar titles on this device and sends matching flight numbers and departure dates or times to your server.</Body>
           <Action label={calendarEnabled ? 'Turn off automatic calendar sync' : 'Turn on automatic calendar sync'}
             secondary disabled={pending || !api.server} onPress={() => void runImport(async () => {
               const next = !calendarEnabled;

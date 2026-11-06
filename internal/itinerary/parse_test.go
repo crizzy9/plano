@@ -49,9 +49,87 @@ func TestCalendarUsesEachEventDateAndSkipsCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Leg{{Number: "UA123", Date: "2026-12-07"}, {Number: "UA456", Date: "2026-12-09", UTCDeparture: time.Date(2026, 12, 9, 2, 30, 0, 0, time.UTC)}}
+	want := []Leg{
+		{Number: "UA123", Date: "2026-12-07", UTCDeparture: time.Date(2026, 12, 8, 2, 0, 0, 0, time.UTC)},
+		{Number: "UA456", Date: "2026-12-09", UTCDeparture: time.Date(2026, 12, 9, 2, 30, 0, 0, time.UTC)},
+	}
 	if !reflect.DeepEqual(it.Legs, want) {
 		t.Fatalf("legs %#v", it.Legs)
+	}
+}
+
+func TestCalendarDepartureWithTZID(t *testing.T) {
+	tests := []struct {
+		name, start, date, departure string
+	}{
+		{"quoted parameters", `DTSTART;X-NOTE="stop:;gate";tzid="Asia/Tokyo":20261207T030000`, "2026-12-07", "2026-12-06T18:00:00Z"},
+		{"fall back west", "DTSTART;TZID=America/New_York:20071104T013000", "2007-11-04", "2007-11-04T05:30:00Z"},
+		{"spring forward west", "DTSTART;TZID=America/New_York:20070311T023000", "2007-03-11", "2007-03-11T07:30:00Z"},
+		{"fall back east", "DTSTART;TZID=Australia/Sydney:20260405T023000", "2026-04-05", "2026-04-04T15:30:00Z"},
+		{"spring forward east", "DTSTART;TZID=Australia/Sydney:20261004T023000", "2026-10-04", "2026-10-03T16:30:00Z"},
+		{"skipped day", "DTSTART;TZID=Pacific/Apia:20111230T120000", "2011-12-30", "2011-12-30T22:00:00Z"},
+		{"all day", "DTSTART;VALUE=DATE:20261207", "2026-12-07", ""},
+		{"floating", "DTSTART:20261207T180000", "2026-12-07", ""},
+		{"unrecognized zone", `DTSTART;TZID="Pacific Standard Time":20261207T180000`, "2026-12-07", ""},
+		{"host local zone", "DTSTART;TZID=Local:20261207T180000", "2026-12-07", ""},
+		{"host local file", "DTSTART;TZID=localtime:20261207T180000", "2026-12-07", ""},
+		{"path traversal", "DTSTART;TZID=../etc/localtime:20261207T180000", "2026-12-07", ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ics := "BEGIN:VCALENDAR\nBEGIN:VEVENT\n" + test.start + "\nSUMMARY:UA123\nEND:VEVENT\nEND:VCALENDAR\n"
+			want := Leg{Number: "UA123", Date: test.date}
+			if test.departure != "" {
+				var err error
+				want.UTCDeparture, err = time.Parse(time.RFC3339, test.departure)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := Parse(ics, "")
+			if err != nil || !reflect.DeepEqual(got.Legs, []Leg{want}) {
+				t.Fatalf("legs = %#v, error = %v, want %#v", got.Legs, err, want)
+			}
+		})
+	}
+}
+
+func TestCalendarBookingComesFromFlightEvent(t *testing.T) {
+	other := "BEGIN:VEVENT\nDTSTART:20261207T180000Z\nSUMMARY:Hotel check-in\nDESCRIPTION:Booking reference: ABC12D\nEND:VEVENT\n"
+	flight := "BEGIN:VEVENT\nDTSTART:20261207T200000Z\nSUMMARY:Flight UA123\n"
+	for _, test := range []struct{ name, events, code string }{
+		{"unrelated booking ignored", other + flight + "END:VEVENT\n", ""},
+		{"flight booking preserved", other + flight + "DESCRIPTION:Booking reference: XYZ12B\nEND:VEVENT\n", "XYZ12B"},
+		{"duplicate flight booking disagreement", flight + "DESCRIPTION:Booking reference: ABC12D\nEND:VEVENT\n" +
+			flight + "DESCRIPTION:Booking reference: XYZ12B\nEND:VEVENT\n", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := Parse("BEGIN:VCALENDAR\n"+test.events+"END:VCALENDAR\n", "")
+			if err != nil || len(got.Legs) != 1 || got.Legs[0].Number != "UA123" || got.BookingCode != test.code {
+				t.Fatalf("itinerary = %#v, error = %v, want UA123 with booking %q", got, err, test.code)
+			}
+		})
+	}
+}
+
+func TestCalendarIgnoresAlarmProperties(t *testing.T) {
+	alarm := "BEGIN:VALARM\nTRIGGER:-PT30M\nACTION:EMAIL\nATTENDEE:mailto:traveler@example.test\n" +
+		"SUMMARY:Flight UA999\nDESCRIPTION:Booking reference: XYZ12B\nEND:VALARM\n"
+	ics := "BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART:20261207T180000Z\nSUMMARY:Flight UA123\n" +
+		"DESCRIPTION:Booking reference: ABC12D\n" + alarm + "END:VEVENT\n" +
+		"BEGIN:VEVENT\nDTSTART:20261208T180000Z\nSUMMARY:Meeting\n" + alarm + "END:VEVENT\nEND:VCALENDAR\n"
+	got, err := Parse(ics, "")
+	want := []Leg{{Number: "UA123", Date: "2026-12-07", UTCDeparture: time.Date(2026, 12, 7, 18, 0, 0, 0, time.UTC)}}
+	if err != nil || !reflect.DeepEqual(got.Legs, want) || got.BookingCode != "ABC12D" {
+		t.Fatalf("itinerary = %#v, error = %v, want the flight and booking from the event", got, err)
+	}
+}
+
+func TestPlainImportsDigitFirstCarrier(t *testing.T) {
+	got, err := Parse("Flight 6E 123A", "2026-12-07")
+	want := []Leg{{Number: "6E123A", Date: "2026-12-07"}}
+	if err != nil || !reflect.DeepEqual(got.Legs, want) {
+		t.Fatalf("legs = %#v, error = %v, want %#v", got.Legs, err, want)
 	}
 }
 

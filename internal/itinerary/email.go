@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -43,6 +44,8 @@ func Email(raw []byte) (Itinerary, error) {
 	for _, leg := range result.Legs {
 		seen[leg] = true
 	}
+	timed := make(map[Leg]bool)
+	var attachmentLocator string
 	for _, value := range parts.calendars {
 		extra, err := calendar(value, MaxFlights, "")
 		if err != nil {
@@ -50,14 +53,22 @@ func Email(raw []byte) (Itinerary, error) {
 		}
 		result.Truncated = result.Truncated || extra.Truncated
 		for _, leg := range extra.Legs {
+			if !leg.UTCDeparture.IsZero() {
+				timed[Leg{Number: leg.Number, Date: leg.Date}] = true
+			}
 			if !seen[leg] {
 				result.Legs = append(result.Legs, leg)
 				seen[leg] = true
 			}
 		}
-		if result.BookingCode == "" && len(parts.calendars) == 1 && len(result.Legs) == 1 {
-			result.BookingCode = extra.BookingCode
+		if len(parts.calendars) == 1 {
+			attachmentLocator = extra.BookingCode
 		}
+	}
+	// An exact start supersedes the same designator and date in the email body.
+	result.Legs = slices.DeleteFunc(result.Legs, func(leg Leg) bool { return timed[leg] })
+	if result.BookingCode == "" && len(result.Legs) == 1 {
+		result.BookingCode = attachmentLocator
 	}
 	return limitItinerary(result, MaxFlights), nil
 }
