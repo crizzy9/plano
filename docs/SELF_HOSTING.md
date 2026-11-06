@@ -455,6 +455,10 @@ foreground. Once the server receives it, earlier iOS registrations are retired
 and late requests at or below the cutoff are ignored. Registrations made after
 re-enabling alerts use newer revisions.
 
+An untrack request clears local live progress only for the alert session
+that initiated it. If you switch servers or restart alerts before the
+request returns, the new session keeps its own progress.
+
 Plano requests APNs priority 10 for Live Activity phase, gate, and terminal
 changes. ETA-only updates and routine refreshes use priority 5. A routine
 refresh leaves an outstanding important update and its retry schedule in
@@ -464,6 +468,10 @@ place. APNs and the device control actual delivery.
 The provider may keep reporting the planned destination after a diversion.
 During a diversion, both apps show the diversion status and hide arrival
 timing, progress, gate, and terminal details.
+
+The departure window controls new remote live progress start requests. Existing
+surfaces keep receiving updates if a delay moves the flight outside that
+window or the departure time becomes unknown.
 
 iOS state alerts for the same installation, flight, and category share an APNs
 collapse ID. A newer gate or carousel revision waits for any in-flight request

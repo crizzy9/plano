@@ -51,6 +51,11 @@ class PlanoLiveModule : Module() {
       Unit
     }
 
+    AsyncFunction("stopLiveActivityInSession") { origin: String, binding: String, flightId: String ->
+      appContext.reactContext?.let { AndroidPushSession.stopInSession(it, origin, binding, flightId) }
+      Unit
+    }
+
     AsyncFunction("clear") {
       appContext.reactContext?.let { AndroidPushSession.clear(it) }
       Unit

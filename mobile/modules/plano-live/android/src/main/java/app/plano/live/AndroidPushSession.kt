@@ -82,14 +82,14 @@ internal object AndroidPushSession {
 
   @Synchronized
   fun resolveWidgetFlight(context: Context, origin: String, key: String): String? {
-    val current = activeWidgetSession(context, origin) ?: return null
+    val current = activeSession(context, origin) ?: return null
     return PlanoFlightWidget.resolveTap(context, current.generation, key, current.hiddenWidgetKeys())
   }
 
   @Synchronized
   fun widgetFlightPinned(context: Context, origin: String, flightId: String): Boolean? {
     if (!validNotificationFlightId(flightId)) return null
-    val current = activeWidgetSession(context, origin) ?: return null
+    val current = activeSession(context, origin) ?: return null
     if (current.hasRecentStop(flightId)) return null
     return PlanoFlightWidget.isPinned(context, current.generation, flightId, current.hiddenWidgetKeys())
   }
@@ -97,17 +97,23 @@ internal object AndroidPushSession {
   @Synchronized
   fun setWidgetFlightPinned(context: Context, origin: String, flightId: String, pinned: Boolean): Boolean {
     if (!validNotificationFlightId(flightId)) return false
-    val current = activeWidgetSession(context, origin) ?: return false
+    val current = activeSession(context, origin) ?: return false
     if (pinned && current.hasRecentStop(flightId)) return false
     return PlanoFlightWidget.setPinned(context, current.generation, flightId, pinned, current.hiddenWidgetKeys())
   }
 
-  private fun activeWidgetSession(context: Context, origin: String): State? =
+  private fun activeSession(context: Context, origin: String): State? =
     state(context).takeIf { it.enabled && origin.isNotEmpty() && it.origin == origin }
 
   private fun State.hasRecentStop(flightId: String): Boolean {
     val stoppedAt = order[hashPushIdentity(flightId)]?.stoppedAt ?: return false
     return stoppedAt != 0L && stoppedAt >= System.currentTimeMillis() - ORDER_TTL_MILLIS
+  }
+
+  @Synchronized
+  fun stopInSession(context: Context, origin: String, binding: String, flightId: String) {
+    if (!validNotificationFlightId(flightId) || activeSession(context, origin)?.generation != binding) return
+    stop(context, flightId)
   }
 
   @Synchronized

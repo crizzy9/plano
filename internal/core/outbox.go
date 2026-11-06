@@ -414,10 +414,17 @@ func importantLiveChange(before, after *push.LiveState) bool {
 func enqueueLive(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight, remapped bool) error {
 	now := flight.ObservedAt
 	end := finished(flight)
+	canStart := true
 	if flightBeforeDeparture(flight) {
 		departure := effectiveDeparture(flight)
-		if departure == nil || departure.After(now.Add(time.Hour)) || !departure.After(now.Add(-2*time.Hour)) {
-			return nil
+		canStart = departure != nil && !departure.After(now.Add(time.Hour)) && departure.After(now.Add(-2*time.Hour))
+	}
+	if !canStart {
+		// Avoid scanning the device audience for untracked schedule results.
+		var tracked bool
+		err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tracked WHERE flight_id=?)`, flight.ID).Scan(&tracked)
+		if err != nil || !tracked {
+			return err
 		}
 	}
 	type audience struct {
@@ -430,6 +437,8 @@ func enqueueLive(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight, re
 	// Live pushes expire at a fixed offset from enqueue time. Unlike due (retry
 	// time) and the APNs wire timestamp, expiry preserves that offset.
 	recentExpiry := now.Add(liveFreshness - liveHeartbeatInterval)
+	// Android records a start when it queues it. Outside the start window,
+	// wait for that job to settle before treating the recipient as active.
 	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.platform,d.kind,t.seat,l.device_id IS NOT NULL, q.device_id IS NOT NULL,
 recent.message, COALESCE(recent.done=0,0)
 FROM devices d JOIN tracked t ON t.owner=d.owner
@@ -443,7 +452,11 @@ ORDER BY o.id DESC LIMIT 1)
 WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='live_start' AND NOT EXISTS (
   SELECT 1 FROM devices u LEFT JOIN device_bindings ub ON ub.device_id=u.id
   WHERE u.owner=d.owner AND u.kind='live_update' AND u.flight_id=t.flight_id AND COALESCE(ub.binding,'')=COALESCE(b.binding,'')
-)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, remapped, now.UnixNano(), flight.ID)
+)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))
+AND (? OR d.platform<>'android' OR NOT EXISTS(
+  SELECT 1 FROM outbox queued WHERE queued.device_id=d.id AND queued.flight_id=t.flight_id
+  AND queued.done=0 AND json_extract(queued.message,'$.Kind')='start'
+))`, remapped, now.UnixNano(), flight.ID, canStart)
 	if err != nil {
 		return err
 	}
@@ -478,6 +491,11 @@ WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='l
 			kind = push.LiveEnd
 		case a.platform == "android" && !a.started:
 			kind = push.LiveStart
+		}
+		// An active surface still needs updates when a delay moves the
+		// flight outside the window for new starts.
+		if kind == push.LiveStart && !canStart {
+			continue
 		}
 		msg := liveMessage(flight, kind, a.seat, now)
 		if kind == push.LiveUpdate {

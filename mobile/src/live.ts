@@ -14,7 +14,8 @@ export type RetiredAndroidPush = { origin: string; binding: string };
 type NativeLive = {
   configure?: (server: string, token: string) => Promise<void>;
   start?: (state: string) => Promise<void>;
-  stop: (flightId: string) => Promise<void>;
+  iosLiveActivityBinding?: (origin: string) => Promise<string | null>;
+  stopLiveActivityInSession?: (origin: string, binding: string, flightId: string) => Promise<void>;
   clear: () => Promise<void>;
   selectAndroidPushOrigin?: (origin: string) => Promise<RetiredAndroidPush | null>;
   androidPushStatus?: (origin: string) => Promise<AndroidPushGeneration | null>;
@@ -109,8 +110,17 @@ export async function clearLiveActivities() {
   await native?.clear();
 }
 
-export async function stopLiveActivity(flightId: string) {
-  await native?.stop(flightId);
+export async function captureLiveProgressSession(origin: string) {
+  if (!native?.stopLiveActivityInSession) return null;
+  if (Platform.OS === 'android') {
+    const status = await androidPushStatus(origin);
+    return status?.enabled ? status.generation : null;
+  }
+  return await native.iosLiveActivityBinding?.(origin) ?? null;
+}
+
+export async function stopLiveActivityInSession(origin: string, binding: string, flightId: string) {
+  await native?.stopLiveActivityInSession?.(origin, binding, flightId);
 }
 
 export async function startLiveActivity(api: PlanoAPI, flight: Flight, seat: string) {

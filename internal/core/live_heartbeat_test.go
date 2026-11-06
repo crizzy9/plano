@@ -240,6 +240,112 @@ func TestLiveEligibilityWithoutGateDeparture(t *testing.T) {
 	}
 }
 
+func TestLiveUpdatesContinueOutsideDepartureStartWindow(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(filepath.Join(t.TempDir(), "live-start-window.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC().Truncate(time.Second)
+	scheduled := now.Add(30 * time.Minute)
+	flight := feeds.Flight{ID: "delayed-flight", Number: "UA123", Origin: "SFO", Destination: "LHR",
+		Status: "scheduled", DepartureGate: "A1", ScheduledDeparture: &scheduled}
+	observe := func(offset time.Duration) []deliveryJob {
+		t.Helper()
+		flight.ObservedAt = now.Add(offset)
+		if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		return liveJobsAt(t, store, flight.ObservedAt)
+	}
+	observe(0)
+	activeOwner, waitingOwner := slotInstallation(t, store), slotInstallation(t, store)
+	for _, owner := range []string{activeOwner, waitingOwner} {
+		if err := store.Track(ctx, owner, flight.ID, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	register := func(owner string, at time.Time, devices ...Device) {
+		t.Helper()
+		for _, d := range devices {
+			if err := store.Register(ctx, owner, d, at); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	register(activeOwner, now,
+		Device{Platform: "ios", Kind: "live_update", Token: "ios-active", FlightID: flight.ID},
+		Device{Platform: "android", Kind: "alert", Token: "android-active"},
+	)
+	if jobs := liveJobsAt(t, store, now); len(jobs) != 1 || jobs[0].message.Kind != push.LiveUpdate || jobs[0].target.Token != "ios-active" {
+		t.Fatalf("expected iOS activity's initial update, got %+v", jobs)
+	}
+	if jobs := observe(time.Second); len(jobs) != 1 || jobs[0].message.Kind != push.LiveStart || jobs[0].target.Token != "android-active" {
+		t.Fatalf("expected Android activity to start inside the window, got %+v", jobs)
+	}
+	pendingOwner := slotInstallation(t, store)
+	if err := store.Track(ctx, pendingOwner, flight.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	register(pendingOwner, now.Add(time.Second), Device{Platform: "android", Kind: "alert", Token: "android-start-pending"})
+	flight.ObservedAt = now.Add(1500 * time.Millisecond)
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := store.claimForPlatform(ctx, flight.ObservedAt, 16, "android")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pending deliveryJob
+	for _, job := range jobs {
+		if job.target.Token == "android-start-pending" && job.message.Kind == push.LiveStart {
+			pending = job
+		} else if err := store.resolve(ctx, job, nil, flight.ObservedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if pending.id == 0 {
+		t.Fatal("expected an unresolved Android start")
+	}
+	register(waitingOwner, now.Add(time.Second),
+		Device{Platform: "ios", Kind: "live_start", Token: "ios-waiting"},
+		Device{Platform: "android", Kind: "alert", Token: "android-waiting"},
+	)
+
+	checkActive := func(jobs []deliveryJob, kind push.Kind, departureEpoch int64) {
+		t.Helper()
+		want := map[string]string{"ios": "ios-active", "android": "android-active"}
+		if len(jobs) != len(want) {
+			t.Fatalf("expected %d active live jobs, got %+v", len(want), jobs)
+		}
+		for _, job := range jobs {
+			platform := job.target.Platform
+			state := job.message.State
+			if want[platform] != job.target.Token || job.message.Kind != kind || state == nil ||
+				state.DepartureEpoch != departureEpoch || state.DepartureGate != flight.DepartureGate ||
+				job.message.APNsImmediateLiveUpdate != (platform == "ios" && kind == push.LiveUpdate) ||
+				job.message.AndroidLiveHeartbeat {
+				t.Fatalf("unexpected live job for %s: %+v, state %+v", platform, job, state)
+			}
+			delete(want, platform)
+		}
+	}
+	delayed := now.Add(3 * time.Hour)
+	flight.EstimatedDeparture, flight.DepartureGate = &delayed, "B2"
+	checkActive(observe(2*time.Second), push.LiveUpdate, delayed.Unix())
+	if err := store.resolve(ctx, pending, &push.DeliveryError{Code: "terminal fixture"}, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if jobs := liveJobsAt(t, store, now.Add(2500*time.Millisecond)); len(jobs) != 0 {
+		t.Fatalf("an update could start progress after the pending start failed: %+v", jobs)
+	}
+	flight.ScheduledDeparture, flight.EstimatedDeparture, flight.DepartureGate = nil, nil, "C3"
+	checkActive(observe(3*time.Second), push.LiveUpdate, 0)
+	flight.Status = "cancelled"
+	checkActive(observe(4*time.Second), push.LiveEnd, 0)
+}
+
 func TestLiveTokenRegistrationKeepsCachedObservationStale(t *testing.T) {
 	ctx := t.Context()
 	store, err := Open(filepath.Join(t.TempDir(), "stale-activity.db"))

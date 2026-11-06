@@ -13,7 +13,7 @@ import { PickupLinks } from './pickup-links';
 import { changeFlightAlerts, flightAlertsEnabled, startIOSFlightActivity } from './alerts';
 import {
   androidWidgetDetailsEnabled, androidWidgetFlightPinned, canCustomizeAndroidWidget, canPinAndroidWidgetFlight,
-  canStartLiveActivity, setAndroidWidgetDetailsEnabled, setAndroidWidgetFlightPinned, stopLiveActivity,
+  canStartLiveActivity, setAndroidWidgetDetailsEnabled, setAndroidWidgetFlightPinned,
 } from './live';
 import { Action, Body, ErrorMessage, FlightRow, FlightStrip, Heading, Input, Loading, layout } from './ui';
 import { RadarMetricChart, RadarRouteMap } from './radar-visuals';
@@ -295,7 +295,6 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
           ...old, tracked: false,
           detail: { ...old.detail, telemetry: undefined, weather: undefined, weatherForecasts: undefined, notices: undefined, atfmSlots: undefined },
         }));
-        await stopLiveActivity(id);
       } else {
         await api.track(id, seat.trim().toUpperCase() || undefined);
         refresh();

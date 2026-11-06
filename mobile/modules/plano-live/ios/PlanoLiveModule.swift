@@ -32,6 +32,14 @@ public final class PlanoLiveModule: Module {
     AsyncFunction("stop") { (flightId: String) async in
       await PlanoActivityCoordinator.shared.stop(flightId: flightId)
     }
+
+    AsyncFunction("iosLiveActivityBinding") { (origin: String) async -> String? in
+      await PlanoActivityCoordinator.shared.liveBinding(origin: origin)
+    }
+
+    AsyncFunction("stopLiveActivityInSession") { (origin: String, binding: String, flightId: String) async in
+      await PlanoActivityCoordinator.shared.stop(flightId: flightId, origin: origin, binding: binding)
+    }
   }
 }
 
@@ -351,6 +359,19 @@ private final class PlanoActivityCoordinator {
 
   func stop(flightId: String) async {
     for activity in Activity<PlanoActivityAttributes>.activities where activity.attributes.flightId == flightId {
+      await endActivity(activity)
+    }
+  }
+
+  func liveBinding(origin: String) -> String? {
+    guard registration?.server == origin else { return nil }
+    return registration?.binding
+  }
+
+  func stop(flightId: String, origin: String, binding: String) async {
+    guard liveBinding(origin: origin) == binding else { return }
+    for activity in Activity<PlanoActivityAttributes>.activities
+        where activity.attributes.flightId == flightId && activity.attributes.activityBinding == binding {
       await endActivity(activity)
     }
   }

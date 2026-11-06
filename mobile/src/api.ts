@@ -1,6 +1,9 @@
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
-import { canFenceIOSPush, clearLiveActivities, disableAndroidPush, retireIOSPush, selectAndroidPushOrigin, type RetiredAndroidPush } from './live';
+import {
+  canFenceIOSPush, captureLiveProgressSession, clearLiveActivities, disableAndroidPush, retireIOSPush,
+  selectAndroidPushOrigin, stopLiveActivityInSession, type RetiredAndroidPush,
+} from './live';
 import {
   clearSavedFlights, forgetSavedFlight, offlineFlightScope, readSavedFlight, readSavedOverview,
   saveFlightDetail, saveOverview,
@@ -899,10 +902,15 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
       offlineRevision += 1;
     },
     async untrack(id: string) {
+      const withActivePushOrigin = Platform.OS === 'android' ? withActiveAndroidPushOrigin : withActiveIOSPushOrigin;
+      // The DELETE can outlive a server switch or an alert session. Capture
+      // the old identity without holding the retirement lock during the request.
+      const binding = await withActivePushOrigin(server, () => captureLiveProgressSession(server)).catch(() => null);
       const token = await installationToken();
       await authenticated<void>(`/v1/tracked/${encodeURIComponent(id)}`, { method: 'DELETE' });
       offlineRevision += 1;
       await withFlightCache(token, undefined, (scope) => forgetSavedFlight(scope, id));
+      if (binding) await withActivePushOrigin(server, () => stopLiveActivityInSession(server, binding, id)).catch(() => {});
     },
     share: (flightId: string) => authenticated<{ url: string; expiresAt: string; id?: string; createdAt?: string }>('/v1/shares', {
       method: 'POST', body: JSON.stringify({ flightId }),
