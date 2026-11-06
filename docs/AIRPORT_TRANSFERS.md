@@ -8,9 +8,9 @@ the connection risk score.
 
 ## Official maps and connection directions
 
-Plano links to official terminal maps by default at SEA, DFW, ATL, SFO, EWR,
-JFK, LAX, ORD, DEN, LHR, AMS, CDG, FRA, SIN, YYZ, and HND. The map opens on
-the airport's website.
+Plano links to airport or airline terminal maps by default at SEA, DFW,
+ATL, SFO, EWR, JFK, LAX, ORD, DEN, LHR, AMS, CDG, FRA, SIN, YYZ, HND, DXB,
+and DOH.
 When reported gates or terminals identify a supported path, Plano also shows
 directions. Secure routes apply when the traveler can stay past security.
 
@@ -86,6 +86,15 @@ directions. Secure routes apply when the traveler can stay past security.
   international-to-domestic connections. Check with your airline about
   dedicated transfer buses. Public terminal shuttles serve all three
   terminals. [Haneda connections](https://tokyo-haneda.com/en/flight/transit/index.html) · [Terminal transport](https://tokyo-haneda.com/en/access/travel_between_terminals/index.html)
+- DXB directions use the airport train for A gates and the walkway between
+  B and C gates in Terminal 3. Confirm airside terminal transfers and bag
+  arrangements at the transfer desk. Plano allows 120 minutes including the
+  boarding reserve for Terminal 2–3 transfers, using flydubai's published
+  connection time as a planning reference. [Dubai Airports transfers](https://dubaiairports.ae/information/transfers) · [flydubai terminal transfers](https://www.flydubai.com/en/help/operational-updates/flydubai-operations-dxb-terminal-3/)
+- DOH includes transfer security in the estimate when reported gates or
+  terminal assignments identify the main terminal. After screening, check
+  posted signs for the Passenger Train when heading to C, D, or E. Confirm
+  baggage arrangements with your airline. [JAL transfer guide](https://www.jal.co.jp/jp/en/inter/airport/doh/transit/) · [Hamad Concourse C map](https://dohahamadairport.com/sites/default/files/maps/pdf/Departures-Concourse-C.pdf)
 
 These directions use general estimates for risk scoring. The default for
 routes that plan for screening or passport control is 65 minutes plus the

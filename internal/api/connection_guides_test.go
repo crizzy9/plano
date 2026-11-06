@@ -34,6 +34,8 @@ func TestBuiltInConnectionMapsUseReportedAirportCodes(t *testing.T) {
 		{"SIN", "WSSS", "https://www.changiairport.com/en/at-changi/map.html"},
 		{"YYZ", "CYYZ", "https://www.torontopearson.com/en/while-you-are-here/terminal-maps"},
 		{"HND", "RJTT", "https://tokyo-haneda.com/en/floor/index.html"},
+		{"DXB", "OMDB", "https://dubaiairports.ae/express-maps"},
+		{"DOH", "OTHH", "https://www.jal.co.jp/jp/en/inter/airport/doh/info/"},
 	} {
 		t.Run(tc.iata, func(t *testing.T) {
 			for _, codes := range []struct{ primary, icao string }{{primary: strings.ToLower(tc.iata)}, {icao: tc.icao}} {
@@ -243,7 +245,7 @@ func TestBuiltInConnectionGuideFromTrackedFlights(t *testing.T) {
 	for _, tc := range []struct {
 		airport, icao, fromGate, toGate, fromTerminal, toTerminal, mapURL, guideURL, instruction string
 		inOrigin, inOriginICAO, outDestination, outDestinationICAO                               string
-		transfer                                                                                 int
+		transfer, available                                                                      int
 	}{
 		{airport: "SEA", icao: "KSEA", fromGate: "N12", toGate: "S4", mapURL: "https://www.portseattle.org/sea/maps",
 			guideURL: "https://www.portseattle.org/blog/all-aboard-sea-underground", instruction: "Yellow Line", transfer: 50},
@@ -265,8 +267,20 @@ func TestBuiltInConnectionGuideFromTrackedFlights(t *testing.T) {
 			inOrigin: "LAX", inOriginICAO: "KLAX", outDestination: "OKA", outDestinationICAO: "ROAH",
 			mapURL: "https://tokyo-haneda.com/en/floor/index.html", guideURL: "https://tokyo-haneda.com/en/flight/transit/index.html",
 			instruction: "Complete Japanese immigration", transfer: 65},
+		{airport: "DXB", icao: "OMDB", fromGate: "A6", toGate: "F5", fromTerminal: "3", toTerminal: "Terminal 2",
+			inOrigin: "LHR", inOriginICAO: "EGLL", outDestination: "MCT", outDestinationICAO: "OOMS",
+			mapURL: "https://dubaiairports.ae/express-maps", guideURL: "https://dubaiairports.ae/information/transfers",
+			instruction: "airside connections bus to Terminal 2", transfer: 105},
+		{airport: "DOH", icao: "OTHH", fromGate: "B5", toGate: "E7", fromTerminal: "1", toTerminal: "Terminal 1",
+			inOrigin: "LHR", inOriginICAO: "EGLL", outDestination: "MCT", outDestinationICAO: "OOMS",
+			mapURL: "https://www.jal.co.jp/jp/en/inter/airport/doh/info/", guideURL: "https://www.jal.co.jp/jp/en/inter/airport/doh/transit/",
+			instruction: "Passenger Train", transfer: 65},
+		{airport: "DOH", icao: "OTHH", fromTerminal: "1", toTerminal: "1",
+			inOrigin: "LHR", inOriginICAO: "EGLL", outDestination: "MCT", outDestinationICAO: "OOMS",
+			mapURL: "https://www.jal.co.jp/jp/en/inter/airport/doh/info/", guideURL: "https://www.jal.co.jp/jp/en/inter/airport/doh/transit/",
+			instruction: "transfer security", transfer: 65, available: 75},
 	} {
-		t.Run(tc.airport, func(t *testing.T) {
+		t.Run(tc.airport+"/"+tc.instruction, func(t *testing.T) {
 			ctx := t.Context()
 			store, err := core.Open(filepath.Join(t.TempDir(), "plano.db"))
 			if err != nil {
@@ -283,7 +297,8 @@ func TestBuiltInConnectionGuideFromTrackedFlights(t *testing.T) {
 			}
 			now := time.Now().UTC()
 			arrive := now.Add(time.Hour)
-			depart := arrive.Add(64 * time.Minute)
+			available := cmp.Or(tc.available, 64)
+			depart := arrive.Add(time.Duration(available) * time.Minute)
 			for _, flight := range []feeds.Flight{
 				{ID: "inbound", Number: "PL101", Origin: cmp.Or(tc.inOrigin, "SFO"), OriginICAO: tc.inOriginICAO, Destination: tc.airport, DestinationICAO: tc.icao, ArrivalGate: tc.fromGate,
 					ArrivalTerminal: tc.fromTerminal, ScheduledArrival: &arrive, ObservedAt: now, Status: "scheduled"},
@@ -309,7 +324,7 @@ func TestBuiltInConnectionGuideFromTrackedFlights(t *testing.T) {
 			if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Risk != "Risky" || got.AvailableMinutes != 64 || got.TransferMinutes != tc.transfer ||
+			if got.Risk != "Risky" || got.AvailableMinutes != available || got.TransferMinutes != tc.transfer ||
 				got.BoardingReserveMinutes != 15 || got.Precision != "generic" || got.MapURL != tc.mapURL || got.GuideURL != tc.guideURL ||
 				!strings.Contains(strings.Join(got.Instructions, " "), tc.instruction) {
 				t.Fatalf("unexpected tracked connection response: %+v", got)

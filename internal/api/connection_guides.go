@@ -46,6 +46,8 @@ var airportConnectionGuides = []airportConnectionGuide{
 	{"SIN", "WSSS", "https://www.changiairport.com/en/at-changi/map.html", "https://www.changiairport.com/en/fly/transit-guide.html", sinConnectionDirections},
 	{"YYZ", "CYYZ", "https://www.torontopearson.com/en/while-you-are-here/terminal-maps", "https://www.torontopearson.com/en/connections", yyzConnectionDirections},
 	{"HND", "RJTT", "https://tokyo-haneda.com/en/floor/index.html", "https://tokyo-haneda.com/en/flight/transit/index.html", hndConnectionDirections},
+	{"DXB", "OMDB", "https://dubaiairports.ae/express-maps", "https://dubaiairports.ae/information/transfers", dxbConnectionDirections},
+	{"DOH", "OTHH", "https://www.jal.co.jp/jp/en/inter/airport/doh/info/", "https://www.jal.co.jp/jp/en/inter/airport/doh/transit/", dohConnectionDirections},
 }
 
 func (g airportConnectionGuide) matches(primary, icao string) bool {
