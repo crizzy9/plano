@@ -224,7 +224,11 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const [seat, setSeat] = useState('');
   const [pickupRevision, setPickupRevision] = useState(0);
   const flight = value?.detail.flight ?? (error && (result?.savedAt || initialSavedAt) ? undefined : initial);
-  const aircraft = flight?.aircraftModel || flight?.aircraftType;
+  const registry = flight?.aircraftRegistry?.source === 'transport_canada_ccar' ? flight.aircraftRegistry : undefined;
+  const registryModel = flight?.aircraftModel ? undefined : registry?.model;
+  const registryAge = flight?.aircraftAge == null ? registry?.age : undefined;
+  const aircraft = flight?.aircraftModel || registryModel || flight?.aircraftType;
+  const aircraftAge = flight?.aircraftAge ?? registryAge;
   const detail = value?.detail;
   const radarTracked = value?.tracked === true && !savedAt;
   const radarKey = flight && [api.server, id, flight.originICAO ?? flight.origin, flight.destinationICAO ?? flight.destination,
@@ -381,15 +385,16 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
           )}
           <ErrorMessage message={actionError} />
           {value?.tracked && !savedAt && <PickupLinks key={pickupRevision} api={api} flightId={id} />}
-          {(aircraft || flight.aircraftAge != null || flight.tailNumber || flight.baggage) && (
+          {(aircraft || aircraftAge != null || flight.tailNumber || flight.baggage) && (
             <View style={layout.section}>
               <Heading>Flight details</Heading>
               <View style={layout.fieldRow}>
                 {aircraft && <Body>Aircraft {aircraft}</Body>}
                 {flight.tailNumber && <Body>Tail {flight.tailNumber}</Body>}
-                {flight.aircraftAge != null && <Body>Aircraft age about {flight.aircraftAge} years</Body>}
+                {aircraftAge != null && <Body>Aircraft age about {aircraftAge} years</Body>}
                 {flight.baggage && <Body>Baggage carousel {flight.baggage}</Body>}
               </View>
+              {(!!registryModel || registryAge != null) && <CanadianAircraftNotice />}
             </View>
           )}
           {currentSlots.length > 0 && (
@@ -504,6 +509,24 @@ function savedFlightMessage(savedAt: string) {
 }
 
 const rotationFreshness = 30 * 60_000;
+
+function CanadianAircraftNotice() {
+  const { colors } = usePalette();
+  const [showWarranty, setShowWarranty] = useState(false);
+  return (
+    <View style={styles.registryNotice}>
+      <Text accessibilityRole="header" style={[styles.strong, { color: colors.text }]}>Transport Canada aircraft data</Text>
+      <Body>Reproduced and distributed with the permission of the Government of Canada.</Body>
+      <Body>This product has been produced by or for Plano and includes data provided by the Government of Canada.</Body>
+      <Body>The incorporation of data sourced from the Government of Canada within this product shall not be construed as constituting an endorsement by the Government of Canada of our product.</Body>
+      <Action secondary label={showWarranty ? 'Hide registry warranty terms' : 'Show registry warranty terms'}
+        onPress={() => setShowWarranty((shown) => !shown)} />
+      {showWarranty && (
+        <Body>CANADA MAKES NO REPRESENTATION AND GIVES NO WARRANTY OF ANY KIND WITH RESPECT TO THE ACCURACY, USEFULNESS, NOVELTY, VALIDITY, SCOPE, COMPLETENESS OR CURRENCY OF THE DATA MADE AVAILABLE THROUGH THE GC OPEN DATA PORTAL AND EXPRESSLY DISCLAIMS ANY IMPLIED WARRANTY OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE OF THE DATA MADE AVAILABLE THROUGH THE GC OPEN DATA PORTAL.</Body>
+      )}
+    </View>
+  );
+}
 
 function directRotationLeg(flight: Flight, leg: Flight | undefined) {
   if (!leg || leg.id === flight.id || ['cancelled', 'diverted', 'unknown'].includes(leg.status)) return;
@@ -1016,4 +1039,5 @@ const styles = StyleSheet.create({
   strong: { fontSize: 16, fontWeight: '600' },
   weatherHeading: { fontSize: 18, fontWeight: '700' },
   historicalRisk: { gap: 4 },
+  registryNotice: { gap: 4 },
 });

@@ -53,3 +53,16 @@ Use a stable source-native ID, a lowercase kind, an `airport` or `area` identifi
 `ADSBReceiver` reads a private operator receiver's `readsb` `aircraft.json` over HTTPS or loopback HTTP. It selects fresh measured transponder positions for active flights with an established aircraft identity. Coverage is limited to the receiver's reception area and any authorized network supplying it. Configure the receiver's aircraft database and access policies to respect aircraft privacy restrictions. [readsb JSON output](https://github.com/wiedehopf/readsb/blob/dev/README-json.md)
 
 Plano can read the FAA release ZIP directly from an operator-supplied file. It streams `MASTER.txt` and joins its manufacturer and model code to `ACFTREF.txt`. It keeps US tail numbers, transponder identifiers, manufacture years, and model names. An extracted `MASTER.txt` supplies identity and age. Aircraft age is the difference between calendar years. The current registry enriches near-term flights with an assigned tail. Saved flight details can carry earlier model and age observations forward for the same verified flight instance and tail. [FAA registry download](https://www.faa.gov/licenses_certificates/aircraft_certification/aircraft_registry/releasable_aircraft_download/index.cfm) · [FAA file layouts](https://registry.faa.gov/database/ardata.pdf)
+
+The optional Canadian Civil Aircraft Register adapter streams the current
+aircraft table in Transport Canada's `ccarcsdb.zip` using its supplied field
+layout. It keeps the model designation, manufacture or assembly year, recorded Mode S
+address, and registration validity for current marks. Legacy `CF-ABC` and
+modern `C-FABC` marks remain distinct. A packed mark such as `CFABC` can
+match only when the current registry identifies a single aircraft. [Transport Canada download and licence](https://wwwapps.tc.gc.ca/Saf-Sec-Sur/2/CCARCS-RIACC/DDZip.aspx)
+
+Flight responses place Canadian model and age data in `aircraftRegistry`
+with source `transport_canada_ccar`. The current client displays the registry
+notices with those fields. API consumers that reproduce the data must carry
+the source notices and caveat described in the
+[self-hosting guide](../../docs/SELF_HOSTING.md#transport-canada-aircraft-registry).

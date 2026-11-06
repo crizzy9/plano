@@ -152,6 +152,86 @@ func TestCheckConfigAcceptsFAARegistryArchiveAndLegacyMaster(t *testing.T) {
 	}
 }
 
+func TestCheckConfigCanadianRegistry(t *testing.T) {
+	const setting = "PLANO_CCAR_REGISTRY_FILE"
+	const privateFixture = "registry-fixture-private-content"
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	layout, err := writer.Create("carslayout.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintln(layout, "1 CARSCURR.TXT CARSCURR.TXT FILE"); err != nil {
+		t.Fatal(err)
+	}
+	fields := map[int]string{0: "MARK", 4: "MODEL_NAME", 22: "EFFECTIVE_DATE", 23: "INEFFECTIVE_DATE", 31: "DATE_MANUFACTURE_ASSEMBLY",
+		38: "REGISTRATION_AUTH_STATUS_E", 42: "MODE_S_TRANSPONDER_BINARY", 46: "TRIMMED_MARK"}
+	for i := range 47 {
+		field := fields[i]
+		if field == "" {
+			field = fmt.Sprintf("FIXTURE_%d", i)
+		}
+		if _, err := fmt.Fprintf(layout, "%d %s %s VARCHAR2(120)\r\n", i+2, field, field); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, err := writer.Create("carscurr.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := make([]string, 47)
+	row[0], row[4], row[22], row[31] = "FIVM", "Fixture 777", "2008/05/13", "2008/01/01"
+	row[38], row[42], row[46] = "Registered", "110000000001011101001111", "FIVM"
+	if _, err := fmt.Fprintf(current, "\"%s\"\r\n", strings.Join(row, "\",\"")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		data      []byte
+		demo      bool
+		directory bool
+		wantError string
+	}{
+		{name: "live archive", data: archive.Bytes()},
+		{name: "live missing file", wantError: "cannot open " + setting},
+		{name: "live directory", directory: true, wantError: setting + " must be a regular file"},
+		{name: "live malformed archive", data: []byte(privateFixture), wantError: "invalid " + setting + " archive"},
+		{name: "demo skips archive", data: []byte(privateFixture), demo: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateStartupEnvironment(t)
+			t.Setenv("PLANO_DEMO", fmt.Sprint(tc.demo))
+			t.Setenv("PLANO_ENROLLMENT_CODE", "fixture-enrollment-code")
+			t.Setenv("PLANO_AEROAPI_KEY", "fixture-aeroapi-key")
+			t.Setenv("PLANO_ADDR", "127.0.0.1:0")
+			file := filepath.Join(t.TempDir(), privateFixture)
+			switch {
+			case tc.directory:
+				if err := os.Mkdir(file, 0700); err != nil {
+					t.Fatal(err)
+				}
+			case tc.data != nil:
+				if err := os.WriteFile(file, tc.data, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(setting, file)
+			err := run(slog.New(slog.DiscardHandler), true)
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) || strings.Contains(err.Error(), privateFixture) {
+					t.Fatalf("expected redacted diagnostic %q, got %v", tc.wantError, err)
+				}
+			} else if err != nil {
+				t.Fatalf("check-config rejected registry: %v", err)
+			}
+		})
+	}
+}
+
 func TestCheckConfigFlightObservationKey(t *testing.T) {
 	key := strings.Repeat("fixture-key", 4)
 	for _, tc := range []struct {
@@ -244,7 +324,7 @@ func isolateStartupEnvironment(t *testing.T) {
 		"PLANO_AEROALERTS_KEY_FILE", "PLANO_ADVISORY_INGRESS_KEY_FILE", flightObservationKeyFile, swimPositionKeyFile, eurocontrolPositionKeyFile, "PLANO_AEROAPI_KEY_FILE",
 		"PLANO_METAR", "PLANO_TAF", "PLANO_AERO_SUBSCRIPTIONS", "PLANO_AERO_SUBSCRIPTIONS_INBOUND", "PLANO_AERO_SUBSCRIPTIONS_MAX", "PLANO_AERO_SUBSCRIPTIONS_INTERVAL",
 		"PLANO_TRIPIT_SYNC_KEY_FILE", "PLANO_RESERVATION_GATEWAY_URL",
-		"PLANO_FAA_NAS", "PLANO_SWIM_URL", "PLANO_EUROCONTROL_URL", "PLANO_ADSB_URL", "PLANO_FAA_REGISTRY_FILE",
+		"PLANO_FAA_NAS", "PLANO_SWIM_URL", "PLANO_EUROCONTROL_URL", "PLANO_ADSB_URL", "PLANO_FAA_REGISTRY_FILE", "PLANO_CCAR_REGISTRY_FILE",
 		"PLANO_APNS_TEAM_ID", "PLANO_APNS_KEY_ID", "PLANO_APNS_BUNDLE_ID", "PLANO_APNS_PRIVATE_KEY_FILE", "PLANO_APNS_SANDBOX",
 		"PLANO_FCM_PROJECT_ID", "PLANO_FCM_SERVICE_ACCOUNT_FILE", "PLANO_FCM_BANDWIDTH_CONSTRAINED",
 		"PLANO_REFRESH_INTERVAL", "PLANO_DELAY_MODEL_FILE", "PLANO_EARLY_DELAY_MODEL_FILE", "PLANO_HISTORICAL_RISK_FILE", "PLANO_COLLECT_DELAY_SAMPLES",

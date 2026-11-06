@@ -135,3 +135,35 @@ func TestDirectInboundRetainsAircraftMetadataOnArrival(t *testing.T) {
 		})
 	}
 }
+
+func TestAircraftMetadataRetentionCarriesCanadianSourceWithCopiedData(t *testing.T) {
+	previous := feeds.Flight{
+		ID: "ACA7-live", Source: "flightaware_aeroapi", TailNumber: "C-FIVM",
+		AircraftRegistry: &feeds.RegistryAircraftDetails{Source: feeds.CCARRegistrySource, Age: new(18), Model: "777-333ER"},
+	}
+	for _, tc := range []struct {
+		name string
+		tail string
+		age  *int
+		want bool
+	}{
+		{name: "copied model with existing age", tail: "C-FIVM", age: new(19), want: true},
+		{name: "new aircraft", tail: "C-FNNH"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next := feeds.Flight{ID: previous.ID, Source: previous.Source, TailNumber: tc.tail, AircraftAge: tc.age}
+			if changed := retainAircraftMetadata(&next, previous, ""); changed != tc.want {
+				t.Fatalf("metadata retained = %t, want %t", changed, tc.want)
+			}
+			if tc.want {
+				if next.AircraftAge != tc.age || next.AircraftModel != "" || next.AircraftRegistry == nil ||
+					next.AircraftRegistry.Source != feeds.CCARRegistrySource || next.AircraftRegistry.Age != nil ||
+					next.AircraftRegistry.Model != previous.AircraftRegistry.Model {
+					t.Fatalf("wrong retained metadata: %+v", next)
+				}
+			} else if next.AircraftRegistry != nil || next.AircraftModel != "" || next.AircraftAge != nil {
+				t.Fatalf("new assignment inherited previous metadata: %+v", next)
+			}
+		})
+	}
+}

@@ -158,6 +158,7 @@ published port if both projects run on the same host.
 | EUROCONTROL Network Manager | Set `PLANO_EUROCONTROL_URL` to your advisory bridge. If it requires authentication, set either `PLANO_EUROCONTROL_TOKEN_FILE` or `PLANO_EUROCONTROL_TOKEN`. |
 | readsb ADS-B | Set `PLANO_ADSB_URL` to an operator receiver's `aircraft.json` endpoint. Coverage depends on the receiver. |
 | FAA aircraft registry | Set `PLANO_FAA_REGISTRY_FILE` to the mounted FAA release ZIP for US aircraft identity, model, and approximate age. An extracted `MASTER.txt` also supplies identity and age. |
+| Transport Canada aircraft registry | Set `PLANO_CCAR_REGISTRY_FILE` to the mounted `ccarcsdb.zip` for Canadian aircraft model, approximate age, and receiver matching. [Download and licence](https://wwwapps.tc.gc.ca/Saf-Sec-Sur/2/CCARCS-RIACC/DDZip.aspx) |
 | Apple Push Notification service | Set `PLANO_APNS_TEAM_ID`, `PLANO_APNS_KEY_ID`, `PLANO_APNS_BUNDLE_ID`, and `PLANO_APNS_PRIVATE_KEY_FILE`. Set `PLANO_APNS_SANDBOX=true` for development tokens issued by the sandbox. |
 | Firebase Cloud Messaging | Set `PLANO_FCM_SERVICE_ACCOUNT_FILE` for the project registered by the Android build. `PLANO_FCM_PROJECT_ID` can override the project ID in that file. |
 
@@ -513,6 +514,37 @@ widget sends an opaque key scoped to the active alert session. Plano checks
 that the widget still shows the same flight and that your installation still
 tracks it. Tap routing starts with the next valid flight update after an
 upgrade. A stale widget tap opens Plano without selecting a flight.
+
+## Transport Canada aircraft registry
+
+Download `ccarcsdb.zip` from Transport Canada under the terms on its download
+page. Mount it read-only at a path such as `/data-import/ccarcsdb.zip` and set
+`PLANO_CCAR_REGISTRY_FILE` to that path. Plano reads the archive during
+`check-config` and at live startup. It can use the Canadian and FAA registries
+together. Replace the file with a current release and restart to refresh it.
+[Transport Canada download and licence](https://wwwapps.tc.gc.ca/Saf-Sec-Sur/2/CCARCS-RIACC/DDZip.aspx)
+
+Plano uses current registration data to add a model designation, an approximate
+age based on the manufacture or assembly year, and a recorded Mode S address for a local
+receiver. It reads the aircraft table and its field layout. The owner table,
+aircraft serial numbers, and manufacturer name fields stay out of the index.
+When using the dataset to serve other people, apply written terms consistent
+with the licence's distribution requirements in section 3.1.
+
+> Reproduced and distributed with the permission of the Government of Canada.
+>
+> This product has been produced by or for Plano and includes data provided by
+> the Government of Canada.
+>
+> The incorporation of data sourced from the Government of Canada within this
+> product shall not be construed as constituting an endorsement by the
+> Government of Canada of our product.
+>
+> CANADA MAKES NO REPRESENTATION AND GIVES NO WARRANTY OF ANY KIND WITH RESPECT
+> TO THE ACCURACY, USEFULNESS, NOVELTY, VALIDITY, SCOPE, COMPLETENESS OR CURRENCY
+> OF THE DATA MADE AVAILABLE THROUGH THE GC OPEN DATA PORTAL AND EXPRESSLY
+> DISCLAIMS ANY IMPLIED WARRANTY OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR
+> PURPOSE OF THE DATA MADE AVAILABLE THROUGH THE GC OPEN DATA PORTAL.
 
 ## Local radar and sharing
 

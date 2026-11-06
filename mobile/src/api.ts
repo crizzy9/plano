@@ -35,6 +35,7 @@ export interface Flight {
   aircraftType?: string;
   aircraftModel?: string;
   aircraftAge?: number;
+  aircraftRegistry?: { source: 'transport_canada_ccar'; model?: string; age?: number };
   status: FlightStatus;
   baggage?: string;
   source?: string;

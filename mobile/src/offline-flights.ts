@@ -66,6 +66,15 @@ function flightId(value: unknown) {
   return id && /^[A-Za-z0-9_.-]+$/.test(id) ? id : undefined;
 }
 
+function registrySnapshot(value: unknown): Flight['aircraftRegistry'] {
+  const registry = object(value);
+  if (registry?.source !== 'transport_canada_ccar') return undefined;
+  const model = text(registry.model);
+  const age = finite(registry.age);
+  if (!model && age === undefined) return undefined;
+  return { source: registry.source, model: model || undefined, age };
+}
+
 function flightSnapshot(value: unknown): Flight | undefined {
   const source = object(value);
   if (!source) return undefined;
@@ -89,6 +98,7 @@ function flightSnapshot(value: unknown): Flight | undefined {
     departureTerminal: text(source.departureTerminal, 32), arrivalTerminal: text(source.arrivalTerminal, 32),
     tailNumber: text(source.tailNumber, 32), aircraftType: text(source.aircraftType, 64),
     aircraftModel: text(source.aircraftModel, 128),
+    aircraftRegistry: registrySnapshot(source.aircraftRegistry),
     aircraftAge: finite(source.aircraftAge), inboundId: flightId(source.inboundId), baggage: text(source.baggage, 32),
   };
 }

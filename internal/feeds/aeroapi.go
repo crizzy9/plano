@@ -31,7 +31,7 @@ type AeroAPI struct {
 	base     string
 	client   *http.Client
 	now      func() time.Time
-	registry *FAARegistry
+	registry *Registry
 }
 
 func NewAeroAPI(apiKey string, client *http.Client) *AeroAPI {
@@ -40,6 +40,11 @@ func NewAeroAPI(apiKey string, client *http.Client) *AeroAPI {
 
 // WithFAARegistry returns a configured copy that shares the HTTP client.
 func (a *AeroAPI) WithFAARegistry(registry *FAARegistry) *AeroAPI {
+	return a.WithAircraftRegistry(registry)
+}
+
+// WithAircraftRegistry returns a copy configured with the supplied registry.
+func (a *AeroAPI) WithAircraftRegistry(registry *Registry) *AeroAPI {
 	configured := *a
 	configured.registry = registry
 	return &configured
@@ -320,11 +325,27 @@ func (a *AeroAPI) normalizeFlight(row aeroFlight, observedAt time.Time) Flight {
 	if departure == nil || departure.Before(observedAt.Add(-36*time.Hour)) || departure.After(observedAt.Add(48*time.Hour)) {
 		return flight
 	}
+	departureUTC := departure.UTC()
+	entry := a.registry.entryAt(flight.TailNumber, departureUTC)
+	var age *int
 	if flight.AircraftAge == nil {
-		flight.AircraftAge = a.registry.Age(flight.TailNumber, departure.UTC())
+		age = entry.age(departureUTC)
 	}
+	var model string
 	if flight.AircraftModel == "" {
-		flight.AircraftModel = a.registry.Model(flight.TailNumber)
+		model = entry.model
+	}
+	if entry.source == CCARRegistrySource {
+		if age != nil || model != "" {
+			flight.AircraftRegistry = &RegistryAircraftDetails{Source: entry.source, Model: model, Age: age}
+		}
+		return flight
+	}
+	if age != nil {
+		flight.AircraftAge = age
+	}
+	if model != "" {
+		flight.AircraftModel = model
 	}
 	return flight
 }

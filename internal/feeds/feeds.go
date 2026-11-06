@@ -69,6 +69,16 @@ type Flight struct {
 
 	HistoryDurationMinutes     *int `json:"historyDurationMinutes,omitempty"`
 	HistoryArrivalDelayMinutes *int `json:"historyArrivalDelayMinutes,omitempty"`
+
+	AircraftRegistry *RegistryAircraftDetails `json:"aircraftRegistry,omitempty"`
+}
+
+// RegistryAircraftDetails keeps attributed data separate from the legacy
+// aircraft fields so older clients cannot display it without its source notice.
+type RegistryAircraftDetails struct {
+	Source string `json:"source"`
+	Model  string `json:"model,omitempty"`
+	Age    *int   `json:"age,omitempty"`
 }
 
 type Position struct {

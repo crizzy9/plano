@@ -255,7 +255,7 @@ func run(logger *slog.Logger, checkOnly bool) error {
 	var aeroSubscriptions *core.AeroSubscriptionOptions
 	var advisories []feeds.AdvisorySource
 	var receiver *feeds.ADSBReceiver
-	var registry *feeds.FAARegistry
+	var registry *feeds.Registry
 	var sender push.Sender
 	var reservationSource feeds.ReservationSource
 	var tripItSync *api.TripItSync
@@ -381,7 +381,16 @@ func run(logger *slog.Logger, checkOnly bool) error {
 			if err != nil {
 				return fmt.Errorf("load FAA registry: %w", err)
 			}
-			aeroAPI = aeroAPI.WithFAARegistry(registry)
+		}
+		if path := os.Getenv("PLANO_CCAR_REGISTRY_FILE"); path != "" {
+			ccar, err := loadCCARRegistryFile(path)
+			if err != nil {
+				return fmt.Errorf("load Canadian registry: %w", err)
+			}
+			registry = feeds.CombineAircraftRegistries(registry, ccar)
+		}
+		if registry != nil {
+			aeroAPI = aeroAPI.WithAircraftRegistry(registry)
 			flights = aeroAPI
 		}
 		sender, err = pushConfig()
@@ -541,31 +550,53 @@ func loadHistoricalRiskFile(path string) (*historicalrisk.Model, error) {
 }
 
 func loadFAARegistryFile(path string) (*feeds.FAARegistry, error) {
-	info, err := os.Stat(path)
+	file, size, err := openRegistryFile("PLANO_FAA_REGISTRY_FILE", path)
 	if err != nil {
-		return nil, errors.New("cannot open PLANO_FAA_REGISTRY_FILE")
-	}
-	if !info.Mode().IsRegular() {
-		return nil, errors.New("PLANO_FAA_REGISTRY_FILE must be a regular file")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, errors.New("cannot open PLANO_FAA_REGISTRY_FILE")
+		return nil, err
 	}
 	defer file.Close()
-	info, err = file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, errors.New("PLANO_FAA_REGISTRY_FILE must be a regular file")
-	}
 	var header [4]byte
 	_, err = file.ReadAt(header[:], 0)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, errors.New("cannot read PLANO_FAA_REGISTRY_FILE")
 	}
 	if strings.EqualFold(filepath.Ext(path), ".zip") || header == [4]byte{'P', 'K', 3, 4} || header == [4]byte{'P', 'K', 5, 6} {
-		return feeds.LoadFAARegistryZIP(file, info.Size())
+		return feeds.LoadFAARegistryZIP(file, size)
 	}
 	return feeds.LoadFAARegistry(file)
+}
+
+func loadCCARRegistryFile(path string) (*feeds.Registry, error) {
+	file, size, err := openRegistryFile("PLANO_CCAR_REGISTRY_FILE", path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	registry, err := feeds.LoadCCARRegistryZIP(file, size)
+	if err != nil {
+		return nil, fmt.Errorf("invalid PLANO_CCAR_REGISTRY_FILE archive: %w", err)
+	}
+	return registry, nil
+}
+
+func openRegistryFile(setting, path string) (*os.File, int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("cannot open %s", setting)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, 0, fmt.Errorf("%s must be a regular file", setting)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("cannot open %s", setting)
+	}
+	info, err = file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		file.Close()
+		return nil, 0, fmt.Errorf("%s must be a regular file", setting)
+	}
+	return file, info.Size(), nil
 }
 
 func env(name, fallback string) string {

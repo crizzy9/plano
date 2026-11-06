@@ -13,7 +13,10 @@ import (
 
 const readsbSource = "operator_readsb"
 
-var modeSHexPattern = regexp.MustCompile(`^[0-9a-f]{6}$\z`)
+var (
+	modeSHexPattern             = regexp.MustCompile(`^[0-9a-f]{6}$\z`)
+	explicitCanadianMarkPattern = regexp.MustCompile(`^(?:C-[FGI]|CF-)[A-Z]{3}$\z`)
+)
 
 // ADSBReceiver reads a readsb aircraft.json snapshot from an operator's receiver.
 type ADSBReceiver struct {
@@ -31,6 +34,7 @@ func NewADSBReceiver(endpoint string, client *http.Client) (*ADSBReceiver, error
 
 type adsbObservation struct {
 	hex, registration, callSign string
+	canadianMark                string
 	position                    Position
 }
 
@@ -110,6 +114,7 @@ func parseReadsb(body []byte, now time.Time) (ADSBSnapshot, error) {
 		}
 		observation := adsbObservation{
 			hex: hex, registration: normalizeRegistration(row.Registration), callSign: strings.ToUpper(strings.TrimSpace(row.CallSign)),
+			canadianMark: explicitCanadianMark(row.Registration),
 			position: Position{At: at, Latitude: *row.Latitude, Longitude: *row.Longitude, AltitudeFeet: altitude,
 				GroundSpeedKnots: row.GroundSpeed, VerticalRateFPM: verticalRate, Heading: row.Heading, Source: readsbSource, Kind: "ads_b"},
 		}
@@ -126,7 +131,7 @@ func storeObservation(index map[string]adsbObservation, key string, incoming ads
 	switch {
 	case !exists:
 		index[key] = incoming
-	case current.hex != incoming.hex:
+	case current.hex != incoming.hex || canadianMarkConflict(current.canadianMark, incoming.canadianMark):
 		// Different transponders claimed the same registration. Do not guess.
 		index[key] = adsbObservation{}
 	case incoming.position.At.After(current.position.At):
@@ -136,6 +141,18 @@ func storeObservation(index map[string]adsbObservation, key string, incoming ads
 
 func normalizeRegistration(registration string) string {
 	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(registration), "-", ""))
+}
+
+func explicitCanadianMark(registration string) string {
+	mark := strings.ToUpper(strings.TrimSpace(registration))
+	if explicitCanadianMarkPattern.MatchString(mark) {
+		return mark
+	}
+	return ""
+}
+
+func canadianMarkConflict(a, b string) bool {
+	return a != "" && b != "" && a != b
 }
 
 // Match returns the position and normalized receiver address for a flight. A
@@ -153,7 +170,8 @@ func (s ADSBSnapshot) Match(flight Flight, modeSHex string) (position Position, 
 	if modeSHexPattern.MatchString(strings.ToLower(modeSHex)) {
 		row = s.byAddress[strings.ToLower(modeSHex)]
 	}
-	if row.hex == "" || row.registration != "" && row.registration != tail {
+	if row.hex == "" || row.registration != "" && row.registration != tail ||
+		canadianMarkConflict(row.canadianMark, explicitCanadianMark(flight.TailNumber)) {
 		return Position{}, "", false
 	}
 	if row.callSign != "" && row.callSign != tail && row.callSign != strings.ToUpper(flight.ATCIdent) &&

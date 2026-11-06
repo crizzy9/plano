@@ -1,6 +1,8 @@
 package core
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -365,6 +367,106 @@ func TestRadarCycleSuppressesOverlappingLegs(t *testing.T) {
 	assertPoints(second, 0)
 	assertPoints(other, 3)
 	assertPoints(stale, 0)
+}
+
+func TestRadarCycleUsesCanadianModeSAndRejectsAmbiguousPackedMark(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "ccar-radar.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := t.Context()
+	token, err := s.CreateInstallation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := s.Installation(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	takeoff, arrival := now.Add(-time.Hour), now.Add(time.Hour)
+	current := feeds.Flight{
+		ID: "canadian-exact", TailNumber: "C-FIVM", Status: "airborne", Source: "flightaware_aeroapi",
+		ActualTakeoff: &takeoff, ScheduledArrival: &arrival, ObservedAt: now,
+	}
+	ambiguous := current
+	ambiguous.ID, ambiguous.TailNumber = "canadian-packed", "CFABC"
+	sharedAddress := current
+	sharedAddress.ID, sharedAddress.TailNumber = "canadian-shared-address", "CF-ABC"
+	for _, flight := range []feeds.Flight{current, ambiguous, sharedAddress} {
+		if err := s.Observe(ctx, flight, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Track(ctx, owner, flight.ID, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client := &http.Client{Transport: radarFixtureTransport(func(*http.Request) (*http.Response, error) {
+		raw := fmt.Sprintf(`{"now":%d,"aircraft":[
+{"hex":"c0174f","type":"adsb_icao","lat":42,"lon":-72,"seen_pos":1},
+{"hex":"c0001e","r":"CFABC","type":"adsb_icao","lat":43,"lon":-73,"seen_pos":1}]}`, now.Unix())
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(raw))}, nil
+	})}
+	receiver, err := feeds.NewADSBReceiver("https://receiver.example.test/aircraft.json", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := radarCanadianRegistryFixture(t)
+	if err := s.sampleRadar(ctx, receiver, registry); err != nil {
+		t.Fatal(err)
+	}
+	if points, err := s.RadarPositions(ctx, owner, current.ID, nil, 256); err != nil || len(points) != 1 || points[0].Latitude != 42 {
+		t.Fatalf("expected Canadian Mode S point: %+v, %v", points, err)
+	}
+	for _, flight := range []feeds.Flight{ambiguous, sharedAddress} {
+		if points, err := s.RadarPositions(ctx, owner, flight.ID, nil, 256); err != nil || len(points) != 0 {
+			t.Fatalf("ambiguous receiver identity for %s acquired radar points: %+v, %v", flight.ID, points, err)
+		}
+	}
+}
+
+func radarCanadianRegistryFixture(t *testing.T) *feeds.Registry {
+	t.Helper()
+	var layout, current strings.Builder
+	fmt.Fprintln(&layout, "1 CARSCURR.TXT CARSCURR.TXT FILE")
+	fields := map[int]string{0: "MARK", 4: "MODEL_NAME", 22: "EFFECTIVE_DATE", 23: "INEFFECTIVE_DATE", 31: "DATE_MANUFACTURE_ASSEMBLY",
+		38: "REGISTRATION_AUTH_STATUS_E", 42: "MODE_S_TRANSPONDER_BINARY", 46: "TRIMMED_MARK"}
+	for i := range 47 {
+		field := fields[i]
+		if field == "" {
+			field = fmt.Sprintf("FIXTURE_%d", i)
+		}
+		fmt.Fprintf(&layout, "%d %s %s VARCHAR2(120)\n", i+2, field, field)
+	}
+	for _, fixture := range []struct {
+		mark    string
+		address int
+	}{{"FIVM", 0xc0174f}, {" ABC", 0xc0001e}, {"FABC", 0xc0001e}} {
+		row := make([]string, 47)
+		row[0], row[4], row[22], row[31] = fixture.mark, "Fixture Model", "2008/05/13", "2008/01/01"
+		row[38], row[42], row[46] = "Registered", fmt.Sprintf("%024b", fixture.address), strings.TrimSpace(fixture.mark)
+		fmt.Fprintf(&current, "\"%s\"\n", strings.Join(row, "\",\""))
+	}
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	for _, file := range []struct{ name, body string }{{"carslayout.txt", layout.String()}, {"carscurr.txt", current.String()}} {
+		entry, err := writer.Create(file.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(entry, file.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := feeds.LoadCCARRegistryZIP(bytes.NewReader(archive.Bytes()), int64(archive.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return registry
 }
 
 func TestRadarSharesOneVerifiedMovementWithItsOnwardRotation(t *testing.T) {

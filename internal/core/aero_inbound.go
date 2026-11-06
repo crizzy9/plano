@@ -207,7 +207,30 @@ func retainAircraftMetadata(next *feeds.Flight, previous feeds.Flight, previousP
 		next.AircraftModel = previous.AircraftModel
 		changed = true
 	}
-	return changed
+	priorRegistry := previous.AircraftRegistry
+	if priorRegistry == nil {
+		return changed
+	}
+	registry := feeds.RegistryAircraftDetails{Source: priorRegistry.Source}
+	if next.AircraftRegistry != nil {
+		registry = *next.AircraftRegistry
+		if registry.Source != priorRegistry.Source {
+			return changed
+		}
+	}
+	var registryChanged bool
+	if next.AircraftAge == nil && registry.Age == nil && priorRegistry.Age != nil {
+		registry.Age = priorRegistry.Age
+		registryChanged = true
+	}
+	if next.AircraftModel == "" && registry.Model == "" && priorRegistry.Model != "" {
+		registry.Model = priorRegistry.Model
+		registryChanged = true
+	}
+	if registryChanged {
+		next.AircraftRegistry = &registry
+	}
+	return changed || registryChanged
 }
 
 func (s *Store) delayForecastTransition(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight, previousInbound, previousPrediction []byte,

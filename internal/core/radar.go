@@ -101,7 +101,7 @@ AND EXISTS(SELECT 1 FROM tracked WHERE flight_id=flights.id)`,
 
 // RunRadar samples one operator receiver for tracked flights and their inbound legs.
 // Source failures leave the existing history and status observation untouched.
-func (s *Store) RunRadar(ctx context.Context, receiver *feeds.ADSBReceiver, registry *feeds.FAARegistry, cadence time.Duration, logger *slog.Logger) {
+func (s *Store) RunRadar(ctx context.Context, receiver *feeds.ADSBReceiver, registry *feeds.Registry, cadence time.Duration, logger *slog.Logger) {
 	tick := time.NewTicker(cadence)
 	defer tick.Stop()
 	for {
@@ -116,7 +116,7 @@ func (s *Store) RunRadar(ctx context.Context, receiver *feeds.ADSBReceiver, regi
 	}
 }
 
-func (s *Store) sampleRadar(ctx context.Context, receiver *feeds.ADSBReceiver, registry *feeds.FAARegistry) error {
+func (s *Store) sampleRadar(ctx context.Context, receiver *feeds.ADSBReceiver, registry *feeds.Registry) error {
 	now := time.Now()
 	var active bool
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 `+radarFlightCandidates+`)`,
@@ -151,12 +151,15 @@ COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id)
 	defer rows.Close()
 	matches := make(map[string]*radarReceiverMatch)
 	matchFlight := func(flight feeds.Flight, providerID string) (*radarReceiverMatch, feeds.Position) {
-		var modeS string
-		if registry != nil {
-			modeS = registry.ModeSHex(flight.TailNumber)
+		if flight.ActualTakeoff == nil || registry.Ambiguous(flight.TailNumber) {
+			return nil, feeds.Position{}
+		}
+		modeS := registry.ModeSHexAt(flight.TailNumber, flight.ActualTakeoff.UTC())
+		if modeS == "" && registry.Ambiguous(strings.ReplaceAll(flight.TailNumber, "-", "")) {
+			return nil, feeds.Position{}
 		}
 		position, address, ok := snapshot.Match(flight, modeS)
-		if !ok || flight.ActualTakeoff == nil || position.At.Before(*flight.ActualTakeoff) {
+		if !ok || position.At.Before(*flight.ActualTakeoff) {
 			return nil, feeds.Position{}
 		}
 		identity := cmp.Or(providerID, flight.AeroProviderID(), flight.ID)

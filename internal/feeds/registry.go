@@ -34,11 +34,41 @@ type registryEntry struct {
 	manufactured int
 	address      string
 	model        string
+	validFrom    time.Time
+	validUntil   time.Time
+	ambiguous    bool
+	source       string
 }
 
-// FAARegistry keeps aircraft identifiers, manufacture years, and model labels.
-// Registrant names, postal addresses, and serial numbers are discarded.
-type FAARegistry struct{ byTail map[string]registryEntry }
+const CCARRegistrySource = "transport_canada_ccar"
+
+// Registry keeps aircraft identifiers, manufacture years, and model labels.
+type Registry struct {
+	byTail  map[string]registryEntry
+	key     func(string) string
+	sources []*Registry
+}
+
+// FAARegistry is the legacy type name for the FAA aircraft index.
+type FAARegistry = Registry
+
+// CombineAircraftRegistries shares the source indexes without copying their rows.
+func CombineAircraftRegistries(registries ...*Registry) *Registry {
+	var sources []*Registry
+	for _, registry := range registries {
+		if registry != nil {
+			sources = append(sources, registry)
+		}
+	}
+	switch len(sources) {
+	case 0:
+		return nil
+	case 1:
+		return sources[0]
+	default:
+		return &Registry{sources: sources}
+	}
+}
 
 // LoadFAARegistry reads the unzipped FAA MASTER.txt comma-delimited file.
 // It indexes current US registrations and does not infer historical ownership.
@@ -266,28 +296,63 @@ func loadFAARegistryModels(input io.Reader) (map[string]string, error) {
 	}
 }
 
-func (r *FAARegistry) Age(tail string, at time.Time) *int {
-	if r == nil || at.IsZero() {
+func (r *Registry) lookup(tail string) (registryEntry, bool) {
+	if r == nil {
+		return registryEntry{}, false
+	}
+	for _, source := range r.sources {
+		if entry, found := source.lookup(tail); found {
+			return entry, true
+		}
+	}
+	key := normalizeRegistration
+	if r.key != nil {
+		key = r.key
+	}
+	entry, found := r.byTail[key(tail)]
+	return entry, found
+}
+
+func (r *Registry) entryAt(tail string, at time.Time) registryEntry {
+	entry, _ := r.lookup(tail)
+	if entry.ambiguous || !entry.validFrom.IsZero() && at.Before(entry.validFrom) ||
+		!entry.validUntil.IsZero() && !at.Before(entry.validUntil) {
+		return registryEntry{}
+	}
+	return entry
+}
+
+func (r *Registry) Age(tail string, at time.Time) *int {
+	return r.entryAt(tail, at).age(at)
+}
+
+func (entry registryEntry) age(at time.Time) *int {
+	if at.IsZero() {
 		return nil
 	}
-	year := r.byTail[normalizeRegistration(tail)].manufactured
+	year := entry.manufactured
 	if year == 0 || year > at.Year() {
 		return nil
 	}
 	return new(at.Year() - year)
 }
 
-func (r *FAARegistry) ModeSHex(tail string) string {
-	if r == nil {
-		return ""
-	}
-	return r.byTail[normalizeRegistration(tail)].address
+func (r *Registry) ModeSHex(tail string) string {
+	return r.ModeSHexAt(tail, time.Now())
 }
 
-// Model returns the manufacturer and model joined by the FAA aircraft code.
-func (r *FAARegistry) Model(tail string) string {
-	if r == nil {
-		return ""
-	}
-	return r.byTail[normalizeRegistration(tail)].model
+// ModeSHexAt returns the address for the recorded registration window.
+func (r *Registry) ModeSHexAt(tail string, at time.Time) string {
+	return r.entryAt(tail, at).address
+}
+
+// Ambiguous reports a registration spelling that maps to multiple aircraft.
+func (r *Registry) Ambiguous(tail string) bool {
+	entry, _ := r.lookup(tail)
+	return entry.ambiguous
+}
+
+// Model returns the registry's technical model label.
+func (r *Registry) Model(tail string) string {
+	return r.entryAt(tail, time.Now()).model
 }
