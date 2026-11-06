@@ -501,9 +501,7 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 			}
 			oldTrack = nil
 		}
-		if flight.AircraftAge == nil && flight.TailNumber != "" && flight.TailNumber == prior.TailNumber {
-			flight.AircraftAge = prior.AircraftAge
-		}
+		retainAircraftMetadata(&flight, prior, previousProvider)
 		if inbound == nil {
 			if err := json.Unmarshal(oldInbound, &inbound); err != nil {
 				return err

@@ -16,7 +16,6 @@ type Refresher struct {
 	Store      *Store
 	Flights    feeds.FlightSource
 	Advisories []feeds.AdvisorySource
-	Registry   *feeds.FAARegistry
 	Logger     *slog.Logger
 	Interval   time.Duration
 }
@@ -102,9 +101,6 @@ func (r Refresher) refresh(ctx context.Context) error {
 			if err != nil {
 				r.Logger.Warn("flight track refresh failed", "id", flight.ID, "error", err)
 			}
-		}
-		if r.Registry != nil && !finished(flight) {
-			flight.AircraftAge = r.Registry.Age(flight.TailNumber, now)
 		}
 		var inbound []feeds.Flight
 		if flightBeforeDeparture(flight) && (flight.InboundID != "" || flight.TailNumber != "") {

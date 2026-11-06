@@ -33,6 +33,7 @@ export interface Flight {
   tailNumber?: string;
   inboundId?: string;
   aircraftType?: string;
+  aircraftModel?: string;
   aircraftAge?: number;
   status: FlightStatus;
   baggage?: string;

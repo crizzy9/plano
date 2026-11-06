@@ -88,6 +88,7 @@ function flightSnapshot(value: unknown): Flight | undefined {
     departureGate: text(source.departureGate, 32), arrivalGate: text(source.arrivalGate, 32),
     departureTerminal: text(source.departureTerminal, 32), arrivalTerminal: text(source.arrivalTerminal, 32),
     tailNumber: text(source.tailNumber, 32), aircraftType: text(source.aircraftType, 64),
+    aircraftModel: text(source.aircraftModel, 128),
     aircraftAge: finite(source.aircraftAge), inboundId: flightId(source.inboundId), baggage: text(source.baggage, 32),
   };
 }

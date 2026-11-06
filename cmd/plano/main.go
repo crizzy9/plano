@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -247,15 +248,12 @@ func run(logger *slog.Logger, checkOnly bool) error {
 			}
 		}
 		if path := os.Getenv("PLANO_FAA_REGISTRY_FILE"); path != "" {
-			file, err := os.Open(path)
-			if err != nil {
-				return errors.New("cannot open PLANO_FAA_REGISTRY_FILE")
-			}
-			registry, err = feeds.LoadFAARegistry(file)
-			_ = file.Close()
+			registry, err = loadFAARegistryFile(path)
 			if err != nil {
 				return fmt.Errorf("load FAA registry: %w", err)
 			}
+			aeroAPI = aeroAPI.WithFAARegistry(registry)
+			flights = aeroAPI
 		}
 		sender, err = pushConfig()
 		if err != nil {
@@ -318,7 +316,7 @@ func run(logger *slog.Logger, checkOnly bool) error {
 	defer workers.Wait()
 	defer stop()
 	workers.Go(func() {
-		(core.Refresher{Store: store, Flights: flights, Advisories: advisories, Registry: registry, Logger: logger, Interval: interval}).Run(ctx)
+		(core.Refresher{Store: store, Flights: flights, Advisories: advisories, Logger: logger, Interval: interval}).Run(ctx)
 	})
 	workers.Go(func() { service.RunConnectionMonitors(ctx) })
 	if receiver != nil {
@@ -350,6 +348,34 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		defer cancel()
 		return server.Shutdown(shutdown)
 	}
+}
+
+func loadFAARegistryFile(path string) (*feeds.FAARegistry, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, errors.New("cannot open PLANO_FAA_REGISTRY_FILE")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("PLANO_FAA_REGISTRY_FILE must be a regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("cannot open PLANO_FAA_REGISTRY_FILE")
+	}
+	defer file.Close()
+	info, err = file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("PLANO_FAA_REGISTRY_FILE must be a regular file")
+	}
+	var header [4]byte
+	_, err = file.ReadAt(header[:], 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, errors.New("cannot read PLANO_FAA_REGISTRY_FILE")
+	}
+	if strings.EqualFold(filepath.Ext(path), ".zip") || header == [4]byte{'P', 'K', 3, 4} || header == [4]byte{'P', 'K', 5, 6} {
+		return feeds.LoadFAARegistryZIP(file, info.Size())
+	}
+	return feeds.LoadFAARegistry(file)
 }
 
 func env(name, fallback string) string {

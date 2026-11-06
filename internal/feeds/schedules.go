@@ -233,7 +233,7 @@ func (a *AeroAPI) resolveSchedule(ctx context.Context, key scheduleKey, now time
 			!matchesAirport(row.Origin, key.Origin) || !matchesAirport(row.Destination, key.Destination) {
 			continue
 		}
-		flight := row.normalize(now)
+		flight := a.normalizeFlight(row, now)
 		if flight.ScheduledDeparture == nil {
 			continue
 		}

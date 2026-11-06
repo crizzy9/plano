@@ -27,14 +27,22 @@ var (
 )
 
 type AeroAPI struct {
-	key    string
-	base   string
-	client *http.Client
-	now    func() time.Time
+	key      string
+	base     string
+	client   *http.Client
+	now      func() time.Time
+	registry *FAARegistry
 }
 
 func NewAeroAPI(apiKey string, client *http.Client) *AeroAPI {
 	return &AeroAPI{key: strings.TrimSpace(apiKey), base: aeroBase, client: feedClient(client), now: time.Now}
+}
+
+// WithFAARegistry returns a configured copy that shares the HTTP client.
+func (a *AeroAPI) WithFAARegistry(registry *FAARegistry) *AeroAPI {
+	configured := *a
+	configured.registry = registry
+	return &configured
 }
 
 // Search returns flights departing on the requested calendar day at their origin.
@@ -83,7 +91,7 @@ func (a *AeroAPI) Search(ctx context.Context, number string, date time.Time) ([]
 		if row.Blocked || !providerIdentifier.MatchString(row.ID) || departure == nil || !onDepartureDate(*departure, row.Origin.Timezone, midnight) {
 			continue
 		}
-		flight := row.normalize(now)
+		flight := a.normalizeFlight(row, now)
 		if i, ok := seen[flight.ID]; ok {
 			// The original row conveys the diversion for shared provider IDs.
 			if row.Diverted {
@@ -147,7 +155,7 @@ func (a *AeroAPI) getProviderFlight(ctx context.Context, id string) (Flight, err
 	if original == nil {
 		return Flight{}, ErrNotFound
 	}
-	return original.normalize(now), nil
+	return a.normalizeFlight(*original, now), nil
 }
 
 func (a *AeroAPI) Track(ctx context.Context, id string) ([]Position, error) {
@@ -294,6 +302,31 @@ func (f aeroFlight) normalize(observedAt time.Time) Flight {
 		TailNumber: f.Registration, AircraftType: f.AircraftType, DistanceMiles: f.RouteDistance,
 		Baggage: f.Baggage, InboundID: f.InboundID, ObservedAt: observedAt, Source: aeroSource,
 	}
+}
+
+func (a *AeroAPI) normalizeFlight(row aeroFlight, observedAt time.Time) Flight {
+	flight := row.normalize(observedAt)
+	if a.registry == nil || flight.TailNumber == "" || row.Cancelled || row.Diverted {
+		return flight
+	}
+	switch flight.Status {
+	case "scheduled", "boarding", "taxi_out", "airborne", "landed":
+	default:
+		return flight
+	}
+	// The current registry cannot identify the airframe of a historical
+	// flight. Require a live assignment within the operating time window.
+	departure := firstTime(flight.ActualDeparture, flight.ActualTakeoff, flight.ScheduledDeparture)
+	if departure == nil || departure.Before(observedAt.Add(-36*time.Hour)) || departure.After(observedAt.Add(48*time.Hour)) {
+		return flight
+	}
+	if flight.AircraftAge == nil {
+		flight.AircraftAge = a.registry.Age(flight.TailNumber, departure.UTC())
+	}
+	if flight.AircraftModel == "" {
+		flight.AircraftModel = a.registry.Model(flight.TailNumber)
+	}
+	return flight
 }
 
 func (f aeroFlight) normalizedStatus() string {

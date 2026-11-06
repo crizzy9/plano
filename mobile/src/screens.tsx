@@ -211,6 +211,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const [seat, setSeat] = useState('');
   const [pickupRevision, setPickupRevision] = useState(0);
   const flight = value?.detail.flight ?? (error && (result?.savedAt || initialSavedAt) ? undefined : initial);
+  const aircraft = flight?.aircraftModel || flight?.aircraftType;
   const detail = value?.detail;
   const rotationSnapshot = detail?.rotationSnapshot === true;
   const weather = detail?.weather?.filter((report) => Date.parse(report.validUntil) > Date.now()) ?? [];
@@ -295,13 +296,13 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
           )}
           <ErrorMessage message={actionError} />
           {value?.tracked && !savedAt && <PickupLinks key={pickupRevision} api={api} flightId={id} />}
-          {(flight.aircraftType || flight.aircraftAge != null || flight.tailNumber || flight.baggage) && (
+          {(aircraft || flight.aircraftAge != null || flight.tailNumber || flight.baggage) && (
             <View style={layout.section}>
               <Heading>Flight details</Heading>
               <View style={layout.fieldRow}>
-                {flight.aircraftType && <Body>Aircraft {flight.aircraftType}</Body>}
+                {aircraft && <Body>Aircraft {aircraft}</Body>}
                 {flight.tailNumber && <Body>Tail {flight.tailNumber}</Body>}
-                {flight.aircraftAge != null && <Body>Aircraft age {flight.aircraftAge} years</Body>}
+                {flight.aircraftAge != null && <Body>Aircraft age about {flight.aircraftAge} years</Body>}
                 {flight.baggage && <Body>Baggage carousel {flight.baggage}</Body>}
               </View>
             </View>

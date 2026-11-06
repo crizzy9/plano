@@ -62,7 +62,11 @@ func (s *Store) applyAeroInbound(ctx context.Context, providerID string, incomin
 		if len(previous) != 0 && (previous[0].ID != providerID || !incoming.ObservedAt.After(previous[0].ObservedAt)) {
 			continue
 		}
-		rotation := []feeds.Flight{incoming}
+		direct := incoming
+		if len(previous) != 0 {
+			retainAircraftMetadata(&direct, previous[0], "")
+		}
+		rotation := []feeds.Flight{direct}
 		if len(previous) > 1 && connectsAeroInbound(flight, incoming) && sameInboundHistory(previous[0], incoming) {
 			rotation = append(rotation, previous[1:]...)
 		}
@@ -154,6 +158,11 @@ func keepNewerAeroInbound(flight feeds.Flight, rotation []feeds.Flight, previous
 		return previous, true, nil
 	}
 	if rotation[0].ObservedAt.After(previous[0].ObservedAt) {
+		direct := rotation[0]
+		if retainAircraftMetadata(&direct, previous[0], "") {
+			rotation = slices.Clone(rotation)
+			rotation[0] = direct
+		}
 		return rotation, false, nil
 	}
 	if !connectsAeroInbound(flight, previous[0]) || !sameInboundHistory(rotation[0], previous[0]) {
@@ -167,6 +176,28 @@ func keepNewerAeroInbound(flight feeds.Flight, rotation []feeds.Flight, previous
 
 func isExactAeroInbound(flight, inbound feeds.Flight) bool {
 	return linksAeroInbound(flight, inbound) && inbound.AeroProviderID() == flight.InboundID
+}
+
+// retainAircraftMetadata carries established facts onto a newer observation
+// of the same verified AeroAPI instance and assigned aircraft. The stored
+// provider key is needed when a top-level flight uses a synthetic schedule ID.
+func retainAircraftMetadata(next *feeds.Flight, previous feeds.Flight, previousProvider string) bool {
+	if previousProvider == "" {
+		previousProvider = previous.AeroProviderID()
+	}
+	if previousProvider == "" || next.AeroProviderID() != previousProvider || next.TailNumber == "" || next.TailNumber != previous.TailNumber {
+		return false
+	}
+	changed := false
+	if next.AircraftAge == nil && previous.AircraftAge != nil {
+		next.AircraftAge = previous.AircraftAge
+		changed = true
+	}
+	if next.AircraftModel == "" && previous.AircraftModel != "" {
+		next.AircraftModel = previous.AircraftModel
+		changed = true
+	}
+	return changed
 }
 
 func delayForecastTransition(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight, previousInbound, previousPrediction []byte,

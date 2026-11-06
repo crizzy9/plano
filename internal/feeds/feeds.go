@@ -53,6 +53,7 @@ type Flight struct {
 	ArrivalTerminal     string     `json:"arrivalTerminal,omitempty"`
 	TailNumber          string     `json:"tailNumber,omitempty"`
 	AircraftType        string     `json:"aircraftType,omitempty"`
+	AircraftModel       string     `json:"aircraftModel,omitempty"`
 	AircraftAge         *int       `json:"aircraftAge,omitempty"`
 	DistanceMiles       *int       `json:"distanceMiles,omitempty"`
 	Baggage             string     `json:"baggage,omitempty"`

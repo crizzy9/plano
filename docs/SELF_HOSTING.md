@@ -124,7 +124,7 @@ published port if both projects run on the same host.
 | FAA SWIM | Set `PLANO_SWIM_URL` to your advisory bridge. If it requires authentication, set either `PLANO_SWIM_TOKEN_FILE` or `PLANO_SWIM_TOKEN`. |
 | EUROCONTROL Network Manager | Set `PLANO_EUROCONTROL_URL` to your advisory bridge. If it requires authentication, set either `PLANO_EUROCONTROL_TOKEN_FILE` or `PLANO_EUROCONTROL_TOKEN`. |
 | readsb ADS-B | Set `PLANO_ADSB_URL` to an operator receiver's `aircraft.json` endpoint. Coverage depends on the receiver. |
-| FAA aircraft registry | Set `PLANO_FAA_REGISTRY_FILE` to a mounted, unzipped FAA `MASTER.txt` file to enrich US aircraft identities and approximate ages. |
+| FAA aircraft registry | Set `PLANO_FAA_REGISTRY_FILE` to the mounted FAA release ZIP for US aircraft identity, model, and approximate age. An extracted `MASTER.txt` also supplies identity and age. |
 | Apple Push Notification service | Set `PLANO_APNS_TEAM_ID`, `PLANO_APNS_KEY_ID`, `PLANO_APNS_BUNDLE_ID`, and `PLANO_APNS_PRIVATE_KEY_FILE`. Set `PLANO_APNS_SANDBOX=true` for development tokens issued by the sandbox. |
 | Firebase Cloud Messaging | Set `PLANO_FCM_SERVICE_ACCOUNT_FILE` for the project registered by the Android build. `PLANO_FCM_PROJECT_ID` can override the project ID in that file. |
 
@@ -188,8 +188,10 @@ Include only mounts for the providers you enable. Set each corresponding
 `*_FILE` variable to its `target` value. Grant the container's UID 10001 or
 group 10001 read access through the host's container ID mapping. Bind mounts
 preserve host permissions. Bridge tokens can use the same mount pattern at
-their own target paths. Mount the FAA registry file read-only at a path such
-as `/data-import/MASTER.txt` and set `PLANO_FAA_REGISTRY_FILE` to that path.
+their own target paths. Mount the [FAA registry archive](https://www.faa.gov/licenses_certificates/aircraft_certification/aircraft_registry/releasable_aircraft_download/index.cfm)
+read-only at a path such as `/data-import/ReleasableAircraft.zip` and set
+`PLANO_FAA_REGISTRY_FILE` to that path. Plano reads the archive at startup.
+Use a current release and restart the service after replacing it.
 
 ```sh
 docker compose -f compose.yaml -f compose.credentials.yaml run --build --rm --no-deps plano check-config

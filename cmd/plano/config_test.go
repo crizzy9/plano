@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"log/slog"
 	"os"
@@ -83,6 +84,55 @@ func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 			}
 			if _, err := os.Stat(dbDir); !os.IsNotExist(err) {
 				t.Fatalf("database parent should remain absent, stat error = %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckConfigAcceptsFAARegistryArchiveAndLegacyMaster(t *testing.T) {
+	const master = "N-NUMBER,MFR MDL CODE,YEAR MFR,STATUS CODE,MODE S CODE HEX\n12AA,0123456,2010,V,A00001\n"
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	for _, entry := range []struct{ name, data string }{
+		{"MASTER.txt", master},
+		{"ACFTREF.txt", "CODE,MFR,MODEL\n0123456,FIXTURE AIRCRAFT,100\n"},
+	} {
+		file, err := writer.Create(entry.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.Write([]byte(entry.data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		data  []byte
+		model string
+	}{
+		{"archive without filename extension", archive.Bytes(), "FIXTURE AIRCRAFT 100"},
+		{"legacy master", []byte(master), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateStartupEnvironment(t)
+			t.Setenv("PLANO_DEMO", "false")
+			t.Setenv("PLANO_ENROLLMENT_CODE", "fixture-enrollment-code")
+			t.Setenv("PLANO_AEROAPI_KEY", "fixture-aeroapi-key")
+			t.Setenv("PLANO_ADDR", "127.0.0.1:0")
+			path := filepath.Join(t.TempDir(), "registry")
+			if err := os.WriteFile(path, tc.data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PLANO_FAA_REGISTRY_FILE", path)
+			if err := run(slog.New(slog.DiscardHandler), true); err != nil {
+				t.Fatalf("check-config rejected registry: %v", err)
+			}
+			registry, err := loadFAARegistryFile(path)
+			if err != nil || registry.ModeSHex("N12AA") != "a00001" || registry.Model("N12AA") != tc.model {
+				t.Fatalf("registry mount did not load the expected aircraft, error = %v", err)
 			}
 		})
 	}

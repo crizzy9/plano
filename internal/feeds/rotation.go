@@ -107,7 +107,7 @@ func (a *AeroAPI) rotationTailRows(ctx context.Context, tail string, departure, 
 			continue
 		}
 		if providerIdentifier.MatchString(row.ID) && strings.EqualFold(row.Registration, tail) {
-			flight := row.normalize(now)
+			flight := a.normalizeFlight(row, now)
 			if flight.Status == "cancelled" || flight.Status == "diverted" {
 				disqualified[row.ID] = true
 				continue
