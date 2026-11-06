@@ -109,6 +109,75 @@ func TestFlightAlertDispatcherDropsPredictionAfterInboundChange(t *testing.T) {
 	assertFlightAlertHistory(t, store, flight.ID, "delay_prediction|AA2 · 50 min later")
 }
 
+func TestFlightAlertDispatcherRechecksLegacyInboundForecast(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		offset   time.Duration
+		wantSent int
+	}{
+		{name: "elapsed ETA", offset: -time.Minute},
+		{name: "future ETA caps expiry", offset: 5 * time.Minute, wantSent: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, flight := flightAlertDispatchFixture(t)
+			ctx := t.Context()
+			now := time.Now().UTC()
+			eta := now.Add(tc.offset)
+			flight.InboundID, flight.ScheduledDeparture = "direct-inbound", new(eta.Add(-15*time.Minute))
+			flight.ObservedAt = flight.ObservedAt.Add(time.Millisecond)
+			inbound := feeds.Flight{ID: flight.InboundID, Number: "AA1", Destination: flight.Origin, Status: "airborne",
+				ObservedAt: now.Add(-2 * time.Minute), EstimatedArrival: &eta}
+			if err := store.Observe(ctx, flight, nil, []feeds.Flight{inbound}, nil); err != nil {
+				t.Fatal(err)
+			}
+			// Older forecast writers could save this estimate without a deadline.
+			forecast, err := json.Marshal(Prediction{Departure: new(eta.Add(40 * time.Minute)), DelayMinutes: 55,
+				Reasons: []string{inboundReasonPrefix + "AA1 needs time to arrive and turn around."}, Method: "operational_estimate"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx, err := store.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err := tx.ExecContext(ctx, `UPDATE flights SET prediction=? WHERE id=?`, string(forecast), flight.ID); err != nil {
+				t.Fatal(err)
+			}
+			const body = "AA2 · 55 min later"
+			if err := saveEvent(ctx, tx, flight.ID, Event{Kind: "delay_prediction", Title: "Departure delay predicted",
+				Body: body, At: inbound.ObservedAt}, true); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			var sent int
+			sender := pushFunc(func(_ context.Context, _ push.Target, message push.Message) error {
+				sent++
+				if tc.wantSent > 0 && !message.ExpiresAt.Equal(eta) {
+					t.Errorf("legacy push expiry = %s, want %s", message.ExpiresAt, eta)
+				}
+				return nil
+			})
+			logger := slog.New(slog.DiscardHandler)
+			for _, job := range claimFlightAlertJobs(t, store, 2) {
+				if !job.message.ExpiresAt.After(eta) {
+					t.Fatalf("test job expires at %s before legacy evidence deadline %s", job.message.ExpiresAt, eta)
+				}
+				store.deliver(ctx, sender, logger, job)
+			}
+			var pending int
+			err = store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox o`+outboxFlightEvent+`
+WHERE o.flight_id=? AND o.done=0 AND json_extract(e.data,'$.kind')='delay_prediction'`, flight.ID).Scan(&pending)
+			if sent != tc.wantSent || err != nil || pending != 0 {
+				t.Fatalf("sent %d, want %d, pending %d, error %v", sent, tc.wantSent, pending, err)
+			}
+			assertFlightAlertHistory(t, store, flight.ID, "delay_prediction|"+body)
+		})
+	}
+}
+
 func TestFlightAlertDispatcherReoffersUnclaimedCheckInAfterReinstatement(t *testing.T) {
 	store, flight := flightAlertDispatchFixture(t)
 	flight.ScheduledDeparture = new(flight.ObservedAt.Add(time.Hour))

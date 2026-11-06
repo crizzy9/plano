@@ -99,14 +99,12 @@ func delayInputs(flight feeds.Flight, rotation []feeds.Flight, advisories []feed
 	if flight.EstimatedDeparture != nil {
 		features.AirlineDelayMinutes = max(0, flight.EstimatedDeparture.Sub(scheduled).Minutes())
 	}
-	if inbound, arrival := inboundLeg(flight, rotation, now); inbound != nil {
+	if inbound, arrival, validUntil := inboundLeg(flight, rotation, now); inbound != nil {
 		ready := arrival.Add(40 * time.Minute)
 		features.InboundDelayMinutes = max(0, ready.Sub(scheduled).Minutes())
 		if features.InboundDelayMinutes > 0 {
 			reasons = append(reasons, fmt.Sprintf(inboundReasonPrefix+"%s needs time to arrive and turn around.", inbound.Number))
-			if inbound.ActualArrival == nil {
-				inputs.validUntil = new(inbound.ObservedAt.Add(inboundForecastTTL))
-			}
+			inputs.validUntil = validUntil
 		}
 	}
 	for _, a := range advisories {
@@ -233,53 +231,63 @@ func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now
 	return adjustment
 }
 
-func inboundLeg(flight feeds.Flight, rotation []feeds.Flight, now time.Time) (*feeds.Flight, *time.Time) {
+func inboundLeg(flight feeds.Flight, rotation []feeds.Flight, now time.Time) (leg *feeds.Flight, arrival, validUntil *time.Time) {
 	if len(rotation) == 0 || flight.ScheduledDeparture == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// The source returns a nearest-first aircraft chain. An earlier leg can
 	// revisit this airport without being the one supplying the aircraft now.
-	leg := &rotation[0]
+	leg = &rotation[0]
 	if leg.ID == "" || leg.ID == flight.ID || leg.ObservedAt.IsZero() || leg.ObservedAt.After(now) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	switch leg.Status {
 	case "cancelled", "diverted", "unknown":
-		return nil, nil
+		return nil, nil, nil
 	}
 	linked := flight.InboundID != "" && (leg.ID == flight.InboundID || leg.AeroProviderID() == flight.InboundID)
 	tailsKnown := flight.TailNumber != "" && leg.TailNumber != ""
 	if tailsKnown && !strings.EqualFold(flight.TailNumber, leg.TailNumber) || !linked && !tailsKnown {
-		return nil, nil
+		return nil, nil, nil
 	}
 	airport := cmp.Or(leg.DestinationICAO, leg.Destination)
 	sameAirport := airport != "" && airport == cmp.Or(flight.OriginICAO, flight.Origin)
 	if leg.DestinationICAO == "" || flight.OriginICAO == "" {
 		sameAirport = sameAirport || leg.Destination != "" && leg.Destination == flight.Origin
 	}
-	if !sameAirport || leg.ActualArrival == nil && !leg.ObservedAt.Add(inboundForecastTTL).After(now) ||
+	if !sameAirport ||
 		leg.ActualArrival != nil && leg.ActualArrival.After(now) || leg.ActualLanding != nil && leg.ActualLanding.After(now) {
-		return nil, nil
+		return nil, nil, nil
 	}
-	arrival := inboundArrival(*leg)
+	arrival, estimated := inboundArrival(*leg)
 	scheduled := *flight.ScheduledDeparture
 	if arrival == nil || arrival.IsZero() || arrival.Before(scheduled.Add(-25*time.Hour)) ||
 		leg.ScheduledArrival != nil && leg.ScheduledArrival.After(scheduled) ||
 		leg.ScheduledArrival == nil && !linked && arrival.After(scheduled) {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return leg, arrival
+	if leg.ActualArrival != nil {
+		return leg, arrival, nil
+	}
+	validUntil = new(leg.ObservedAt.Add(inboundForecastTTL))
+	if estimated {
+		validUntil = earliestValidity(validUntil, *arrival)
+	}
+	if !validUntil.After(now) {
+		return nil, nil, nil
+	}
+	return leg, arrival, validUntil
 }
 
-func inboundArrival(leg feeds.Flight) *time.Time {
+func inboundArrival(leg feeds.Flight) (arrival *time.Time, estimated bool) {
 	if leg.ActualArrival != nil {
-		return leg.ActualArrival
+		return leg.ActualArrival, false
 	}
-	// Wheels-on sets a lower bound when a gate ETA is missing or already past.
+	// A reported wheels-on time bounds a missing or contradicted gate ETA.
 	if leg.ActualLanding != nil && (leg.EstimatedArrival == nil || leg.EstimatedArrival.Before(*leg.ActualLanding)) {
-		return leg.ActualLanding
+		return leg.ActualLanding, false
 	}
-	return firstTime(leg.EstimatedArrival, leg.ScheduledArrival)
+	return firstTime(leg.EstimatedArrival, leg.ScheduledArrival), true
 }
 
 func usesInboundTiming(forecast *Prediction) bool {
@@ -288,20 +296,25 @@ func usesInboundTiming(forecast *Prediction) bool {
 	})
 }
 
-func predictionCurrent(forecast *Prediction, flight feeds.Flight, rotation []feeds.Flight, now time.Time) bool {
-	if forecast.ValidUntil != nil && !forecast.ValidUntil.After(now) {
-		return false
+func predictionValidity(forecast *Prediction, flight feeds.Flight, rotation []feeds.Flight, now time.Time) (validUntil *time.Time, valid bool) {
+	if forecast == nil || forecast.ValidUntil != nil && !forecast.ValidUntil.After(now) {
+		return nil, false
 	}
 	if len(forecast.AdvisoryEvidence) == 0 && slices.ContainsFunc(forecast.Reasons, legacyAdvisoryReason) {
-		return false
+		return nil, false
 	}
+	validUntil = forecast.ValidUntil
 	if usesInboundTiming(forecast) {
-		// Databases created before inbound forecasts carried a validity window
-		// still have the original reason and the cached rotation to check.
-		leg, _ := inboundLeg(flight, rotation, now)
-		return leg != nil
+		// Legacy forecasts can outlive an ETA in their stored validity window.
+		leg, _, inboundUntil := inboundLeg(flight, rotation, now)
+		if leg == nil {
+			return nil, false
+		}
+		if inboundUntil != nil {
+			validUntil = earliestValidity(validUntil, *inboundUntil)
+		}
 	}
-	return true
+	return validUntil, true
 }
 
 func containsAny(value string, fragments ...string) bool {

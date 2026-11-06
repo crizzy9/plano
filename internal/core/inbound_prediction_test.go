@@ -53,7 +53,7 @@ func TestPredictionUsesRunwayArrivalAsAGateTimeFloor(t *testing.T) {
 	leg := feeds.Flight{ID: "in", Number: "UA7", Destination: "SFO", TailNumber: "n123aa", Status: "landed", ObservedAt: now,
 		ScheduledArrival: new(now.Add(-30 * time.Minute)), EstimatedArrival: new(now.Add(-4 * time.Minute)), ActualLanding: new(now.Add(-2 * time.Minute))}
 	forecast := Predict(flight, []feeds.Flight{leg}, nil, now)
-	if forecast == nil || forecast.DelayMinutes != 18 || forecast.ValidUntil == nil {
+	if forecast == nil || forecast.DelayMinutes != 18 || forecast.ValidUntil == nil || !forecast.ValidUntil.Equal(now.Add(inboundForecastTTL)) {
 		t.Fatalf("observed wheels-on did not bound the gate estimate: %+v", forecast)
 	}
 	leg.ActualArrival = new(now.Add(-time.Minute))
@@ -62,6 +62,39 @@ func TestPredictionUsesRunwayArrivalAsAGateTimeFloor(t *testing.T) {
 	forecast = Predict(flight, []feeds.Flight{leg}, nil, later)
 	if forecast == nil || forecast.DelayMinutes != 19 || forecast.ValidUntil != nil {
 		t.Fatalf("recorded gate arrival was not retained as a fact: %+v", forecast)
+	}
+}
+
+func TestUnconfirmedInboundTimingExpiresAtArrival(t *testing.T) {
+	now := time.Date(2026, time.November, 5, 19, 0, 0, 0, time.UTC)
+	arrival := now.Add(5 * time.Minute)
+	flight := feeds.Flight{ID: "out", Origin: "SFO", InboundID: "direct", ScheduledDeparture: new(now.Add(20 * time.Minute))}
+	for _, test := range []struct {
+		name string
+		leg  feeds.Flight
+	}{
+		{"estimated arrival", feeds.Flight{Status: "airborne", EstimatedArrival: &arrival}},
+		{"scheduled arrival", feeds.Flight{Status: "scheduled", ScheduledArrival: &arrival}},
+		{"gate estimate after wheels-on", feeds.Flight{Status: "landed", ActualLanding: new(now.Add(-time.Minute)), EstimatedArrival: &arrival}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			leg := test.leg
+			leg.ID, leg.Number, leg.Destination, leg.ObservedAt = "direct", "UA7", "SFO", now
+			rotation := []feeds.Flight{leg}
+			before := arrival.Add(-time.Nanosecond)
+			forecast := Predict(flight, rotation, nil, before)
+			if forecast == nil || forecast.DelayMinutes != 25 || forecast.ValidUntil == nil || !forecast.ValidUntil.Equal(arrival) {
+				t.Fatalf("expected forecast expiring at the unconfirmed arrival: %+v", forecast)
+			}
+			forecast.ValidUntil = new(now.Add(inboundForecastTTL))
+			if deadline, valid := predictionValidity(forecast, flight, rotation, before); !valid || deadline == nil || !deadline.Equal(arrival) {
+				t.Fatalf("legacy deadline = %v, valid = %t, want %s", deadline, valid, arrival)
+			}
+			_, valid := predictionValidity(forecast, flight, rotation, arrival)
+			if got := Predict(flight, rotation, nil, arrival); got != nil || valid {
+				t.Fatalf("unconfirmed timing remained current at arrival: %+v", got)
+			}
+		})
 	}
 }
 

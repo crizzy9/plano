@@ -364,9 +364,11 @@ EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flight
 	}
 	if d.Prediction != nil {
 		now := time.Now()
-		if !predictionCurrent(d.Prediction, d.Flight, d.Inbound, now) {
+		validUntil, valid := predictionValidity(d.Prediction, d.Flight, d.Inbound, now)
+		if !valid {
 			d.Prediction = nil
 		} else {
+			d.Prediction.ValidUntil = validUntil
 			revised, err := forecastAdvisoryRevised(ctx, s.db, d.Prediction, now)
 			if err != nil {
 				return d, err
@@ -517,12 +519,18 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 	if trackedRefresh || prior.ID == "" {
 		predictionValue = PredictWithModel(s.delayModel, flight, inbound, advisories, decisionAt)
 	}
-	if (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flightBeforeDeparture(flight) {
+	sameSchedule := prior.ScheduledDeparture != nil && flight.ScheduledDeparture != nil && prior.ScheduledDeparture.Equal(*flight.ScheduledDeparture)
+	if sameSchedule && (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flightBeforeDeparture(flight) {
 		if err := json.Unmarshal(oldPrediction, &predictionValue); err != nil {
 			return err
 		}
-		if predictionValue != nil && (trackedRefresh && usesInboundTiming(predictionValue) || !predictionCurrent(predictionValue, flight, inbound, decisionAt)) {
-			predictionValue = nil
+		if predictionValue != nil {
+			validUntil, valid := predictionValidity(predictionValue, flight, inbound, decisionAt)
+			if !valid || trackedRefresh && usesInboundTiming(predictionValue) {
+				predictionValue = nil
+			} else {
+				predictionValue.ValidUntil = validUntil
+			}
 		}
 	}
 	if predictionValue != nil {
@@ -604,11 +612,22 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 		if err := json.Unmarshal(oldPrediction, &old); err != nil {
 			return err
 		}
+		var inboundForecastExpired bool
+		if old != nil && predictionValue != nil && sameSchedule && usesInboundTiming(old) {
+			var previousRotation []feeds.Flight
+			if err := json.Unmarshal(oldInbound, &previousRotation); err != nil {
+				return err
+			}
+			// Recovery can replace an expired warning even if the minutes hardly change.
+			_, valid := predictionValidity(old, prior, previousRotation, decisionAt)
+			inboundForecastExpired = !valid
+		}
 		predictionCleared = old != nil && old.DelayMinutes >= flightDelayAlertMinutes &&
-			(predictionValue == nil || predictionValue.DelayMinutes < flightDelayAlertMinutes ||
+			(!sameSchedule || inboundForecastExpired || predictionValue == nil || predictionValue.DelayMinutes < flightDelayAlertMinutes ||
 				old.DelayMinutes-predictionValue.DelayMinutes >= flightDelayAlertMinutes)
 		if predictionValue != nil && predictionValue.DelayMinutes >= flightDelayAlertMinutes &&
-			(old == nil || predictionValue.DelayMinutes >= old.DelayMinutes+flightDelayAlertMinutes || !slices.Equal(predictionValue.Reasons, old.Reasons)) {
+			(!sameSchedule || inboundForecastExpired || old == nil || predictionValue.DelayMinutes >= old.DelayMinutes+flightDelayAlertMinutes ||
+				!slices.Equal(predictionValue.Reasons, old.Reasons)) {
 			events = append(events, Event{Kind: "delay_prediction", Title: "Departure delay predicted", Body: fmt.Sprintf("%s · %d min later", flight.Number, predictionValue.DelayMinutes),
 				At: flight.ObservedAt, validUntil: predictionValue.ValidUntil, advisoryEvidence: predictionValue.AdvisoryEvidence})
 		}

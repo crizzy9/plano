@@ -651,22 +651,22 @@ func (s *Store) deliver(ctx context.Context, sender PushSender, logger *slog.Log
 	var expires int64
 	var connectionDirty, hasAdvisoryEvidence bool
 	var flightEventKind, flightPhase string
-	var latestFlight []byte
+	var latestFlight, latestForecast, latestRotation []byte
 	var newerFlightEvent bool
-	var predictedDelay int
 	const leaseFilter = ` WHERE o.id=? AND o.device_id=? AND o.lease_until=? AND o.done=0`
 	const leasedRow = ` FROM outbox o` + leaseFilter
 	err := s.db.QueryRowContext(ctx, `SELECT o.expires, `+dirtyConnectionAlert+`,
 EXISTS(SELECT 1 FROM outbox_advisory_evidence WHERE outbox_id=o.id),
 COALESCE(json_extract(e.data,'$.kind'),''), COALESCE(json_extract(f.snapshot,'$.status'),''), f.snapshot,
-CASE WHEN json_extract(e.data,'$.kind')='delay_prediction' THEN COALESCE(json_extract(f.prediction,'$.delayMinutes'),0) ELSE 0 END,
+CASE WHEN json_extract(e.data,'$.kind')='delay_prediction' THEN f.prediction END,
+CASE WHEN json_extract(e.data,'$.kind')='delay_prediction' THEN f.inbound END,
 EXISTS(SELECT 1 FROM events newer WHERE newer.flight_id=e.flight_id AND newer.at_ns>e.at_ns
   AND json_extract(newer.data,'$.kind')=json_extract(e.data,'$.kind')
   AND EXISTS(SELECT 1 FROM outbox replacement WHERE replacement.device_id=o.device_id AND replacement.flight_id=o.flight_id
     AND json_extract(replacement.message,'$.CollapseID')=newer.id))
 FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leaseFilter,
 		job.id, job.deviceID, job.lease).Scan(&expires, &connectionDirty, &hasAdvisoryEvidence,
-		&flightEventKind, &flightPhase, &latestFlight, &predictedDelay, &newerFlightEvent)
+		&flightEventKind, &flightPhase, &latestFlight, &latestForecast, &latestRotation, &newerFlightEvent)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
 			logger.Error("could not validate push lease", "job", job.id, "error", err)
@@ -701,10 +701,35 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 			}
 			expires = min(expires, departure.UnixNano())
 		}
-		if newerFlightEvent || !flightAlertRelevant(flightEventKind, current) || expires <= now.UnixNano() ||
-			flightEventKind == "delay_prediction" && predictedDelay < flightDelayAlertMinutes {
+		if newerFlightEvent || !flightAlertRelevant(flightEventKind, current) || expires <= now.UnixNano() {
 			s.removeObsoletePush(ctx, logger, job)
 			return
+		}
+		if flightEventKind == "delay_prediction" {
+			var forecast *Prediction
+			if err := json.Unmarshal(latestForecast, &forecast); err != nil {
+				logger.Error("could not validate delay push forecast", "job", job.id, "error", err)
+				return
+			}
+			if forecast == nil || forecast.DelayMinutes < flightDelayAlertMinutes {
+				s.removeObsoletePush(ctx, logger, job)
+				return
+			}
+			var rotation []feeds.Flight
+			if usesInboundTiming(forecast) {
+				if err := json.Unmarshal(latestRotation, &rotation); err != nil {
+					logger.Error("could not validate delay push rotation", "job", job.id, "error", err)
+					return
+				}
+			}
+			validUntil, valid := predictionValidity(forecast, current, rotation, now)
+			if !valid {
+				s.removeObsoletePush(ctx, logger, job)
+				return
+			}
+			if validUntil != nil {
+				expires = min(expires, validUntil.UnixNano())
+			}
 		}
 	}
 	apnsFamily := stateAlert && job.target.Platform == "ios"
@@ -732,7 +757,7 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 			return
 		}
 	}
-	if hasAdvisoryEvidence || apnsFamily {
+	if hasAdvisoryEvidence || apnsFamily || flightEventKind == "delay_prediction" {
 		// A revision or revocation can retire the job while evidence is read
 		// or while a previous same-family send releases its gate.
 		var leaseExpiry int64
