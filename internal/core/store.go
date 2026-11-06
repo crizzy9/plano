@@ -203,7 +203,7 @@ CREATE INDEX IF NOT EXISTS bookings_by_locator ON bookings(owner, locator_hash);
 CREATE TABLE IF NOT EXISTS shares (
   token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, flight_id TEXT NOT NULL, expires INTEGER NOT NULL,
   FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
-);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema); err != nil {
+);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema + delayProviderSamplesSchema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -458,7 +458,7 @@ func (s *Store) observe(ctx context.Context, flight feeds.Flight, track []feeds.
 	var raw, oldInbound, oldPrediction, oldTrack []byte
 	var estimateAnchors estimateAlertAnchors
 	var previousProvider, lastRadarTail string
-	var retainedDirect bool
+	var retainedDirect, providerChanged bool
 	provider := flight.AeroProviderID()
 	err = tx.QueryRowContext(ctx, `SELECT snapshot,inbound,prediction,telemetry,
 COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id),''),
@@ -475,13 +475,16 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 		if !flight.ObservedAt.After(prior.ObservedAt) {
 			return nil
 		}
-		if flight.TailNumber != prior.TailNumber || flight.InboundID != prior.InboundID {
+		providerChanged = previousProvider != "" && provider != "" && provider != previousProvider
+		if providerChanged || flight.TailNumber != prior.TailNumber || flight.InboundID != prior.InboundID {
 			oldPrediction = []byte("null")
 			if inbound == nil {
 				inbound = make([]feeds.Flight, 0)
 			}
 		}
-		providerChanged := previousProvider != "" && provider != "" && provider != previousProvider
+		if providerChanged {
+			oldInbound = []byte("[]")
+		}
 		if prior.TailNumber != "" {
 			lastRadarTail = prior.TailNumber
 		}
@@ -546,7 +549,7 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 		predictionValue = PredictWithModel(s.delayModel, flight, inbound, advisories, decisionAt)
 		capCachedAdvisoryValidity(predictionValue, advisoryDeadlines)
 	}
-	sameSchedule := prior.ScheduledDeparture != nil && flight.ScheduledDeparture != nil && prior.ScheduledDeparture.Equal(*flight.ScheduledDeparture)
+	sameSchedule := !providerChanged && prior.ScheduledDeparture != nil && flight.ScheduledDeparture != nil && prior.ScheduledDeparture.Equal(*flight.ScheduledDeparture)
 	if sameSchedule && (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flightBeforeDeparture(flight) {
 		if err := json.Unmarshal(oldPrediction, &predictionValue); err != nil {
 			return err
@@ -646,7 +649,7 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 	}
 	if prior.ID != "" {
 		obsolete := supersededFlightAlertKinds(prior, flight, events)
-		if predictionCleared && !slices.Contains(obsolete, "delay_prediction") {
+		if (predictionCleared || providerChanged) && !slices.Contains(obsolete, "delay_prediction") {
 			obsolete = append(obsolete, "delay_prediction")
 		}
 		if err := pruneSupersededFlightAlerts(ctx, tx, flight.ID, obsolete); err != nil {

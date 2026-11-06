@@ -2,6 +2,8 @@
 
 Use historical flight snapshots from a source you are allowed to retain for training. Record each feature snapshot before the flight pushes back, then join it to the actual gate-out time and the time your collector learned that result. Keep one observation per stable flight instance ID at a consistent forecast lead time. Plano ships no fitted model or historical training dataset.
 
+Plano's live AeroAPI collector keys forecasts by the verified provider flight ID. A later result reached through a schedule alias updates the same outcome. Exports omit older schedule aliases that lack capture-time identity. Use a fresh export when comparing physical-flight counts with earlier datasets. [AeroAPI flight ID availability](https://support.flightaware.com/hc/en-us/articles/33161341318935-Why-Is-A-Frequently-Used-Endpoint-Returning-A-Null-Value)
+
 Prepare a JSON Lines file with one object per line. This example shows the format. Its values are illustrative.
 
 ```json

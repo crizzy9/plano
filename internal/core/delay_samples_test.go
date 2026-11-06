@@ -136,7 +136,8 @@ func TestAeroCallbackCompletesAnExistingDelaySample(t *testing.T) {
 		t.Fatal(err)
 	}
 	var cleared int
-	if err := store.db.QueryRowContext(ctx, `SELECT departed_ns IS NULL AND label_observed_ns IS NULL FROM delay_samples WHERE flight_id=?`, flight.ID).Scan(&cleared); err != nil || cleared != 1 {
+	if err := store.db.QueryRowContext(ctx, `SELECT departed_ns IS NULL AND label_observed_ns IS NULL AND outcome_observed_ns=?
+FROM delay_provider_samples WHERE provider_id=?`, flight.ObservedAt.UnixNano(), flight.AeroProviderID()).Scan(&cleared); err != nil || cleared != 1 {
 		t.Fatalf("cancellation did not clear the captured outcome: %d %v", cleared, err)
 	}
 	output.Reset()

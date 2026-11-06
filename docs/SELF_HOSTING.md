@@ -295,10 +295,13 @@ on publicly reachable deployments and apply lookup limits at the bridge.
 Set `PLANO_COLLECT_DELAY_SAMPLES=true` in live mode to collect one forecast
 snapshot per flight from 30 to 120 minutes before scheduled gate-out, with
 its eventual reported outcome. Confirm that your source license permits model
-training. The exporter streams completed samples without passenger details or
-raw provider flight IDs. A later cancellation or invalid gate-out correction
-removes the outcome from subsequent exports. A valid correction keeps the
-original forecast features and schedule. From the running Compose project:
+training. AeroAPI capture starts when a provider flight ID is verified. A
+schedule entry and a direct search result for that same instance share the
+first captured forecast and its outcome. A later cancellation or invalid
+gate-out correction removes the outcome from exports. A valid correction keeps
+the original forecast features and schedule. Exports hash the flight ID and
+omit legacy schedule aliases whose capture identity cannot be verified. From
+the running Compose project:
 
 ```sh
 umask 077
