@@ -56,6 +56,9 @@ func TestLiveHeartbeatWithFiveSecondObservations(t *testing.T) {
 					if offset > 0 && job.message.State.ObservedEpoch != flight.ObservedAt.Unix() {
 						t.Fatalf("at %v: job used an older observation", offset)
 					}
+					if heartbeat := platform == "android" && offset == time.Minute; job.message.AndroidLiveHeartbeat != heartbeat {
+						t.Fatalf("at %v: Android heartbeat = %t, want %t", offset, job.message.AndroidLiveHeartbeat, heartbeat)
+					}
 				}
 			}
 			observe(0, initial)
@@ -78,7 +81,71 @@ func TestLiveHeartbeatWithFiveSecondObservations(t *testing.T) {
 			flight.Status, flight.ScheduledDeparture = "arrived", nil
 			observe(75*time.Second, push.LiveEnd)
 			observe(80 * time.Second)
+			if platform == "android" {
+				flight.Status, flight.ScheduledDeparture = "airborne", &departure
+				observe(85*time.Second, push.LiveUpdate)
+			}
 		})
+	}
+}
+
+func TestAndroidLiveHeartbeatPreservesPendingChange(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(filepath.Join(t.TempDir(), "heartbeat-retry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	flight := feeds.Flight{ID: "heartbeat-retry", Number: "UA123", Origin: "SFO", Destination: "LHR",
+		Status: "airborne", ObservedAt: now}
+	observe := func(at time.Time) {
+		t.Helper()
+		flight.ObservedAt = at
+		if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observe(now)
+	owner := slotInstallation(t, store)
+	if err := store.Track(ctx, owner, flight.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Register(ctx, owner, Device{Platform: "android", Kind: "alert", Token: "heartbeat-retry-token"}, now); err != nil {
+		t.Fatal(err)
+	}
+	observe(now.Add(time.Second))
+	if jobs := liveJobsAt(t, store, flight.ObservedAt); len(jobs) != 1 || jobs[0].message.Kind != push.LiveStart {
+		t.Fatalf("expected a delivered start, got %v", jobs)
+	}
+	flight.ArrivalGate = "B12"
+	changedAt := now.Add(5 * time.Second)
+	observe(changedAt)
+	jobs, err := store.claim(ctx, changedAt, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changeID int64
+	for _, job := range jobs {
+		var sendErr error
+		if job.message.Kind == push.LiveUpdate && !job.message.AndroidLiveHeartbeat {
+			changeID = job.id
+			sendErr = &push.DeliveryError{Retryable: true, RetryAfter: 2 * time.Minute}
+		}
+		if err := store.resolve(ctx, job, sendErr, changedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if changeID == 0 {
+		t.Fatal("expected a meaningful Android change to retry")
+	}
+	observe(changedAt.Add(time.Minute))
+	if jobs := liveJobsAt(t, store, flight.ObservedAt); len(jobs) != 0 {
+		t.Fatalf("a heartbeat displaced the pending change: %v", jobs)
+	}
+	if jobs := liveJobsAt(t, store, changedAt.Add(2*time.Minute)); len(jobs) != 1 || jobs[0].id != changeID ||
+		jobs[0].message.AndroidLiveHeartbeat || jobs[0].message.State.ArrivalGate != "B12" {
+		t.Fatalf("expected to retry the original change, got %v", jobs)
 	}
 }
 

@@ -2,5 +2,6 @@
 <resources>
   <string name="plano_live_progress_channel">Live flight progress</string>
   <string name="plano_live_progress_title">Flight progress</string>
+  <string name="plano_live_stop_progress">Stop live progress</string>
   <string name="plano_live_route">%1$s to %2$s</string>
 </resources>

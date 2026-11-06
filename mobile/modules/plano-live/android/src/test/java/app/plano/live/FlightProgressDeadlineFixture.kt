@@ -1,6 +1,6 @@
 package app.plano.live
 
-// Compile with WidgetFlightProgress.kt and run with a stock Kotlin compiler.
+// Compile with WidgetFlightProgress.kt and PushWire.kt using a stock Kotlin compiler.
 fun main() {
   val now = 1_760_000_000_000L
   val departure = now + 10_000L
@@ -25,5 +25,13 @@ fun main() {
   check(landed.countdownTarget(now) == null)
   check(landed.displayDeadline(now) == landed.expiresAt)
   check(landed.percent(now) == 100)
-  println("Flight progress deadline fixtures passed")
+
+  val stoppedAt = now + 3_000L
+  val newer = stoppedAt + 1_000L
+  check(!acceptsLiveAfterStop(stoppedAt, false, newer / 1000, newer))
+  check(!acceptsLiveAfterStop(stoppedAt, true, now / 1000, newer))
+  check(!acceptsLiveAfterStop(stoppedAt, true, stoppedAt / 1000, stoppedAt))
+  check(acceptsLiveAfterStop(stoppedAt, true, newer / 1000, newer))
+  check(acceptsLiveAfterStop(stoppedAt, true, newer / 1000, 0))
+  println("Flight progress deadline and stop fixtures passed")
 }

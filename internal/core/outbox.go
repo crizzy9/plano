@@ -326,19 +326,22 @@ func enqueueLive(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight) er
 		id                          int64
 		platform, kind, seat        string
 		started, requestUpdateToken bool
-		recentState                 []byte
+		recentMessage               []byte
+		recentPending               bool
 	}
 	// Live pushes expire at a fixed offset from enqueue time. Unlike due (retry
 	// time) and the APNs wire timestamp, expiry preserves that offset.
-	recentExpiry := now.Add(liveFreshness - liveHeartbeatInterval).UnixNano()
+	recentExpiry := now.Add(liveFreshness - liveHeartbeatInterval)
 	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.platform,d.kind,t.seat,l.device_id IS NOT NULL, q.device_id IS NOT NULL,
-(SELECT json_extract(o.message,'$.State') FROM outbox o
-WHERE o.device_id=d.id AND o.flight_id=t.flight_id AND o.expires>? AND json_extract(o.message,'$.Kind') IN ('start','update')
-ORDER BY o.id DESC LIMIT 1)
+recent.message, COALESCE(recent.done=0,0)
 FROM devices d JOIN tracked t ON t.owner=d.owner
 LEFT JOIN live_started l ON l.device_id=d.id AND l.flight_id=t.flight_id
 LEFT JOIN live_token_requests q ON q.device_id=d.id
-WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='live_start' AND NOT EXISTS (SELECT 1 FROM devices u WHERE u.owner=d.owner AND u.kind='live_update' AND u.flight_id=t.flight_id)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, recentExpiry, flight.ID)
+LEFT JOIN outbox recent ON recent.id=(SELECT o.id FROM outbox o
+WHERE o.device_id=d.id AND o.flight_id=t.flight_id AND o.expires>CASE WHEN d.platform='android' THEN ? ELSE ? END
+AND (json_extract(o.message,'$.Kind') IN ('start','update') OR d.platform='android' AND json_extract(o.message,'$.Kind')='end')
+ORDER BY o.id DESC LIMIT 1)
+WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='live_start' AND NOT EXISTS (SELECT 1 FROM devices u WHERE u.owner=d.owner AND u.kind='live_update' AND u.flight_id=t.flight_id)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, now.UnixNano(), recentExpiry.UnixNano(), flight.ID)
 	if err != nil {
 		return err
 	}
@@ -346,7 +349,7 @@ WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='l
 	var recipients []audience
 	for rows.Next() {
 		var a audience
-		if err := rows.Scan(&a.id, &a.platform, &a.kind, &a.seat, &a.started, &a.requestUpdateToken, &a.recentState); err != nil {
+		if err := rows.Scan(&a.id, &a.platform, &a.kind, &a.seat, &a.started, &a.requestUpdateToken, &a.recentMessage, &a.recentPending); err != nil {
 			return err
 		}
 		recipients = append(recipients, a)
@@ -374,17 +377,21 @@ WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='l
 			kind = push.LiveStart
 		}
 		msg := liveMessage(flight, kind, a.seat, now)
-		if kind == push.LiveUpdate && len(a.recentState) > 0 {
-			var recent push.LiveState
-			if err := json.Unmarshal(a.recentState, &recent); err != nil {
+		if kind == push.LiveUpdate && len(a.recentMessage) > 0 {
+			var recent push.Message
+			if err := json.Unmarshal(a.recentMessage, &recent); err != nil {
 				return err
 			}
 			// A token registered from cached data may have queued stale state.
 			// Let the first fresh observation recover the surface immediately.
-			if recent.ObservedEpoch > now.Add(-liveFreshness).Unix() {
-				recent.ObservedEpoch = msg.State.ObservedEpoch
-				if recent == *msg.State {
-					continue
+			if recent.Kind != push.LiveEnd && recent.State != nil && recent.State.ObservedEpoch > now.Add(-liveFreshness).Unix() {
+				recent.State.ObservedEpoch = msg.State.ObservedEpoch
+				if *recent.State == *msg.State {
+					if recent.ExpiresAt.After(recentExpiry) || a.platform == "android" && a.recentPending && !recent.AndroidLiveHeartbeat {
+						// A best-effort heartbeat must not replace a queued change.
+						continue
+					}
+					msg.AndroidLiveHeartbeat = a.platform == "android"
 				}
 			}
 		}

@@ -281,7 +281,12 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 	now := time.Now()
 	ordered := fixtureOrderedAlert(now)
 	ordered.APNsCollapseID = apnsFamily
-	messages := []Message{ordered, fixtureActivity(LiveStart, now), fixtureActivity(LiveUpdate, now), fixtureActivity(LiveEnd, now), fixtureConnectionAlert(now)}
+	update := fixtureActivity(LiveUpdate, now)
+	update.Title = "UA7 to JFK"
+	update.Body = "Track this flight with Plano."
+	heartbeat := update
+	heartbeat.AndroidLiveHeartbeat = true
+	messages := []Message{ordered, fixtureActivity(LiveStart, now), heartbeat, update, fixtureActivity(LiveEnd, now), fixtureConnectionAlert(now)}
 	var exchanges, sends int
 	client.client = &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		body, err := io.ReadAll(r.Body)
@@ -327,7 +332,7 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 					Android      struct {
 						Priority  string          `json:"priority"`
 						TTL       string          `json:"ttl"`
-						Collapse  string          `json:"collapse_key"`
+						Collapse  *string         `json:"collapse_key"`
 						Bandwidth bool            `json:"bandwidth_constrained_ok"`
 						UI        json.RawMessage `json:"notification"`
 					} `json:"android"`
@@ -342,13 +347,22 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 				t.Errorf("invalid FCM connection route: %s", body)
 			}
 			ttl, err := time.ParseDuration(got.Android.TTL)
-			if got.Token != device || got.Android.Priority != "HIGH" || !got.Android.Bandwidth || err != nil || ttl <= 0 || ttl > 90*time.Second || got.Notification != nil || got.Android.UI != nil || got.Data["flightId"] != message.FlightID || got.Data["binding"] != binding {
+			if err != nil || ttl < 0 || ttl > 90*time.Second || (ttl == 0) != message.AndroidLiveHeartbeat {
+				t.Errorf("invalid FCM TTL: %s", body)
+			}
+			priority := "HIGH"
+			if message.AndroidLiveHeartbeat {
+				priority = "NORMAL"
+			}
+			if got.Token != device || got.Android.Priority != priority || !got.Android.Bandwidth || got.Notification != nil || got.Android.UI != nil || got.Data["flightId"] != message.FlightID || got.Data["binding"] != binding {
 				t.Errorf("invalid FCM data request: %s", body)
 			}
 			kind, hasKind := got.Data["alertKind"]
 			phase, hasPhase := got.Data["alertPhase"]
 			observed, hasObserved := got.Data["alertObservedNs"]
 			expires, hasExpires := got.Data["alertExpiresMs"]
+			_, hasTitle := got.Data["title"]
+			_, hasBody := got.Data["body"]
 			if message.Kind == Alert {
 				if got.Data["type"] != "alert" || got.Data["title"] != message.Title || got.Data["body"] != message.Body || got.Data["eventId"] != message.CollapseID {
 					t.Errorf("invalid FCM alert: %s", body)
@@ -363,15 +377,11 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 				}
 			} else if got.Data["type"] != "live" || got.Data["event"] != string(message.Kind) || got.Data["departureGate"] != "C12" || got.Data["seat"] != "14A" || got.Data["observedEpoch"] != strconv.FormatInt(message.State.ObservedEpoch, 10) {
 				t.Errorf("invalid FCM activity: %s", body)
-			} else if hasKind || hasObserved || hasExpires || hasPhase {
+			} else if hasKind || hasObserved || hasExpires || hasPhase || hasTitle || hasBody {
 				t.Errorf("FCM activity contained alert delivery metadata: %s", body)
 			}
-			wantCollapse := ""
-			if message.Kind == LiveUpdate {
-				wantCollapse = message.CollapseID
-			}
-			if got.Android.Collapse != wantCollapse {
-				t.Errorf("FCM collapse key = %q, want %q", got.Android.Collapse, wantCollapse)
+			if got.Android.Collapse != nil {
+				t.Errorf("unexpected FCM collapse key: %s", body)
 			}
 			if strings.Contains(string(body), apnsFamily) {
 				t.Errorf("FCM request contained the APNs collapse override: %s", body)
@@ -394,6 +404,10 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 		} else if err != nil {
 			t.Fatal(err)
 		}
+	}
+	heartbeat.ExpiresAt = now
+	if err := client.Send(t.Context(), device, heartbeat); err == nil || err.Error() != "push message expired" {
+		t.Fatalf("expired FCM heartbeat: %v", err)
 	}
 	if sends != len(messages) || exchanges != 2 {
 		t.Fatalf("OAuth cache / invalidation: sends=%d, exchanges=%d", sends, exchanges)

@@ -17,6 +17,7 @@ import expo.modules.notifications.service.ExpoFirebaseMessagingService
 // whose framework stub does not yet expose the API 36.1 constant.
 private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
 internal const val LEGACY_PROGRESS_EXPIRY_ACTION = "app.plano.live.EXPIRE_FLIGHT_PROGRESS"
+internal const val STOP_PROGRESS_ACTION = "app.plano.live.STOP_FLIGHT_PROGRESS"
 private const val FLIGHT_ALERTS_CHANNEL = "flight-alerts"
 private const val FLIGHT_PROGRESS_CHANNEL = "flight-progress"
 private val notificationFlightId = Regex("[A-Za-z0-9_.-]{1,128}")
@@ -88,21 +89,25 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
       if (!state.isFresh(System.currentTimeMillis())) return
       state
     }
-    if (!AndroidPushSession.advance(this, flightId, observedAt, sentAt, started = started)) return
+    val accepted = AndroidPushSession.advance(this, flightId, observedAt, sentAt, started, ended) ?: return
     val tag = liveNotificationTag(flightId)
     // Keep the widget independent of notification permission. Its own privacy
     // setting controls which details it can keep from accepted flight updates.
-    runCatching {
+    val widgetAccepted = runCatching {
       PlanoFlightWidget.onFlight(
         this, flightId, binding, started, ended, progress,
         sentAt.takeIf { it > 0 } ?: epochMillis(observedAt),
         data,
+        accepted.stoppedKeys,
       )
-    }
+    }.getOrNull()
     if (progress == null) {
       manager.cancel(tag, 0)
       return
     }
+    // A saved widget tombstone also fences notifications if saving the session stop failed.
+    if (widgetAccepted == false) return
+    val instance = accepted.instance ?: return
 
     if (!manager.areNotificationsEnabled()) return
     val now = System.currentTimeMillis()
@@ -149,6 +154,9 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
       .setVisibility(Notification.VISIBILITY_PRIVATE)
       .setPublicVersion(publicVersion)
       .setContentIntent(openApp(flightId))
+      .addAction(Notification.Action.Builder(
+        null, getString(R.string.plano_live_stop_progress), stopProgress(flightId, binding, instance),
+      ).build())
     if (Build.VERSION.SDK_INT >= 36) {
       builder.addExtras(Bundle().apply { putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true) })
     }
@@ -205,6 +213,18 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     ) ?: return
     val delay = (expiresAt - System.currentTimeMillis()).coerceAtLeast(0L)
     alarm.set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + delay, pending)
+  }
+
+  private fun stopProgress(flightId: String, binding: String, instance: String): PendingIntent? {
+    // PendingIntent identity excludes extras. Separate each flight, binding, and start by its data URI.
+    val key = hashPushIdentity("$binding\u0000$flightId\u0000$instance")
+    val intent = Intent(this, PlanoFlightWidgetProvider::class.java)
+      .setAction(STOP_PROGRESS_ACTION)
+      .setData(Uri.parse("plano://stop-flight-progress/$key"))
+      .putExtra("flightId", flightId)
+      .putExtra("binding", binding)
+      .putExtra("instance", instance)
+    return PendingIntent.getBroadcast(this, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT)
   }
 
   private fun openApp(flightId: String?, inboundId: String? = null): PendingIntent? {

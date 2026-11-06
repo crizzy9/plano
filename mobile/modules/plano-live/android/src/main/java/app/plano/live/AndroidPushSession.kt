@@ -10,8 +10,18 @@ import java.util.UUID
 private const val ORDER_TTL_MILLIS = 2 * 24 * 60 * 60 * 1000L
 private const val MAX_ORDER_ENTRIES = 64
 
+internal data class LiveProgressAction(val binding: String, val instance: String)
+
 internal object AndroidPushSession {
-  private data class Order(val observed: Long, val sent: Long, val received: Long, val stoppedAt: Long = 0)
+  private data class Order(
+    val observed: Long,
+    val sent: Long,
+    val received: Long,
+    val stoppedAt: Long = 0,
+    val instance: String? = null,
+  )
+
+  data class AcceptedProgress(val instance: String?, val stoppedKeys: Set<String>)
   private data class AlertOrder(val received: Long, val revisions: Map<String, Long>)
   private data class State(
     val origin: String = "",
@@ -22,6 +32,7 @@ internal object AndroidPushSession {
     val alertOrder: Map<String, AlertOrder> = emptyMap(),
   ) {
     fun retired() = if (enabled) mapOf("origin" to origin, "binding" to generation) else null
+    fun stoppedKeys() = order.filterValues { it.stoppedAt != 0L }.keys
   }
 
   private var loaded: State? = null
@@ -65,33 +76,36 @@ internal object AndroidPushSession {
   @Synchronized
   fun refreshWidget(context: Context) {
     val current = state(context)
-    PlanoFlightWidget.refresh(context, current.generation.takeIf { current.enabled })
+    PlanoFlightWidget.refresh(context, current.generation.takeIf { current.enabled }, current.stoppedKeys())
   }
 
   @Synchronized
   fun resolveWidgetFlight(context: Context, origin: String, key: String): String? {
     val current = state(context)
     if (!current.enabled || origin.isEmpty() || current.origin != origin) return null
-    return PlanoFlightWidget.resolveTap(context, current.generation, key)
+    return PlanoFlightWidget.resolveTap(context, current.generation, key, current.stoppedKeys())
   }
 
   @Synchronized
   fun setWidgetDetailsEnabled(context: Context, enabled: Boolean) {
     val current = state(context)
-    PlanoFlightWidget.setDetailsEnabled(context, enabled, current.generation.takeIf { current.enabled })
+    PlanoFlightWidget.setDetailsEnabled(context, enabled, current.generation.takeIf { current.enabled }, current.stoppedKeys())
   }
 
   @Synchronized
-  fun stop(context: Context, flightId: String) {
+  fun stop(context: Context, flightId: String, expected: LiveProgressAction? = null) {
     val current = state(context)
+    val key = hashPushIdentity(flightId)
+    val previous = current.order[key]
+    if (expected != null && (!current.enabled || current.generation != expected.binding ||
+        previous == null || previous.instance != expected.instance || previous.stoppedAt != 0L)) return
     try {
       if (current.enabled) {
         val now = System.currentTimeMillis()
-        val key = hashPushIdentity(flightId)
-        val previous = current.order[key]
-        val next = current.withOrder(key, Order(previous?.observed ?: 0, previous?.sent ?: 0, now, now))
+        val stopped = previous?.copy(received = now, stoppedAt = now) ?: Order(0, 0, now, now)
+        val next = current.withOrder(key, stopped)
         try {
-          write(context, next)
+          write(context, next, verify = true)
         } catch (cause: Exception) {
           loaded = next
           throw cause
@@ -99,7 +113,7 @@ internal object AndroidPushSession {
       }
     } finally {
       context.getSystemService(NotificationManager::class.java)?.cancel(liveNotificationTag(flightId), 0)
-      if (current.enabled) PlanoFlightWidget.stop(context, flightId, current.generation)
+      if (current.enabled) PlanoFlightWidget.stop(context, flightId, current.generation, state(context).stoppedKeys())
     }
   }
 
@@ -147,16 +161,18 @@ internal object AndroidPushSession {
   }
 
   @Synchronized
-  fun advance(context: Context, flightId: String, observedAt: Long, sentAt: Long, started: Boolean = false): Boolean {
+  fun advance(context: Context, flightId: String, observedAt: Long, sentAt: Long, started: Boolean, ended: Boolean): AcceptedProgress? {
     val now = System.currentTimeMillis()
-    if (!validPushObservation(observedAt, sentAt, now)) return false
+    if (!validPushObservation(observedAt, sentAt, now)) return null
     val current = state(context)
     val key = hashPushIdentity(flightId)
     val old = current.order[key]?.takeIf { it.received >= now - ORDER_TTL_MILLIS }
-    if (!acceptsLiveAfterStop(old?.stoppedAt ?: 0, started, observedAt, sentAt)) return false
-    if (old != null && (observedAt < old.observed || observedAt == old.observed && sentAt <= old.sent)) return false
-    write(context, current.withOrder(key, Order(observedAt, sentAt, now)))
-    return true
+    if (!acceptsLiveAfterStop(old?.stoppedAt ?: 0, started, observedAt, sentAt)) return null
+    if (old != null && (observedAt < old.observed || observedAt == old.observed && sentAt <= old.sent)) return null
+    val instance = if (ended) null else old?.instance?.takeUnless { started } ?: UUID.randomUUID().toString()
+    val next = current.withOrder(key, Order(observedAt, sentAt, now, instance = instance))
+    write(context, next)
+    return AcceptedProgress(instance, next.stoppedKeys())
   }
 
   private fun State.withOrder(key: String, entry: Order): State {
@@ -200,7 +216,8 @@ internal object AndroidPushSession {
       val entries = json.optJSONObject("order") ?: JSONObject()
       val order = entries.keys().asSequence().take(MAX_ORDER_ENTRIES).associateWith { id ->
         val entry = entries.getJSONObject(id)
-        Order(entry.getLong("observed"), entry.getLong("sent"), entry.getLong("received"), entry.optLong("stoppedAt"))
+        Order(entry.getLong("observed"), entry.getLong("sent"), entry.getLong("received"), entry.optLong("stoppedAt"),
+          (entry.opt("instance") as? String)?.takeIf(String::isNotEmpty))
       }
       val alertEntries = json.optJSONObject("alertOrder") ?: JSONObject()
       val alertOrder = alertEntries.keys().asSequence().take(MAX_ORDER_ENTRIES).mapNotNull { id ->
@@ -221,11 +238,12 @@ internal object AndroidPushSession {
     return current
   }
 
-  private fun write(context: Context, state: State) {
+  private fun write(context: Context, state: State, verify: Boolean = false) {
     val order = JSONObject()
     for ((key, value) in state.order) {
       val entry = JSONObject().put("observed", value.observed).put("sent", value.sent).put("received", value.received)
       if (value.stoppedAt != 0L) entry.put("stoppedAt", value.stoppedAt)
+      value.instance?.let { entry.put("instance", it) }
       order.put(key, entry)
     }
     val alertOrder = JSONObject()
@@ -237,15 +255,17 @@ internal object AndroidPushSession {
     val json = JSONObject().put("origin", state.origin).put("generation", state.generation)
       .put("enabled", state.enabled).put("suppressed", state.suppressed).put("order", order)
       .put("alertOrder", alertOrder)
+    val bytes = json.toString().toByteArray(Charsets.UTF_8)
     val file = file(context)
     val stream = file.startWrite()
     try {
-      stream.write(json.toString().toByteArray(Charsets.UTF_8))
+      stream.write(bytes)
       file.finishWrite(stream)
-      loaded = state
     } catch (cause: Exception) {
       file.failWrite(stream)
       throw cause
     }
+    if (verify) check(file.readFully().contentEquals(bytes)) { "Could not save live progress stop" }
+    loaded = state
   }
 }

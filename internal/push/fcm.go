@@ -230,10 +230,10 @@ type fcmRequest struct {
 	} `json:"message"`
 }
 
+// Omit collapse keys so independent flights can deliver without sharing FCM's four collapse slots.
 type fcmAndroid struct {
 	Priority             string `json:"priority"`
 	TTL                  string `json:"ttl"`
-	CollapseKey          string `json:"collapse_key,omitempty"`
 	BandwidthConstrained bool   `json:"bandwidth_constrained_ok,omitempty"`
 }
 
@@ -242,6 +242,19 @@ func fcmDeadline(expiresAt, now time.Time) time.Time {
 		return limit
 	}
 	return expiresAt
+}
+
+func fcmHeartbeat(message Message) bool {
+	return message.Kind == LiveUpdate && message.AndroidLiveHeartbeat
+}
+
+func fcmTTL(message Message, remaining time.Duration) string {
+	if fcmHeartbeat(message) {
+		// The next heartbeat can refresh the device on reconnect. FCM drops a
+		// zero-TTL message when immediate delivery is unavailable.
+		return "0s"
+	}
+	return strconv.FormatInt(int64(remaining/time.Second), 10) + "s"
 }
 
 func (f *FCM) request(m Message, deviceToken string, now time.Time) (fcmRequest, error) {
@@ -254,21 +267,26 @@ func (f *FCM) request(m Message, deviceToken string, now time.Time) (fcmRequest,
 	}
 	payload.Message.Android = fcmAndroid{
 		Priority:             "HIGH",
-		TTL:                  strconv.FormatInt(int64(remaining/time.Second), 10) + "s",
+		TTL:                  fcmTTL(m, remaining),
 		BandwidthConstrained: f.bandwidthConstrained,
+	}
+	if fcmHeartbeat(m) {
+		// A routine refresh can be ignored after a local stop. Reserve the
+		// high-priority delivery budget for visible changes and alerts.
+		payload.Message.Android.Priority = "NORMAL"
 	}
 	data := map[string]string{"flightId": m.FlightID}
 	if m.binding != "" {
 		data["binding"] = m.binding
 	}
-	if m.Title != "" {
-		data["title"] = m.Title
-	}
-	if m.Body != "" {
-		data["body"] = m.Body
-	}
 	if m.Kind == Alert {
 		data["type"] = "alert"
+		if m.Title != "" {
+			data["title"] = m.Title
+		}
+		if m.Body != "" {
+			data["body"] = m.Body
+		}
 		data["alertExpiresMs"] = strconv.FormatInt(deadline.UnixMilli(), 10)
 		if m.AlertKind != "" {
 			if deadline.UnixMilli() <= m.Timestamp.UnixMilli() {
@@ -308,9 +326,6 @@ func (f *FCM) request(m Message, deviceToken string, now time.Time) (fcmRequest,
 				data[key] = value
 			}
 		}
-		if m.Kind == LiveUpdate {
-			payload.Message.Android.CollapseKey = m.CollapseID
-		}
 	}
 	if _, err := encodePayload(data); err != nil {
 		return payload, err
@@ -342,7 +357,7 @@ func (f *FCM) Send(ctx context.Context, deviceToken string, message Message) err
 	if remaining <= 0 {
 		return errors.New("push message expired")
 	}
-	payload.Message.Android.TTL = strconv.FormatInt(int64(remaining/time.Second), 10) + "s"
+	payload.Message.Android.TTL = fcmTTL(m, remaining)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err

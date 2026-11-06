@@ -358,6 +358,13 @@ replaces the visible alert for that category. Movement alerts can clear older
 boarding and departure alerts. Ordered alert history is scoped to the active
 push session.
 
+Unchanged live progress uses normal-priority refreshes that FCM discards if
+it cannot deliver them immediately. A quiet flight's progress can expire if
+the phone remains in Doze. Live starts, ends, and changes keep high priority
+and their delivery window. Android checks observation order when delayed live
+updates arrive.
+[FCM message lifespan](https://firebase.google.com/docs/cloud-messaging/customize-messages/setting-message-lifespan) · [FCM Android priorities](https://firebase.google.com/docs/cloud-messaging/android-message-priority)
+
 When Android hides private notification content, Plano supplies a lock-screen
 version with phase, progress, and timing. Flight number, route, gate,
 terminal, and seat stay in the private notification. The phone's settings
@@ -365,8 +372,11 @@ control lock-screen display and Live Update promotion. On Android 8 and later,
 a progress notification can show a live countdown and requests expiry at its
 target or 20 minutes after the flight observation, whichever comes first. A
 fresh push can restore progress after the countdown ends. Android 7 uses a
-static system timestamp and an inexact alarm for the observation deadline. Untracking
-closes the live surface and blocks queued updates until a newer start.
+static system timestamp and an inexact alarm for the observation deadline.
+Choose **Stop live progress** on the private notification to clear that
+flight's progress from the notification and widget. Flight tracking and
+ordinary alerts continue. The device ignores queued progress until a newer
+live start. Removing and tracking the flight again allows a fresh start.
 [Android notification timeout](https://developer.android.com/reference/android/app/Notification.Builder#setTimeoutAfter(long))
 
 The Android widget shows phase, progress, and a labeled departure or arrival

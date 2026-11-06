@@ -79,8 +79,11 @@ type Message struct {
 	ExpiresAt           time.Time
 	StaleAt             time.Time
 	DismissAt           time.Time
-	RequestUpdateToken  bool   // Enable for iOS 18 or later push-to-start registrations.
-	binding             string // Android delivery generation, added at dispatch from its device registration.
+	RequestUpdateToken  bool // Enable for iOS 18 or later push-to-start registrations.
+
+	// AndroidLiveHeartbeat marks a routine refresh for immediate delivery only.
+	AndroidLiveHeartbeat bool   `json:",omitempty"`
+	binding              string // Android delivery generation, added at dispatch from its device registration.
 }
 
 type Sender struct {
