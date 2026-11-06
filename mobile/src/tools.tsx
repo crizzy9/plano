@@ -529,6 +529,10 @@ function passportFlightKey(flight: PassportFlight) {
   return flight.historyKey ?? flight.id;
 }
 
+function isPassportArchive(flight: PassportFlight) {
+  return flight.id.startsWith('archive-') && (flight.source === 'flighty_csv' || flight.source === 'passport_manual');
+}
+
 const passportCSVLimit = 512 * 1024;
 const passportDate = new Intl.DateTimeFormat(undefined, {
   year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC',
@@ -654,6 +658,7 @@ export function PassportScreen({ api, navigation }: Screen<'Passport'> & { api: 
       <Heading>Flight history</Heading>
       <ErrorMessage message={error} />
       {error && <Action secondary label="Reload Passport" onPress={reload} />}
+      <Action label="Log past flight" disabled={!!archiveBusy} onPress={() => navigation.push('PassportEditor')} />
       {(Platform.OS === 'ios' || Platform.OS === 'android') && (
         <View style={layout.section}>
           <Body>Import a Flighty CSV up to 512 KiB. Your selected Plano server receives the file and saves only flight history details.</Body>
@@ -673,11 +678,15 @@ export function PassportScreen({ api, navigation }: Screen<'Passport'> & { api: 
           <PassportCard stats={value.stats} />
           <View style={layout.section}>
             <Heading>Completed flights</Heading>
-            {history.flights.map((flight) => flight.source === 'flighty_csv' && flight.id.startsWith('archive-') ? (
+            {history.flights.map((flight) => isPassportArchive(flight) ? (
               <View key={passportFlightKey(flight)} style={[styles.archiveRow, { backgroundColor: colors.surface, borderColor: colors.divider }]}>
                 <Text style={[styles.archiveRoute, { color: colors.text }]}>{flight.origin} to {flight.destination}</Text>
-                <Body>{flight.number} · {flight.historyDate && validDate(flight.historyDate)
-                  ? passportDate.format(new Date(`${flight.historyDate}T00:00:00Z`)) : 'Date unavailable'} · Flighty archive</Body>
+                <Body>{[
+                  flight.number,
+                  flight.historyDate && validDate(flight.historyDate)
+                    ? passportDate.format(new Date(`${flight.historyDate}T00:00:00Z`)) : 'Date unavailable',
+                  flight.source === 'passport_manual' ? 'Manually logged' : 'Flighty archive',
+                ].filter(Boolean).join(' · ')}</Body>
                 {removeArchive === flight.id ? (
                   <>
                     <Body>Remove this flight from Passport?</Body>
@@ -690,16 +699,19 @@ export function PassportScreen({ api, navigation }: Screen<'Passport'> & { api: 
                       <Action label="Remove flight" busy={archiveBusy === 'remove'}
                         disabled={pending} onPress={() => void runArchiveAction('remove', async () => {
                           await api.removePassportArchive(flight.id);
-                          return 'Archived flight removed.';
+                          return flight.source === 'passport_manual' ? 'Logged flight removed.' : 'Archived flight removed.';
                         })} />
                     </View>
                   </>
                 ) : (
                   <View style={layout.actions}>
-                    <Action secondary label="Remove archived flight" disabled={!!archiveBusy || pending} onPress={() => {
-                      setArchiveIssue(undefined);
-                      setRemoveArchive(flight.id);
-                    }} />
+                    {flight.source === 'passport_manual' && <Action secondary label="Edit flight" disabled={!!archiveBusy || pending}
+                      onPress={() => navigation.push('PassportEditor', { flight })} />}
+                    <Action secondary label={flight.source === 'passport_manual' ? 'Remove logged flight' : 'Remove archived flight'}
+                      disabled={!!archiveBusy || pending} onPress={() => {
+                        setArchiveIssue(undefined);
+                        setRemoveArchive(flight.id);
+                      }} />
                   </View>
                 )}
               </View>

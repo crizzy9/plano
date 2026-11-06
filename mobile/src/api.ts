@@ -176,6 +176,19 @@ export interface PassportSegment {
 
 export interface PassportFlight extends Flight {
   historyKey?: string;
+  historyDurationMinutes?: number;
+  historyArrivalDelayMinutes?: number;
+}
+
+export interface ManualPassportFlight {
+  date: string;
+  origin: string;
+  destination: string;
+  number?: string;
+  tailNumber?: string;
+  aircraftModel?: string;
+  durationMinutes?: number;
+  arrivalDelayMinutes?: number;
 }
 
 export interface PassportHistory {
@@ -685,6 +698,7 @@ export function serverStorageKey(scope: string, server: string) {
 const flightPath = (id: string) => `/v1/flights/${encodeURIComponent(id)}`;
 const friendPath = (id: string) => `/v1/friends/${encodeURIComponent(id)}`;
 const passportPath = '/v1/passport?limit=50';
+const passportManualPath = '/v1/passport/manual';
 
 export function createAPI(server: string, options: { access?: 'background' | 'existing-installation' } = {}) {
   // The canonical origin is part of the key, so two installations on different
@@ -851,6 +865,36 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
     revokePickupLink: (id: string) => authenticated<void>(`/v1/shares/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     passport: () => authenticated<Passport>(passportPath),
     passportHistory: (cursor: string) => authenticated<PassportHistory>(`${passportPath}&${new URLSearchParams({ cursor })}`),
+    async addManualPassportFlight(details: ManualPassportFlight, requestId: string) {
+      try {
+        const result = await authenticated<{ created: boolean }>(passportManualPath, {
+          method: 'POST', body: JSON.stringify({ ...details, requestId }),
+        });
+        if (typeof result?.created !== 'boolean') throw new Error('Plano returned an invalid response.');
+        return result;
+      } catch (error) {
+        if (error instanceof APIError) {
+          if ([404, 405, 501].includes(error.status)) throw new Error('Manual flight logging requires a newer Plano server.');
+          if (error.status === 409) throw new Error('Passport can store up to 10,000 logged and imported flights.');
+          if ([400, 422].includes(error.status)) throw new Error('Check the flight date, airport codes, and optional details.');
+        }
+        throw error;
+      }
+    },
+    async updateManualPassportFlight(id: string, details: ManualPassportFlight, expectedObservedAt: string) {
+      try {
+        await authenticated<void>(`${passportManualPath}/${encodeURIComponent(id)}`, {
+          method: 'PUT', body: JSON.stringify({ ...details, expectedObservedAt }),
+        });
+      } catch (error) {
+        if (error instanceof APIError) {
+          if (error.status === 409) throw new Error('This flight changed after you opened it. Reopen it in Passport to edit the latest version.');
+          if (error.status === 404) throw new Error('This flight is unavailable. Return to Passport to refresh your history.');
+          if ([400, 422].includes(error.status)) throw new Error('Check the flight date, airport codes, and optional details.');
+        }
+        throw error;
+      }
+    },
     async importPassportCSV(csv: string) {
       try {
         return await authenticated<PassportImportResult>('/v1/passport/import', {

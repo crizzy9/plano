@@ -145,12 +145,16 @@ func countPassportFlight(value *passportSummary, aircraft map[string]bool, fligh
 	if tail := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(flight.TailNumber), "-", "")); tail != "" {
 		aircraft[tail] = true
 	}
-	if flight.ActualDeparture != nil && !flight.ActualDeparture.IsZero() && flight.ActualArrival != nil && flight.ActualArrival.After(*flight.ActualDeparture) {
+	if minutes := flight.HistoryDurationMinutes; flight.Source == feeds.PassportManualSource && minutes != nil && *minutes > 0 && *minutes <= feeds.PassportMaxHistoryMinutes {
+		value.Stats.Hours += float64(*minutes) / 60
+	} else if flight.ActualDeparture != nil && !flight.ActualDeparture.IsZero() && flight.ActualArrival != nil && flight.ActualArrival.After(*flight.ActualDeparture) {
 		value.Stats.Hours += flight.ActualArrival.Sub(*flight.ActualDeparture).Hours()
 	} else {
 		value.Coverage.MissingDurationFlights++
 	}
-	if flight.ActualArrival == nil || flight.ActualArrival.IsZero() || flight.ScheduledArrival == nil || flight.ScheduledArrival.IsZero() {
+	if minutes := flight.HistoryArrivalDelayMinutes; flight.Source == feeds.PassportManualSource && minutes != nil && *minutes >= 0 && *minutes <= feeds.PassportMaxHistoryMinutes {
+		value.Stats.DelayMinutes += *minutes
+	} else if flight.ActualArrival == nil || flight.ActualArrival.IsZero() || flight.ScheduledArrival == nil || flight.ScheduledArrival.IsZero() {
 		value.Coverage.MissingDelayFlights++
 	} else if flight.ActualArrival.After(*flight.ScheduledArrival) {
 		value.Stats.DelayMinutes += int(flight.ActualArrival.Sub(*flight.ScheduledArrival).Minutes())
@@ -166,6 +170,10 @@ func passportReportedDistance(flight feeds.Flight) int {
 
 type passportAirportSource interface {
 	Airport(context.Context, string) (feeds.Airport, error)
+}
+
+func isPassportArchiveSource(source string) bool {
+	return source == "flighty_csv" || source == feeds.PassportManualSource
 }
 
 func (s Server) passportCoordinates(ctx context.Context, flights []feeds.Flight) (map[string]*core.AirportCoordinates, int, error) {
@@ -208,7 +216,7 @@ func (s Server) passportCoordinates(ctx context.Context, flights []feeds.Flight)
 			}
 			use := uses[airport.primary]
 			use.archive = use.archive || flight.HistoryDate != ""
-			use.live = use.live || flight.Source != "flighty_csv"
+			use.live = use.live || !isPassportArchiveSource(flight.Source)
 			uses[airport.primary] = use
 			for _, code := range []string{airport.primary, airport.alternate} {
 				if code != "" && !seen[code] {

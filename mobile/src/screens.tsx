@@ -3,7 +3,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { AppState, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { saveServer, type Flight, type FlightNotice, type HistoricalDepartureRisk, type PlanoAPI, type Position } from './api';
+import { saveServer, type Flight, type FlightNotice, type HistoricalDepartureRisk, type PassportFlight, type PlanoAPI, type Position } from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
 import { usePalette } from './theme';
 import { PickupLinks } from './pickup-links';
@@ -22,6 +22,7 @@ export type Routes = {
   Tools: undefined;
   Import: undefined;
   Passport: undefined;
+  PassportEditor: { date?: string; number?: string; flight?: PassportFlight; fromSearch?: boolean } | undefined;
   Friends: undefined;
   Connection: { inbound: string; outbound: string } | undefined;
   Settings: undefined;
@@ -147,7 +148,7 @@ export function Home({ api, navigation }: APIProps<'Home'>) {
 export function Search({ api, navigation }: APIProps<'Search'>) {
   const [number, setNumber] = useState('');
   const [date, setDate] = useState(dateKey);
-  const [results, setResults] = useState<Flight[]>();
+  const [results, setResults] = useState<{ flights: Flight[]; date: string; number: string }>();
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
   async function search() {
@@ -161,7 +162,7 @@ export function Search({ api, navigation }: APIProps<'Search'>) {
     setResults(undefined);
     setPending(true);
     try {
-      setResults(await api.search(code, date));
+      setResults({ flights: await api.search(code, date), date, number: code });
     } catch (cause) {
       setError(errorText(cause));
     } finally {
@@ -185,11 +186,19 @@ export function Search({ api, navigation }: APIProps<'Search'>) {
       </View>
       <Action icon="search" label="Search flights" onPress={search} busy={pending} />
       <ErrorMessage message={error} />
-      {results?.length === 0 && <Body>No matching flights. Check the number and departure date.</Body>}
-      {results && results.length > 0 && (
+      {results?.flights.length === 0 && (
+        <View style={layout.section}>
+          <Body>No matching flights. Check the number and departure date.</Body>
+          {results.date < new Date().toISOString().slice(0, 10) && (
+            <Action secondary label="Log past flight in Passport"
+              onPress={() => navigation.navigate('PassportEditor', { date: results.date, number: results.number, fromSearch: true })} />
+          )}
+        </View>
+      )}
+      {results && results.flights.length > 0 && (
         <View style={layout.section}>
           <Heading>Matching flights</Heading>
-          {results.map((flight) => (
+          {results.flights.map((flight) => (
             <FlightRow key={flight.id} flight={flight}
               onPress={() => navigation.navigate('Flight', { id: flight.id, number: flight.number, initial: flight })} />
           ))}

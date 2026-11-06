@@ -11,6 +11,106 @@ import (
 	"github.com/crizzy9/plano/internal/feeds"
 )
 
+func TestManualPassportFlightCreateAndUpdateStayScoped(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(filepath.Join(t.TempDir(), "manual-archive.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	owner, other := friendInstallation(t, s), friendInstallation(t, s)
+	manual := feeds.Flight{
+		ID: "archive-" + strings.Repeat("c", 64), Source: feeds.PassportManualSource, Status: "arrived",
+		Origin: "JFK", Destination: "ORD", HistoryDate: "2000-01-02",
+		ObservedAt: time.Date(2026, 6, 10, 14, 0, 0, 123456789, time.UTC),
+	}
+	if created, err := s.CreateManualPassportFlight(ctx, owner, manual); err != nil || !created {
+		t.Fatalf("manual create = %v, %v", created, err)
+	}
+	if _, err := s.Flight(ctx, manual.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("manual entry reached the shared flight cache: %v", err)
+	}
+	assertHistory := func(installation string, want ...feeds.Flight) {
+		t.Helper()
+		history, err := s.CompletedFlights(ctx, installation)
+		if err != nil || len(history) != len(want) {
+			t.Fatalf("history = %+v, want %+v, error %v", history, want, err)
+		}
+		for i, flight := range history {
+			if !reflect.DeepEqual(flight, want[i]) {
+				t.Fatalf("history entry = %+v, want %+v", flight, want[i])
+			}
+		}
+	}
+	assertHistory(other)
+	csvCollision := manual
+	csvCollision.Source = "flighty_csv"
+	csvCollision.ActualDeparture = new(manual.ObservedAt.Add(-time.Hour))
+	if added, duplicates, err := s.ImportPassportArchive(ctx, owner, []feeds.Flight{csvCollision}); err != nil || added != 0 || duplicates != 1 {
+		t.Fatalf("CSV collision added %d, duplicates %d, error %v", added, duplicates, err)
+	}
+	assertHistory(owner, manual)
+	updated := manual
+	updated.Destination, updated.HistoryDate = "SFO", "2000-01-03"
+	if err := s.UpdateManualPassportFlight(ctx, other, updated, manual.ObservedAt); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-owner update error = %v", err)
+	}
+	if err := s.UpdateManualPassportFlight(ctx, owner, updated, manual.ObservedAt.Add(-time.Nanosecond)); !errors.Is(err, ErrPassportArchiveConflict) {
+		t.Fatalf("stale update error = %v", err)
+	}
+	assertHistory(owner, manual)
+	// Even if the clock is behind, editing creates a new version.
+	updated.ObservedAt = manual.ObservedAt.Add(-time.Second)
+	if err := s.UpdateManualPassportFlight(ctx, owner, updated, manual.ObservedAt); err != nil {
+		t.Fatal(err)
+	}
+	want := updated
+	want.ObservedAt = manual.ObservedAt.Add(time.Nanosecond)
+	assertHistory(owner, want)
+	if err := s.UpdateManualPassportFlight(ctx, owner, updated, manual.ObservedAt); err != nil {
+		t.Fatalf("identical edit retry = %v", err)
+	}
+	if created, err := s.CreateManualPassportFlight(ctx, owner, manual); err != nil || created {
+		t.Fatalf("create replay = %v, %v", created, err)
+	}
+	assertHistory(owner, want)
+	if created, err := s.CreateManualPassportFlight(ctx, other, manual); err != nil || !created {
+		t.Fatalf("independent installation create = %v, %v", created, err)
+	}
+	assertHistory(other, manual)
+	if err := s.DeletePassportArchive(ctx, owner, manual.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertHistory(owner)
+	assertHistory(other, manual)
+}
+
+func TestManualPassportFlightCannotEditCSVArchive(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(filepath.Join(t.TempDir(), "manual-csv-archive.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	owner := friendInstallation(t, s)
+	csv := feeds.Flight{
+		ID: "archive-" + strings.Repeat("d", 64), Source: "flighty_csv", Status: "arrived",
+		Origin: "JFK", Destination: "ORD", HistoryDate: "2000-01-02",
+		ObservedAt: time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC),
+	}
+	if _, _, err := s.ImportPassportArchive(ctx, owner, []feeds.Flight{csv}); err != nil {
+		t.Fatal(err)
+	}
+	edit := csv
+	edit.Source, edit.Destination = feeds.PassportManualSource, "SFO"
+	if err := s.UpdateManualPassportFlight(ctx, owner, edit, csv.ObservedAt); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("CSV edit error = %v", err)
+	}
+	if history, err := s.CompletedFlights(ctx, owner); err != nil || len(history) != 1 || !reflect.DeepEqual(history[0], csv) {
+		t.Fatalf("CSV archive changed: %+v, %v", history, err)
+	}
+}
+
 func TestPassportArchiveReimportFillsMissingTimes(t *testing.T) {
 	ctx := t.Context()
 	s, err := Open(filepath.Join(t.TempDir(), "archive-reimport.db"))
@@ -171,5 +271,22 @@ SELECT ?, 'archive-'||printf('%064x',value), '2026-01-01', '{}' FROM n`, maxPass
 	}
 	if added, duplicates, err := s.ImportPassportArchive(ctx, owner, []feeds.Flight{flight}); err != nil || added != 0 || duplicates != 1 {
 		t.Fatalf("retry at capacity added %d, duplicates %d, error %v", added, duplicates, err)
+	}
+	manual := other
+	manual.Source, manual.ObservedAt = feeds.PassportManualSource, time.Date(2026, 6, 12, 14, 0, 0, 0, time.UTC)
+	if created, err := s.CreateManualPassportFlight(ctx, owner, manual); created || !errors.Is(err, ErrPassportArchiveFull) {
+		t.Fatalf("manual create at capacity = %v, %v", created, err)
+	}
+	if err := s.DeletePassportArchive(ctx, owner, flight.ID); err != nil {
+		t.Fatal(err)
+	}
+	if created, err := s.CreateManualPassportFlight(ctx, owner, manual); err != nil || !created {
+		t.Fatalf("manual create with a free slot = %v, %v", created, err)
+	}
+	if created, err := s.CreateManualPassportFlight(ctx, owner, manual); err != nil || created {
+		t.Fatalf("manual retry at capacity = %v, %v", created, err)
+	}
+	if _, _, err := s.ImportPassportArchive(ctx, owner, []feeds.Flight{flight}); !errors.Is(err, ErrPassportArchiveFull) {
+		t.Fatalf("CSV create at capacity with a manual entry = %v", err)
 	}
 }

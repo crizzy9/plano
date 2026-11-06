@@ -12,6 +12,7 @@ import { resumeCalendarSync } from './src/calendar-sync';
 import { Home, Search, FlightDetailScreen, ServerSettings, type Routes } from './src/screens';
 import { FriendsScreen } from './src/friends';
 import { Tools, ImportFlights, PassportScreen, ConnectionScreen } from './src/tools';
+import { PassportEditorScreen } from './src/passport-editor';
 import { usePalette } from './src/theme';
 import { Loading } from './src/ui';
 
@@ -87,6 +88,9 @@ export default function App() {
             </Stack.Screen>
             <Stack.Screen name="Passport" options={{ title: 'Passport' }}>
               {(props) => <PassportScreen {...props} api={api} />}
+            </Stack.Screen>
+            <Stack.Screen name="PassportEditor" options={({ route }) => ({ title: route.params?.flight ? 'Edit past flight' : 'Log past flight' })}>
+              {(props) => <PassportEditorScreen {...props} api={api} />}
             </Stack.Screen>
             <Stack.Screen name="Friends" options={{ title: 'Friends' }}>
               {() => <FriendsScreen api={api} />}

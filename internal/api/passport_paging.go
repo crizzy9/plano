@@ -130,7 +130,7 @@ func (s Server) passportPage(ctx context.Context, w http.ResponseWriter, owner s
 			if flight.HistoryDate != "" {
 				airportFlights[index].HistoryDate = flight.HistoryDate
 			}
-			if flight.Source != "flighty_csv" {
+			if !isPassportArchiveSource(flight.Source) {
 				airportFlights[index].Source = flight.Source
 			}
 		}

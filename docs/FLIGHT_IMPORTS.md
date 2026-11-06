@@ -12,6 +12,21 @@ UA456 | Departure: 7 January 2027 5:00 PM | Arrival: 8 January 2027 5:00 AM
 
 A labeled departure can also include a timestamp with a numeric UTC offset, such as `2027-01-07T17:00:00-05:00`. [RFC 3339 timestamp format](https://www.rfc-editor.org/rfc/rfc3339.html#section-5.6)
 
+## Log a past flight manually
+
+Open **Trip tools → Plano Passport → Log past flight**, or choose **Log past
+flight in Passport** after a past-flight search returns no match. Enter the
+departure date and the departure and arrival airport codes. The date must be
+before the current UTC day. Flight number, aircraft registration and model,
+gate-to-gate duration, and minutes late at arrival are optional. Enter zero
+for an on-time or early arrival, and leave unknown measurements blank.
+
+Saved flights appear in the installation’s private Passport. Known airports
+use the server’s cached or bundled coordinates, and routes with missing
+coordinates still count toward the history. Edit or remove a manual flight
+from its history row. Manual entries and CSV imports share the 10,000-flight
+archive limit. [Flighty manual-entry behavior](https://flighty.com/help/using-search)
+
 ## Import Passport history from Flighty
 
 Save your Flighty export as a CSV file. Open **Plano Passport** on iOS or

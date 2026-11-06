@@ -25,6 +25,11 @@ type AdvisorySource interface {
 	Advisories(context.Context) ([]Advisory, error)
 }
 
+const (
+	PassportManualSource      = "passport_manual"
+	PassportMaxHistoryMinutes = 48 * 60
+)
+
 type Flight struct {
 	ID                  string `json:"id"`
 	providerID          string
@@ -61,6 +66,9 @@ type Flight struct {
 	InboundID           string     `json:"inboundId,omitempty"`
 	ObservedAt          time.Time  `json:"observedAt"`
 	Source              string     `json:"source"`
+
+	HistoryDurationMinutes     *int `json:"historyDurationMinutes,omitempty"`
+	HistoryArrivalDelayMinutes *int `json:"historyArrivalDelayMinutes,omitempty"`
 }
 
 type Position struct {

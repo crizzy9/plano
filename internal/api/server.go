@@ -40,12 +40,12 @@ type Server struct {
 type ownerHandler func(http.ResponseWriter, *http.Request, string) error
 
 var (
-	flightID      = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
-	flightNumber  = regexp.MustCompile(`^[A-Z0-9]{2,3}[0-9]{1,5}[A-Z]?$`)
-	seatPattern   = regexp.MustCompile(`^[0-9]{1,3}[A-Z]{1,2}$`)
-	deviceBinding = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-	ianaZoneName  = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$`)
-	errInvalid    = errors.New("invalid request")
+	flightID     = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+	flightNumber = regexp.MustCompile(`^[A-Z0-9]{2,3}[0-9]{1,5}[A-Z]?$`)
+	seatPattern  = regexp.MustCompile(`^[0-9]{1,3}[A-Z]{1,2}$`)
+	uuidV4       = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	ianaZoneName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$`)
+	errInvalid   = errors.New("invalid request")
 )
 
 func (s Server) Handler() http.Handler {
@@ -97,6 +97,8 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("GET /share/{token}", s.shared)
 	mux.HandleFunc("GET /v1/passport", s.auth(s.passport))
 	mux.HandleFunc("POST /v1/passport/import", s.auth(s.importPassportArchive))
+	mux.HandleFunc("POST /v1/passport/manual", s.auth(s.saveManualPassport))
+	mux.HandleFunc("PUT /v1/passport/manual/{id}", s.auth(s.saveManualPassport))
 	mux.HandleFunc("DELETE /v1/passport/archive/{id}", s.auth(s.deletePassportArchive))
 	mux.HandleFunc("GET /v1/connections", s.auth(s.connection))
 	mux.HandleFunc("GET /v1/connection-suggestions", s.auth(s.connectionSuggestions))
@@ -373,7 +375,7 @@ func (s Server) device(w http.ResponseWriter, r *http.Request, owner string) err
 		androidAlert := d.Platform == "android" && d.Kind == "alert"
 		iosActivity := r.Method == http.MethodPost && d.Platform == "ios" && d.LiveSlot != "" &&
 			(d.Kind == "live_start" || d.Kind == "live_update")
-		if (!androidAlert && !iosActivity) || !deviceBinding.MatchString(d.Binding) {
+		if (!androidAlert && !iosActivity) || !uuidV4.MatchString(d.Binding) {
 			return errInvalid
 		}
 	}

@@ -209,6 +209,62 @@ func TestPassportPagedCoverageMatchesFullHistory(t *testing.T) {
 	}
 }
 
+func TestPassportManualMeasurementsAndCoordinatePrivacy(t *testing.T) {
+	store := openPassportStore(t, filepath.Join(t.TempDir(), "plano.db"))
+	token, owner := passportInstallation(t, store)
+	now := time.Now().UTC()
+	for i, flight := range []feeds.Flight{
+		{Origin: "Q0X", Destination: "SFO", HistoryDate: "2020-03-02", TailNumber: "N-123AB", HistoryDurationMinutes: new(90), HistoryArrivalDelayMinutes: new(0)},
+		{Origin: "SFO", Destination: "Q0Y", HistoryDate: "2020-02-01"},
+		{Origin: "SFO", Destination: "Q0Z", HistoryDate: "2020-02-02", HistoryDurationMinutes: new(150), HistoryArrivalDelayMinutes: new(23)},
+	} {
+		flight.ID = fmt.Sprintf("archive-%064x", i+1)
+		flight.Status, flight.Source, flight.ObservedAt = "arrived", feeds.PassportManualSource, now
+		if created, err := store.CreateManualPassportFlight(t.Context(), owner, flight); err != nil || !created {
+			t.Fatalf("manual flight %d created=%t, error=%v", i, created, err)
+		}
+	}
+	provider := &passportSourceFixture{lookup: func(code string) (feeds.Airport, error) {
+		switch code {
+		case "Q0X":
+			return feeds.Airport{Code: code, Latitude: new(36.0), Longitude: new(-118.0)}, nil
+		case "Q0Y":
+			return feeds.Airport{Code: code, Latitude: new(41.0), Longitude: new(-74.0)}, nil
+		default:
+			t.Errorf("unexpected provider lookup for %s", code)
+			return feeds.Airport{}, feeds.ErrNotFound
+		}
+	}}
+	manual := readPassport(t, store, provider, false, token)
+	if provider.calls.Load() != 0 || manual.Stats != (passportStats{Flights: 3, Hours: 4, Aircraft: 1, DelayMinutes: 23}) ||
+		manual.Coverage != (passportCoverage{MissingCoordinatesFlights: 3, MissingDistanceFlights: 3, MissingDurationFlights: 1, MissingDelayFlights: 1}) {
+		t.Fatalf("manual Passport stats=%+v coverage=%+v lookups=%d", manual.Stats, manual.Coverage, provider.calls.Load())
+	}
+
+	// Exercise both possible orders of the mixed route representatives.
+	for i, flight := range []feeds.Flight{
+		{Origin: "Q0X", Destination: "SFO", ActualArrival: new(time.Date(2020, 2, 2, 12, 0, 0, 0, time.UTC))},
+		{Origin: "SFO", Destination: "Q0Y", ActualArrival: new(time.Date(2020, 4, 2, 12, 0, 0, 0, time.UTC))},
+	} {
+		flight.ID, flight.Status, flight.ObservedAt = fmt.Sprintf("tracked-%d", i), "arrived", now
+		flight.ActualDeparture = new(flight.ActualArrival.Add(-time.Hour))
+		flight.ScheduledArrival = new(flight.ActualArrival.Add(-15 * time.Minute))
+		addPassportFlight(t, store, owner, flight)
+	}
+	handler := (Server{Store: store, Source: provider, Logger: slog.New(slog.DiscardHandler)}).Handler()
+	var paged passportPagedResponse
+	if err := json.Unmarshal(passportRequest(t, handler, token, url.Values{"limit": {"1"}}, http.StatusOK), &paged); err != nil {
+		t.Fatal(err)
+	}
+	full := readPassport(t, store, provider, false, token)
+	if provider.calls.Load() != 2 || paged.Stats != full.Stats || paged.Coverage != full.Coverage ||
+		paged.Stats.Flights != 5 || paged.Stats.Hours != 6 || paged.Stats.DelayMinutes != 53 || paged.Stats.Miles <= 0 ||
+		paged.Coverage != (passportCoverage{MissingCoordinatesFlights: 1, MissingDistanceFlights: 1, MissingDurationFlights: 1, MissingDelayFlights: 1}) ||
+		len(paged.Segments) != 2 {
+		t.Fatalf("mixed Passport stats=%+v coverage=%+v segments=%d lookups=%d", paged.Stats, paged.Coverage, len(paged.Segments), provider.calls.Load())
+	}
+}
+
 func TestPassportCoordinatesFillOverRequestsAndSurviveRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "plano.db")
 	store := openPassportStore(t, path)
