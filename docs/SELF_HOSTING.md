@@ -252,6 +252,16 @@ Enable an HTTPS FlightAware callback or a signed FAA SWIM/EUROCONTROL bridge
 to supplement periodic ingestion. Each callback uses its own private mounted
 key file. [Aviation callbacks](AVIATION_CALLBACKS.md)
 
+## iOS Live Activity tokens
+
+Use the current backend and iOS build together. Plano keeps the latest
+pending push-to-start and update token in memory and retries on foreground
+after a temporary registration failure. ActivityKit supplies current tokens
+again when the app relaunches. The server replaces an older token in the
+same installation and Live Activity slot when it accepts the rotated token.
+The app persists a registration counter in Keychain so the server can ignore
+an older write that arrives out of order.
+
 ## Android delivery binding
 
 Use the current backend and Android build together for flight alerts and the

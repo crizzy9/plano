@@ -48,6 +48,8 @@ type Device struct {
 	FlightID           string `json:"flightId,omitempty"`
 	RequestUpdateToken bool   `json:"requestUpdateToken,omitempty"`
 	Binding            string `json:"binding,omitempty"`
+	LiveSlot           string `json:"liveSlot,omitempty"`
+	LiveRevision       int64  `json:"liveRevision,omitempty"`
 }
 
 type StoreOptions struct {
@@ -110,6 +112,12 @@ CREATE TABLE IF NOT EXISTS device_bindings (
   device_id INTEGER PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
   binding TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS device_live_slots (
+  owner TEXT NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
+  slot TEXT NOT NULL, flight_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0),
+  device_id INTEGER UNIQUE REFERENCES devices(id) ON DELETE SET NULL,
+  PRIMARY KEY(owner,slot)
+);
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY, flight_id TEXT NOT NULL REFERENCES flights(id), at_ns INTEGER NOT NULL, data TEXT NOT NULL
 );
@@ -136,6 +144,11 @@ CREATE TABLE IF NOT EXISTS check_in_queued (
 CREATE TABLE IF NOT EXISTS live_started (
   device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE, flight_id TEXT NOT NULL REFERENCES flights(id),
   PRIMARY KEY(device_id, flight_id)
+);
+CREATE TABLE IF NOT EXISTS live_start_confirmations (
+  device_id INTEGER NOT NULL, flight_id TEXT NOT NULL,
+  PRIMARY KEY(device_id, flight_id),
+  FOREIGN KEY(device_id, flight_id) REFERENCES live_started(device_id, flight_id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS delay_samples (
   flight_id TEXT PRIMARY KEY REFERENCES flights(id), observed_ns INTEGER NOT NULL,

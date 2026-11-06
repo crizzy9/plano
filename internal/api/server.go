@@ -276,6 +276,9 @@ func (s Server) device(w http.ResponseWriter, r *http.Request, owner string) err
 		w.WriteHeader(204)
 		return nil
 	}
+	if (d.LiveSlot != "" || d.LiveRevision != 0) && r.Method != http.MethodPost {
+		return errInvalid
+	}
 	if d.Binding != "" && (d.Platform != "android" || d.Kind != "alert" || !androidBinding.MatchString(d.Binding)) {
 		return errInvalid
 	}
@@ -304,6 +307,9 @@ func (s Server) device(w http.ResponseWriter, r *http.Request, owner string) err
 		err = s.Store.RemoveDevice(r.Context(), owner, d)
 	} else {
 		err = s.Store.Register(r.Context(), owner, d, time.Now())
+	}
+	if errors.Is(err, core.ErrInvalidLiveSlot) {
+		return errInvalid
 	}
 	if err != nil {
 		return err

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"regexp"
 	"sync"
 	"time"
 
@@ -13,12 +14,31 @@ import (
 	"github.com/crizzy9/plano/internal/push"
 )
 
+var (
+	ErrInvalidLiveSlot = errors.New("invalid Live Activity registration slot")
+	activityLiveSlot   = regexp.MustCompile(`^activity:[0-9a-f]{64}$`)
+)
+
 func (s *Store) Register(ctx context.Context, owner string, device Device, now time.Time) error {
+	if device.LiveSlot == "" && device.LiveRevision != 0 ||
+		device.LiveSlot != "" && (device.LiveRevision <= 0 || device.Platform != "ios" || device.Binding != "" ||
+			!(device.Kind == "live_start" && device.LiveSlot == "start" && device.FlightID == "" ||
+				device.Kind == "live_update" && device.FlightID != "" && activityLiveSlot.MatchString(device.LiveSlot))) {
+		return ErrInvalidLiveSlot
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var priorDeviceID int64
+	if device.LiveSlot != "" {
+		var ignored bool
+		priorDeviceID, ignored, err = priorLiveSlotDevice(ctx, tx, owner, device)
+		if err != nil || ignored {
+			return err
+		}
+	}
 	var flight feeds.Flight
 	var seat string
 	if device.Kind == "live_update" {
@@ -44,6 +64,11 @@ owner<>? OR flight_id<>? OR COALESCE((SELECT binding FROM device_bindings b WHER
 ON CONFLICT(platform,token,kind) DO UPDATE SET registered=excluded.registered RETURNING id`, owner, device.Platform, device.Token, device.Kind, device.FlightID, now.UnixNano()).Scan(&deviceID)
 	if err != nil {
 		return err
+	}
+	if device.LiveSlot != "" {
+		if err := bindLiveSlot(ctx, tx, owner, device, deviceID, priorDeviceID); err != nil {
+			return err
+		}
 	}
 	if device.Binding != "" {
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO device_bindings VALUES(?,?)`, deviceID, device.Binding); err != nil {
@@ -107,6 +132,86 @@ AND julianday(COALESCE(json_extract(f.snapshot,'$.estimatedDeparture'),json_extr
 		}
 	}
 	return s.commitOutbox(tx)
+}
+
+// A slot's receipt survives token deletion so a delayed registration cannot
+// reactivate a retired token. An equal retry never enqueues a second update.
+func priorLiveSlotDevice(ctx context.Context, tx *sql.Tx, owner string, device Device) (int64, bool, error) {
+	var prior sql.NullInt64
+	var revision int64
+	var flight, token string
+	err := tx.QueryRowContext(ctx, `SELECT l.device_id,l.flight_id,l.revision,COALESCE(d.token,'')
+FROM device_live_slots l LEFT JOIN devices d ON d.id=l.device_id WHERE l.owner=? AND l.slot=?`, owner, device.LiveSlot).
+		Scan(&prior, &flight, &revision, &token)
+	if err == nil {
+		if device.LiveRevision < revision {
+			return 0, true, nil
+		}
+		if flight != device.FlightID {
+			return 0, false, ErrInvalidLiveSlot
+		}
+		if device.LiveRevision == revision {
+			if prior.Valid && token != device.Token {
+				return 0, false, ErrInvalidLiveSlot
+			}
+			return 0, true, nil
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, err
+	}
+	// The incoming token may belong to another installation after a reinstall.
+	// Within this installation it must belong to the same flight and slot.
+	var conflict bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+  SELECT 1 FROM devices d LEFT JOIN device_live_slots l ON l.device_id=d.id
+  WHERE d.platform=? AND d.token=? AND d.kind=? AND d.owner=?
+  AND (d.flight_id<>? OR (l.slot IS NOT NULL AND l.slot<>?))
+)`, device.Platform, device.Token, device.Kind, owner, device.FlightID, device.LiveSlot).Scan(&conflict); err != nil {
+		return 0, false, err
+	}
+	if conflict {
+		return 0, false, ErrInvalidLiveSlot
+	}
+	return prior.Int64, false, nil
+}
+
+func bindLiveSlot(ctx context.Context, tx *sql.Tx, owner string, device Device, deviceID, priorID int64) error {
+	if priorID != 0 && priorID != deviceID {
+		// ActivityKit orders updates to the same activity by whole seconds,
+		// including when its token changes during that second.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO live_wire_clocks(device_id,flight_id,wire_epoch)
+SELECT ?,flight_id,wire_epoch FROM live_wire_clocks WHERE device_id=?
+ON CONFLICT(device_id,flight_id) DO UPDATE SET wire_epoch=MAX(live_wire_clocks.wire_epoch,excluded.wire_epoch)`, deviceID, priorID); err != nil {
+			return err
+		}
+		if device.Kind == "live_start" {
+			if err := carryConfirmedStarts(ctx, tx, deviceID, priorID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE id=?`, priorID); err != nil {
+			return err
+		}
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO device_live_slots(owner,slot,flight_id,revision,device_id) VALUES(?,?,?,?,?)
+ON CONFLICT(owner,slot) DO UPDATE SET revision=excluded.revision,device_id=excluded.device_id`,
+		owner, device.LiveSlot, device.FlightID, device.LiveRevision, deviceID)
+	return err
+}
+
+func carryConfirmedStarts(ctx context.Context, tx *sql.Tx, deviceID, priorID int64) error {
+	// A completed legacy job counts only while its latch still exists. The
+	// dispatcher clears that latch on terminal failure. Pending jobs do not
+	// prevent another start from being queued for the new token.
+	const confirmed = `SELECT flight_id FROM live_start_confirmations WHERE device_id=?
+UNION SELECT l.flight_id FROM live_started l JOIN outbox o ON o.device_id=l.device_id AND o.flight_id=l.flight_id
+WHERE l.device_id=? AND o.done=1 AND json_extract(o.message,'$.Kind')=?`
+	args := []any{deviceID, priorID, priorID, push.LiveStart}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO live_started SELECT ?,flight_id FROM (`+confirmed+`)`, args...); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO live_start_confirmations SELECT ?,flight_id FROM (`+confirmed+`)`, args...)
+	return err
 }
 
 // A flight event can predate an installation's subscription. Track delivery
@@ -362,13 +467,18 @@ func (s *Store) resolve(ctx context.Context, job deliveryJob, sent error, now ti
 	if err != nil {
 		return err
 	}
-	if done && sent != nil && job.message.Kind == push.LiveStart {
+	if done && job.message.Kind == push.LiveStart && (sent != nil || job.target.Platform == "ios") {
 		updated, err := result.RowsAffected()
 		if err != nil {
 			return err
 		}
 		if updated == 1 {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM live_started WHERE device_id=? AND flight_id=?`, job.deviceID, job.message.FlightID); err != nil {
+			query := `DELETE FROM live_started WHERE device_id=? AND flight_id=?`
+			if sent == nil {
+				query = `INSERT OR IGNORE INTO live_start_confirmations SELECT device_id,flight_id
+FROM live_started WHERE device_id=? AND flight_id=?`
+			}
+			if _, err := tx.ExecContext(ctx, query, job.deviceID, job.message.FlightID); err != nil {
 				return err
 			}
 		}
@@ -474,6 +584,9 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 }
 
 func (s *Store) RemoveDevice(ctx context.Context, owner string, d Device) error {
+	if d.LiveSlot != "" || d.LiveRevision != 0 {
+		return ErrInvalidLiveSlot
+	}
 	_, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE owner=? AND platform=? AND kind=? AND flight_id=?
 AND (token=? OR (?='' AND ?<>''))
 AND (?='' OR EXISTS(SELECT 1 FROM device_bindings WHERE device_id=devices.id AND binding=?))`, owner, d.Platform, d.Kind, d.FlightID, d.Token, d.Token, d.Binding, d.Binding, d.Binding)
