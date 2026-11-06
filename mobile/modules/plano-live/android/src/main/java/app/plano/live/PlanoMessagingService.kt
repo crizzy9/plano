@@ -165,11 +165,12 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
       .setOngoing(true)
       .setOnlyAlertOnce(true)
       .setShowWhen(countdown != null)
+    if (countdown != null) builder.setWhen(countdown)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      builder.setTimeoutAfter(progress.expiresAt - now)
-    }
-    if (countdown != null) {
-      builder.setWhen(countdown).setUsesChronometer(true).setChronometerCountDown(true)
+      // A system chronometer keeps ticking past zero. Enable it only when
+      // the platform can also time out the notification at the target.
+      builder.setTimeoutAfter(progress.displayDeadline(now) - now)
+      if (countdown != null) builder.setUsesChronometer(true).setChronometerCountDown(true)
     }
     progress.percent(now)?.let { percent ->
       if (Build.VERSION.SDK_INT >= 36) {

@@ -355,15 +355,19 @@ boarding and departure alerts. Ordered alert history is scoped to the active
 push session.
 
 When Android hides private notification content, Plano supplies a lock-screen
-version with phase, progress, and countdown. Flight number, route, gate,
+version with phase, progress, and timing. Flight number, route, gate,
 terminal, and seat stay in the private notification. The phone's settings
-control lock-screen display and Live Update promotion. A progress update
-expires 20 minutes after its flight observation. Android 7 uses an inexact
-alarm for this deadline and can defer removal while idle. Untracking closes
-the live surface and blocks queued updates until a newer start.
+control lock-screen display and Live Update promotion. On Android 8 and later,
+a progress notification can show a live countdown and requests expiry at its
+target or 20 minutes after the flight observation, whichever comes first. A
+fresh push can restore progress after the countdown ends. Android 7 uses a
+static system timestamp and an inexact alarm for the observation deadline. Untracking
+closes the live surface and blocks queued updates until a newer start.
+[Android notification timeout](https://developer.android.com/reference/android/app/Notification.Builder#setTimeoutAfter(long))
 
-The Android widget defaults to phase, progress, and a countdown. In Plano
-Settings, choose **Show flight details on widget** to include the applicable
+The Android widget shows phase, progress, and a labeled departure or arrival
+estimate in the device's local time. In Plano Settings, choose **Show flight
+details on widget** to include the applicable
 gate, terminal, and seat from the next flight update. This setting applies to
 the device. Details can be visible on a lock screen that supports widgets.
 **Hide flight details on widget** removes the details from the widget cache.

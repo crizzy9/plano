@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
+import android.text.format.DateUtils
 import android.util.AtomicFile
 import android.view.View
 import android.widget.RemoteViews
@@ -151,7 +152,7 @@ internal object PlanoFlightWidget {
     val ids = manager.getAppWidgetIds(ComponentName(context, PlanoFlightWidgetProvider::class.java))
     if (ids.isEmpty()) return
     val selected = selectWidgetFlight(cache.flights.values, now)
-    val countdown = selected?.countdownTarget(now)
+    val target = selected?.countdownTarget(now)
     val percent = selected?.percent(now)
     val details = selected?.takeIf { cache.detailsEnabled }?.let { detailText(context, it) }.orEmpty()
     val views = RemoteViews(context.packageName, R.layout.plano_flight_widget)
@@ -162,14 +163,13 @@ internal object PlanoFlightWidget {
     views.setViewVisibility(R.id.plano_widget_hint, if (selected == null) View.VISIBLE else View.GONE)
     views.setViewVisibility(R.id.plano_widget_progress, if (percent == null) View.GONE else View.VISIBLE)
     if (percent != null) views.setProgressBar(R.id.plano_widget_progress, 100, percent, false)
-    views.setViewVisibility(R.id.plano_widget_countdown_row, if (countdown == null) View.GONE else View.VISIBLE)
-    if (countdown != null) {
-      val label = if (selected.phase.arrivalCountdown) R.string.plano_widget_until_arrival else R.string.plano_widget_until_departure
-      views.setTextViewText(R.id.plano_widget_countdown_label, context.getString(label))
-      views.setChronometerCountDown(R.id.plano_widget_countdown, true)
-      views.setChronometer(R.id.plano_widget_countdown, SystemClock.elapsedRealtime() + countdown - now, null, true)
-    } else {
-      views.setChronometer(R.id.plano_widget_countdown, SystemClock.elapsedRealtime(), null, false)
+    views.setViewVisibility(R.id.plano_widget_estimate_row, if (target == null) View.GONE else View.VISIBLE)
+    if (target != null) {
+      val label = if (selected.phase.arrivalCountdown) R.string.plano_widget_estimated_arrival else R.string.plano_widget_estimated_departure
+      // A fixed estimate stays meaningful if the widget host delays its next refresh.
+      val dayFlags = if (DateUtils.isToday(target)) 0 else DateUtils.FORMAT_SHOW_WEEKDAY or DateUtils.FORMAT_ABBREV_WEEKDAY
+      views.setTextViewText(R.id.plano_widget_estimate_label, context.getString(label))
+      views.setTextViewText(R.id.plano_widget_estimate_time, DateUtils.formatDateTime(context, target, DateUtils.FORMAT_SHOW_TIME or dayFlags))
     }
     val tapKey = binding?.let { selected?.tapKey(it) }
     openApp(context, tapKey)?.let { views.setOnClickPendingIntent(R.id.plano_widget_root, it) }

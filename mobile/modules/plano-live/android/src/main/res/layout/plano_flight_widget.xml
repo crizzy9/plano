@@ -62,7 +62,7 @@
     android:visibility="gone" />
 
   <LinearLayout
-    android:id="@+id/plano_widget_countdown_row"
+    android:id="@+id/plano_widget_estimate_row"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:layout_marginTop="5dp"
@@ -71,7 +71,7 @@
     android:visibility="gone">
 
     <TextView
-      android:id="@+id/plano_widget_countdown_label"
+      android:id="@+id/plano_widget_estimate_label"
       android:layout_width="0dp"
       android:layout_height="wrap_content"
       android:layout_weight="1"
@@ -80,8 +80,8 @@
       android:textColor="@color/plano_widget_secondary"
       android:textSize="12sp" />
 
-    <Chronometer
-      android:id="@+id/plano_widget_countdown"
+    <TextView
+      android:id="@+id/plano_widget_estimate_time"
       android:layout_width="wrap_content"
       android:layout_height="wrap_content"
       android:layout_marginStart="5dp"

@@ -82,8 +82,10 @@ internal data class WidgetFlightProgress(
     return target.takeIf { it > now && it - now <= MAX_COUNTDOWN_MILLIS }
   }
 
+  fun displayDeadline(now: Long): Long = minOf(expiresAt, countdownTarget(now) ?: expiresAt)
+
   fun nextRefreshAt(now: Long): Long {
-    val deadline = minOf(expiresAt, countdownTarget(now) ?: expiresAt)
+    val deadline = displayDeadline(now)
     val percent = percent(now)
     if (!phase.arrivalCountdown || percent == null || percent >= 99) return deadline
     val duration = arrivalAt - departureAt
