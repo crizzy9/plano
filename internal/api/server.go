@@ -242,7 +242,7 @@ func (s Server) device(w http.ResponseWriter, r *http.Request, owner string) err
 		w.WriteHeader(204)
 		return nil
 	}
-	if len(d.Token) < 20 || len(d.Token) > 4096 || strings.ContainsAny(d.Token, " \t\r\n") {
+	if d.RequestUpdateToken && d.Kind != "live_start" || len(d.Token) < 20 || len(d.Token) > 4096 || strings.ContainsAny(d.Token, " \t\r\n") {
 		return errInvalid
 	}
 	switch d.Kind {

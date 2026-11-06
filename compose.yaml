@@ -33,6 +33,12 @@ services:
       - "${PLANO_BIND_IP:-127.0.0.1}:${PLANO_PORT:-8080}:8080"
     volumes:
       - plano_data:/data
+    healthcheck:
+      test: [CMD, /usr/local/bin/plano, healthcheck]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=64m

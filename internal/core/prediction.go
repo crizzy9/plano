@@ -52,7 +52,7 @@ func Predict(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Ad
 	}
 	for _, a := range advisories {
 		at := advisoryTime(flight, a)
-		if at == nil {
+		if at == nil || a.Kind == "airport_restriction" {
 			continue
 		}
 		if at.Before(now) {
@@ -67,7 +67,7 @@ func Predict(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Ad
 		if a.DelayMinutes != nil && *a.DelayMinutes > 0 && *a.DelayMinutes <= 1440 {
 			lower = maxTime(lower, scheduled.Add(time.Duration(*a.DelayMinutes)*time.Minute))
 		}
-		if a.Kind == "ground_stop" && a.EndsAt != nil && (a.Airport == flight.Origin || a.Airport == flight.OriginICAO) {
+		if a.Kind == "ground_stop" && a.EndsAt != nil {
 			lower = maxTime(lower, *a.EndsAt)
 		}
 	}
@@ -91,6 +91,13 @@ func advisoryTime(flight feeds.Flight, a feeds.Advisory) *time.Time {
 		return nil
 	}
 	if a.Direction != "departure" && (a.Airport == flight.Destination || a.Airport == flight.DestinationICAO) {
+		// A destination ground stop holds an inbound flight at its origin.
+		if a.Kind == "ground_stop" {
+			if flight.ActualDeparture != nil || flight.ActualTakeoff != nil {
+				return nil
+			}
+			return effectiveDeparture(flight)
+		}
 		return effectiveArrival(flight)
 	}
 	if a.Direction != "arrival" && (a.Airport == flight.Origin || a.Airport == flight.OriginICAO) {

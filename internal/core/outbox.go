@@ -44,7 +44,22 @@ ON CONFLICT(platform,token,kind) DO UPDATE SET registered=excluded.registered RE
 	if err != nil {
 		return err
 	}
+	if device.Kind == "live_start" {
+		if device.RequestUpdateToken {
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO live_token_requests VALUES(?)`, deviceID); err != nil {
+				return err
+			}
+		} else if _, err := tx.ExecContext(ctx, `DELETE FROM live_token_requests WHERE device_id=?`, deviceID); err != nil {
+			return err
+		}
+	}
 	if flight.ID != "" {
+		// A locally started activity can provide its token before a queued
+		// push-to-start is delivered. Suppress that duplicate start.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE flight_id=? AND done=0 AND lease_until=0
+AND json_extract(message,'$.Kind')=? AND device_id IN (SELECT id FROM devices WHERE owner=? AND kind='live_start')`, flight.ID, push.LiveStart, owner); err != nil {
+			return err
+		}
 		kind := push.LiveUpdate
 		if finished(flight) {
 			kind = push.LiveEnd
@@ -54,7 +69,86 @@ ON CONFLICT(platform,token,kind) DO UPDATE SET registered=excluded.registered RE
 			return err
 		}
 	}
+	if device.Kind == "alert" {
+		rows, err := tx.QueryContext(ctx, `SELECT f.snapshot FROM tracked t JOIN flights f ON f.id=t.flight_id WHERE t.owner=?
+AND julianday(COALESCE(json_extract(f.snapshot,'$.estimatedDeparture'),json_extract(f.snapshot,'$.scheduledDeparture'))) BETWEEN julianday(?) AND julianday(?)`, owner, now.Format(time.RFC3339), now.Add(24*time.Hour).Format(time.RFC3339))
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var flights []feeds.Flight
+		for rows.Next() {
+			var raw []byte
+			var f feeds.Flight
+			if err := rows.Scan(&raw); err != nil {
+				return err
+			}
+			if err := json.Unmarshal(raw, &f); err != nil {
+				return err
+			}
+			flights = append(flights, f)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, f := range flights {
+			if err := queueCheckIn(ctx, tx, f, now); err != nil {
+				return err
+			}
+		}
+	}
 	return tx.Commit()
+}
+
+// A flight event can predate an installation's subscription. Track delivery
+// separately so later eligible subscribers still receive one check-in reminder.
+func queueCheckIn(ctx context.Context, tx *sql.Tx, flight feeds.Flight, now time.Time) error {
+	departure := effectiveDeparture(flight)
+	if departure == nil || flight.ActualDeparture != nil || finished(flight) || now.Before(departure.Add(-24*time.Hour)) || !now.Before(*departure) {
+		return nil
+	}
+	event := Event{ID: hash(flight.ID + "\x00check_in"), Kind: "check_in", Title: "Check-in reminder", Body: "Check check-in availability for " + flight.Number + " with your airline.", At: now}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO events VALUES(?,?,?,?)`, event.ID, flight.ID, event.At.UnixNano(), string(data)); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `INSERT OR IGNORE INTO check_in_queued(device_id,flight_id)
+SELECT d.id,t.flight_id FROM tracked t JOIN devices d ON d.owner=t.owner WHERE t.flight_id=? AND d.kind='alert' RETURNING device_id`, flight.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var recipients []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		recipients = append(recipients, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	expires := now.Add(2 * time.Hour)
+	if departure.Before(expires) {
+		expires = *departure
+	}
+	msg := push.Message{Kind: push.Alert, FlightID: flight.ID, Title: event.Title, Body: event.Body, Timestamp: now, ExpiresAt: expires, CollapseID: event.ID}
+	for _, id := range recipients {
+		if err := queueDevice(ctx, tx, id, flight.ID, msg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time) push.Message {
@@ -84,13 +178,14 @@ func enqueueLive(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight) er
 		return nil
 	}
 	type audience struct {
-		id                   int64
-		platform, kind, seat string
-		started              bool
+		id                          int64
+		platform, kind, seat        string
+		started, requestUpdateToken bool
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.platform,d.kind,t.seat,l.device_id IS NOT NULL FROM devices d JOIN tracked t ON t.owner=d.owner
+	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.platform,d.kind,t.seat,l.device_id IS NOT NULL, q.device_id IS NOT NULL FROM devices d JOIN tracked t ON t.owner=d.owner
 LEFT JOIN live_started l ON l.device_id=d.id AND l.flight_id=t.flight_id
-WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR d.kind='live_start' OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, flight.ID)
+LEFT JOIN live_token_requests q ON q.device_id=d.id
+WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='live_start' AND NOT EXISTS (SELECT 1 FROM devices u WHERE u.owner=d.owner AND u.kind='live_update' AND u.flight_id=t.flight_id)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, flight.ID)
 	if err != nil {
 		return err
 	}
@@ -98,7 +193,7 @@ WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR d.kind='li
 	var recipients []audience
 	for rows.Next() {
 		var a audience
-		if err := rows.Scan(&a.id, &a.platform, &a.kind, &a.seat, &a.started); err != nil {
+		if err := rows.Scan(&a.id, &a.platform, &a.kind, &a.seat, &a.started, &a.requestUpdateToken); err != nil {
 			return err
 		}
 		recipients = append(recipients, a)
@@ -132,7 +227,9 @@ WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR d.kind='li
 				continue
 			}
 		}
-		if err := queueDevice(ctx, tx, a.id, flight.ID, liveMessage(flight, kind, a.seat, now)); err != nil {
+		msg := liveMessage(flight, kind, a.seat, now)
+		msg.RequestUpdateToken = a.requestUpdateToken && kind == push.LiveStart
+		if err := queueDevice(ctx, tx, a.id, flight.ID, msg); err != nil {
 			return err
 		}
 		if kind == push.LiveStart {
@@ -237,8 +334,20 @@ func (s *Store) resolve(ctx context.Context, job deliveryJob, sent error, now ti
 		due = now.Add(max(time.Second<<job.attempts, retryAfter))
 		done = !due.Before(job.message.ExpiresAt)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE outbox SET attempts=attempts+1,lease_until=0,done=?,due=? WHERE id=? AND lease_until=?`, done, due.UnixNano(), job.id, job.lease); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE outbox SET attempts=attempts+1,lease_until=0,done=?,due=? WHERE id=? AND lease_until=?`, done, due.UnixNano(), job.id, job.lease)
+	if err != nil {
 		return err
+	}
+	if done && sent != nil && job.message.Kind == push.LiveStart {
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated == 1 {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM live_started WHERE device_id=? AND flight_id=?`, job.deviceID, job.message.FlightID); err != nil {
+				return err
+			}
+		}
 	}
 	return tx.Commit()
 }
@@ -272,11 +381,21 @@ func (s *Store) Dispatch(ctx context.Context, sender PushSender, logger *slog.Lo
 }
 
 func (s *Store) Prune(ctx context.Context, now time.Time) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM outbox WHERE lease_until<=? AND (expires<=? OR (done=1 AND due<=?))`, now.UnixNano(), now.UnixNano(), now.Add(-24*time.Hour).UnixNano()); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM shares WHERE expires<=?`, now.UnixNano())
-	return err
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM live_started WHERE (device_id,flight_id) IN (SELECT device_id,flight_id FROM outbox WHERE lease_until<=? AND expires<=? AND done=0 AND json_extract(message,'$.Kind')=?)`, now.UnixNano(), now.UnixNano(), push.LiveStart); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE lease_until<=? AND (expires<=? OR (done=1 AND due<=?))`, now.UnixNano(), now.UnixNano(), now.Add(-24*time.Hour).UnixNano()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM shares WHERE expires<=?`, now.UnixNano()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) RemoveDevice(ctx context.Context, owner string, d Device) error {

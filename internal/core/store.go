@@ -35,10 +35,11 @@ type Details struct {
 }
 
 type Device struct {
-	Platform string `json:"platform"`
-	Token    string `json:"token"`
-	Kind     string `json:"kind"`
-	FlightID string `json:"flightId,omitempty"`
+	Platform           string `json:"platform"`
+	Token              string `json:"token"`
+	Kind               string `json:"kind"`
+	FlightID           string `json:"flightId,omitempty"`
+	RequestUpdateToken bool   `json:"requestUpdateToken,omitempty"`
 }
 
 func Open(path string) (*Store, error) {
@@ -87,6 +88,13 @@ CREATE TABLE IF NOT EXISTS outbox (
   lease_until INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(due, id) WHERE done = 0;
+CREATE TABLE IF NOT EXISTS live_token_requests (
+  device_id INTEGER PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS check_in_queued (
+  device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  flight_id TEXT NOT NULL REFERENCES flights(id), PRIMARY KEY(device_id, flight_id)
+);
 CREATE TABLE IF NOT EXISTS live_started (
   device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE, flight_id TEXT NOT NULL REFERENCES flights(id),
   PRIMARY KEY(device_id, flight_id)
@@ -126,7 +134,12 @@ func (s *Store) Installation(ctx context.Context, token string) (string, error) 
 }
 
 func (s *Store) Track(ctx context.Context, owner, id, seat string) error {
-	result, err := s.db.ExecContext(ctx, `INSERT INTO tracked(owner, flight_id, seat)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `INSERT INTO tracked(owner, flight_id, seat)
 SELECT ?, id, ? FROM flights WHERE id = ? ON CONFLICT(owner, flight_id) DO UPDATE SET seat = CASE WHEN excluded.seat = '' THEN tracked.seat ELSE excluded.seat END`, owner, seat, id)
 	if err != nil {
 		return err
@@ -136,7 +149,18 @@ SELECT ?, id, ? FROM flights WHERE id = ? ON CONFLICT(owner, flight_id) DO UPDAT
 	} else if count == 0 {
 		return ErrNotFound
 	}
-	return nil
+	var raw []byte
+	if err := tx.QueryRowContext(ctx, `SELECT snapshot FROM flights WHERE id=?`, id).Scan(&raw); err != nil {
+		return err
+	}
+	var flight feeds.Flight
+	if err := json.Unmarshal(raw, &flight); err != nil {
+		return err
+	}
+	if err := queueCheckIn(ctx, tx, flight, time.Now()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Untrack(ctx context.Context, owner, id string) error {
@@ -146,6 +170,9 @@ func (s *Store) Untrack(ctx context.Context, owner, id string) error {
 	}
 	defer tx.Rollback()
 	if _, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE flight_id = ? AND device_id IN (SELECT id FROM devices WHERE owner = ?)`, id, owner); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM check_in_queued WHERE flight_id=? AND device_id IN (SELECT id FROM devices WHERE owner=?)`, id, owner); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM devices WHERE owner = ? AND kind = 'live_update' AND flight_id = ?`, owner, id); err != nil {
@@ -265,11 +292,18 @@ func (s *Store) Observe(ctx context.Context, flight feeds.Flight, track []feeds.
 		if !flight.ObservedAt.After(prior.ObservedAt) {
 			return nil
 		}
+		if flight.TailNumber != prior.TailNumber || flight.InboundID != prior.InboundID {
+			oldPrediction = []byte("null")
+			if inbound == nil {
+				inbound = make([]feeds.Flight, 0)
+			}
+		}
 		if inbound == nil {
 			if err := json.Unmarshal(oldInbound, &inbound); err != nil {
 				return err
 			}
 		}
+
 	}
 	predict := Predict(flight, inbound, advisories, flight.ObservedAt)
 	if advisories == nil && predict == nil && len(oldPrediction) > 0 && flight.ActualDeparture == nil && !finished(flight) {
@@ -335,10 +369,14 @@ snapshot=excluded.snapshot, observed_ns=excluded.observed_ns, telemetry=COALESCE
 		if at == nil || a.StartsAt != nil && a.StartsAt.After(*at) || a.EndsAt != nil && !a.EndsAt.After(*at) || at.Before(flight.ObservedAt.Add(-time.Hour)) {
 			continue
 		}
-		events = append(events, Event{ID: hash(flight.ID + "\x00advisory\x00" + a.Source + "\x00" + a.ID), Kind: a.Kind, Title: fmt.Sprintf("%s · %s", a.Airport, strings.ReplaceAll(a.Kind, "_", " ")), Body: a.Reason, At: flight.ObservedAt})
+		body := a.Reason
+		if body == "" {
+			body = flight.Number
+		}
+		events = append(events, Event{ID: hash(flight.ID + "\x00advisory\x00" + a.Source + "\x00" + a.ID), Kind: a.Kind, Title: fmt.Sprintf("%s · %s", a.Airport, strings.ReplaceAll(a.Kind, "_", " ")), Body: body, At: flight.ObservedAt})
 	}
-	if depart := effectiveDeparture(flight); depart != nil && flight.ActualDeparture == nil && !finished(flight) && !flight.ObservedAt.Before(depart.Add(-24*time.Hour)) && flight.ObservedAt.Before(*depart) {
-		events = append(events, Event{ID: hash(flight.ID + "\x00check_in"), Kind: "check_in", Title: "Check-in reminder", Body: "Check check-in availability for " + flight.Number + " with your airline.", At: flight.ObservedAt})
+	if err := queueCheckIn(ctx, tx, flight, flight.ObservedAt); err != nil {
+		return err
 	}
 	for _, event := range events {
 		if err := saveEvent(ctx, tx, flight.ID, event); err != nil {
