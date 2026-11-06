@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import { Linking, Platform, StyleSheet, Text, View } from 'react-native';
-import type { Connection, ConnectionSuggestion, Flight, ImportResult, ImportSource, PartnerBooking, Passport, PlanoAPI } from './api';
+import type { Connection, ConnectionSuggestion, Flight, ImportResult, ImportSource, PartnerBooking, Passport, PassportFlight, PassportHistory, PlanoAPI } from './api';
 import { errorText, formatDay, validDate } from './flight';
 import { Page, useRemote, type Routes, type Screen } from './screens';
 import { usePalette } from './theme';
@@ -523,25 +524,83 @@ function CheckedConnection({ api, inbound, outbound, monitorBusy, changeMonitori
   );
 }
 
+function passportFlightKey(flight: PassportFlight) {
+  return flight.historyKey ?? flight.id;
+}
+
 export function PassportScreen({ api, navigation }: Screen<'Passport'> & { api: PlanoAPI }) {
-  const load = useCallback(() => api.passport(), [api]);
+  const [older, setOlder] = useState<{ summary: Passport; page: PassportHistory }>();
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyError, setHistoryError] = useState<string>();
+  const historyRequest = useRef<symbol | undefined>(undefined);
+  const resetHistoryRequest = useCallback(() => {
+    historyRequest.current = undefined;
+    setHistoryBusy(false);
+    setHistoryError(undefined);
+  }, []);
+  const load = useCallback(() => {
+    resetHistoryRequest();
+    return api.passport();
+  }, [api, resetHistoryRequest]);
   const { value, error, pending, refresh } = useRemote(load);
+  const history = older && older.summary === value ? older.page : value;
+  useEffect(() => {
+    setOlder((previous) => previous?.summary === value ? previous : undefined);
+  }, [value]);
+  useFocusEffect(useCallback(() => () => {
+    historyRequest.current = undefined;
+  }, [api]));
+
+  function reload() {
+    resetHistoryRequest();
+    refresh();
+  }
+
+  async function loadOlder() {
+    if (!value || !history?.nextCursor || pending || historyRequest.current) return;
+    const cursor = history.nextCursor;
+    const request = Symbol();
+    historyRequest.current = request;
+    setHistoryBusy(true);
+    setHistoryError(undefined);
+    try {
+      const page = await api.passportHistory(cursor);
+      if (historyRequest.current !== request) return;
+      const flights = new Map(history.flights.map((flight) => [passportFlightKey(flight), flight]));
+      for (const flight of page.flights) flights.set(passportFlightKey(flight), flight);
+      setOlder({ summary: value, page: {
+        flights: [...flights.values()],
+        nextCursor: page.nextCursor === cursor ? undefined : page.nextCursor,
+      } });
+    } catch (cause) {
+      if (historyRequest.current === request) setHistoryError(errorText(cause));
+    } finally {
+      if (historyRequest.current === request) {
+        historyRequest.current = undefined;
+        setHistoryBusy(false);
+      }
+    }
+  }
+
   return (
-    <Page refreshing={pending && !!value} refresh={refresh}>
+    <Page refreshing={pending && !!value} refresh={reload}>
       <Heading>Flight history</Heading>
       <ErrorMessage message={error} />
-      {error && <Action secondary label="Reload Passport" onPress={refresh} />}
+      {error && <Action secondary label="Reload Passport" onPress={reload} />}
       {pending && !value && <Loading />}
       {value && value.flights.length === 0 && <Body>Completed flights will appear here.</Body>}
-      {!!value?.flights.length && (
+      {value && history && history.flights.length > 0 && (
         <>
           <PassportMaps segments={value.segments} />
-          {value.coverage && <PassportCoverage coverage={value.coverage} refresh={refresh} pending={pending} />}
+          {value.coverage && <PassportCoverage coverage={value.coverage} refresh={reload} pending={pending} />}
           <PassportCard stats={value.stats} />
           <View style={layout.section}>
             <Heading>Completed flights</Heading>
-            {value.flights.map((flight) => <FlightRow key={flight.id} flight={flight}
+            {history.flights.map((flight) => <FlightRow key={passportFlightKey(flight)} flight={flight}
               onPress={() => navigation.navigate('Flight', { id: flight.id, number: flight.number, initial: flight })} />)}
+            <ErrorMessage message={historyError} />
+            {history.nextCursor && <Action secondary label={historyError ? 'Retry loading older flights' : 'Load older flights'}
+              onPress={loadOlder} busy={historyBusy} disabled={pending} />}
           </View>
         </>
       )}

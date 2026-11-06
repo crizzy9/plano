@@ -2,12 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -85,7 +87,7 @@ func (s *passportSourceFixture) Airport(_ context.Context, code string) (feeds.A
 func TestPassportLifetimeHistoryExceedsTrackedLimit(t *testing.T) {
 	store := openPassportStore(t, filepath.Join(t.TempDir(), "plano.db"))
 	token, owner := passportInstallation(t, store)
-	_, other := passportInstallation(t, store)
+	otherToken, other := passportInstallation(t, store)
 	const flights = 1005
 	now := time.Now().UTC()
 	for i := range flights {
@@ -118,6 +120,92 @@ func TestPassportLifetimeHistoryExceedsTrackedLimit(t *testing.T) {
 	}
 	if provider.calls.Load() != 0 {
 		t.Fatal("demo consulted a provider")
+	}
+	handler := (Server{Store: store, Source: provider, Demo: true, Logger: slog.New(slog.DiscardHandler)}).Handler()
+	first := passportRequest(t, handler, token, url.Values{"limit": {"50"}}, http.StatusOK)
+	var summary passportPagedResponse
+	if err := json.Unmarshal(first, &summary); err != nil || len(summary.Flights) != 50 || len(summary.Segments) != 1 ||
+		summary.Stats != passport.Stats || summary.Coverage != passport.Coverage || summary.NextCursor == "" {
+		t.Fatalf("bounded Passport flights=%d segments=%d stats=%+v coverage=%+v error=%v", len(summary.Flights), len(summary.Segments), summary.Stats, summary.Coverage, err)
+	}
+	// Continuations must skip provider requests even on a live-mode server.
+	handler = (Server{Store: store, Source: provider, Logger: slog.New(slog.DiscardHandler)}).Handler()
+	query := url.Values{"limit": {"100"}, "cursor": {summary.NextCursor}}
+	var isolated passportHistoryPage
+	if err := json.Unmarshal(passportRequest(t, handler, otherToken, query, http.StatusOK), &isolated); err != nil ||
+		len(isolated.Flights) != 1 || isolated.Flights[0].ID != "other-arrived" || isolated.NextCursor != "" {
+		t.Fatalf("another installation's cursor leaked history: %+v, %v", isolated, err)
+	}
+	seen := append([]passportHistoryFlight{}, summary.Flights...)
+	for range 12 {
+		var page passportHistoryPage
+		body := passportRequest(t, handler, token, query, http.StatusOK)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body, &fields); err != nil || fields["stats"] != nil || fields["segments"] != nil || fields["coverage"] != nil {
+			t.Fatalf("older history recomputed the summary: %s, %v", body, err)
+		}
+		if err := json.Unmarshal(body, &page); err != nil || len(page.Flights) > 100 || len(page.Flights) == 0 {
+			t.Fatalf("invalid older page with %d flights, error=%v", len(page.Flights), err)
+		}
+		seen = append(seen, page.Flights...)
+		if page.NextCursor == "" {
+			break
+		}
+		query.Set("cursor", page.NextCursor)
+	}
+	if len(seen) != flights {
+		t.Fatalf("paged %d of %d completed flights", len(seen), flights)
+	}
+	if got := provider.calls.Load(); got != 0 {
+		t.Fatalf("older history consulted the airport provider %d times", got)
+	}
+	for i, flight := range seen {
+		if flight.ID != fmt.Sprintf("complete-%04d", i) || flight.HistoryKey != "l."+flight.ID {
+			t.Fatalf("flight %d = %s", i, flight.ID)
+		}
+	}
+}
+
+func passportRequest(t *testing.T, handler http.Handler, token string, query url.Values, want int) []byte {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/v1/passport?"+query.Encode(), nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != want {
+		t.Fatalf("Passport query %q status %d, want %d: %s", query.Encode(), response.Code, want, response.Body)
+	}
+	return response.Body.Bytes()
+}
+
+func TestPassportPagedCoverageMatchesFullHistory(t *testing.T) {
+	store := openPassportStore(t, filepath.Join(t.TempDir(), "plano.db"))
+	token, owner := passportInstallation(t, store)
+	now := time.Now().UTC()
+	for _, flight := range []feeds.Flight{
+		{ID: "SFO-EWR", Origin: "SFO", Destination: "EWR", DistanceMiles: new(100), TailNumber: "N-123AA"},
+		{ID: "EWR-SFO", Origin: "EWR", Destination: "SFO", TailNumber: "n123aa"},
+		{ID: "LHR-missing", Origin: "LHR", Destination: "AAA"},
+	} {
+		flight.Status, flight.ObservedAt = "arrived", now
+		addPassportFlight(t, store, owner, flight)
+	}
+	legacy := readPassport(t, store, nil, true, token)
+	handler := (Server{Store: store, Demo: true, Logger: slog.New(slog.DiscardHandler)}).Handler()
+	var paged passportPagedResponse
+	if err := json.Unmarshal(passportRequest(t, handler, token, url.Values{"limit": {"1"}}, http.StatusOK), &paged); err != nil ||
+		paged.Stats != legacy.Stats || paged.Stats.Aircraft != 1 || paged.Coverage != legacy.Coverage ||
+		paged.Coverage.MissingCoordinatesFlights != 1 || paged.Coverage.MissingDistanceFlights != 1 ||
+		len(paged.Flights) != 1 || len(paged.Segments) != 1 || paged.NextCursor == "" {
+		t.Fatalf("paged coverage = %+v, legacy = %+v, error = %v", paged, legacy, err)
+	}
+	missingArrival := base64.RawURLEncoding.EncodeToString([]byte(`{"ID":"l.LHR-missing"}`))
+	for _, raw := range []string{"cursor=bogus", "limit=0", "limit=101", "limit=1&cursor=bogus", "limit=1&cursor=", "limit=1&cursor=" + missingArrival} {
+		query, err := url.ParseQuery(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		passportRequest(t, handler, token, query, http.StatusBadRequest)
 	}
 }
 

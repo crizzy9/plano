@@ -145,8 +145,16 @@ export interface PassportSegment {
   distanceMiles: number;
 }
 
-export interface Passport {
-  flights: Flight[];
+export interface PassportFlight extends Flight {
+  historyKey?: string;
+}
+
+export interface PassportHistory {
+  flights: PassportFlight[];
+  nextCursor?: string;
+}
+
+export interface Passport extends PassportHistory {
   segments: PassportSegment[];
   stats: { flights: number; miles: number; hours: number; aircraft: number; delayMinutes: number };
   coverage?: {
@@ -617,6 +625,7 @@ export function serverStorageKey(scope: string, server: string) {
 
 const flightPath = (id: string) => `/v1/flights/${encodeURIComponent(id)}`;
 const friendPath = (id: string) => `/v1/friends/${encodeURIComponent(id)}`;
+const passportPath = '/v1/passport?limit=50';
 
 export function createAPI(server: string, options: { access?: 'background' | 'existing-installation' } = {}) {
   // The canonical origin is part of the key, so two installations on different
@@ -698,7 +707,8 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
     pickupLinks: (flightId: string) =>
       authenticated<{ links: PickupLink[] }>(`/v1/shares?${new URLSearchParams({ flightId })}`),
     revokePickupLink: (id: string) => authenticated<void>(`/v1/shares/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-    passport: () => authenticated<Passport>('/v1/passport'),
+    passport: () => authenticated<Passport>(passportPath),
+    passportHistory: (cursor: string) => authenticated<PassportHistory>(`${passportPath}&${new URLSearchParams({ cursor })}`),
     friends: () => authenticated<Friends>('/v1/friends'),
     createFriendInvite: (alias: string) => authenticated<FriendInvite>('/v1/friends/invites', {
       method: 'POST', body: JSON.stringify({ alias }),

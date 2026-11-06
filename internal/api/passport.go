@@ -52,7 +52,11 @@ type passportCoverage struct {
 }
 
 type passportResponse struct {
-	Flights  []feeds.Flight    `json:"flights"`
+	Flights []feeds.Flight `json:"flights"`
+	passportSummary
+}
+
+type passportSummary struct {
 	Segments []passportSegment `json:"segments"`
 	Stats    passportStats     `json:"stats"`
 	Coverage passportCoverage  `json:"coverage"`
@@ -83,6 +87,13 @@ var demoAirportCoordinates = map[string]core.AirportCoordinates{
 func (s Server) passport(w http.ResponseWriter, r *http.Request, owner string) error {
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
+	limit, cursor, err := parsePassportPage(r.URL.Query())
+	if err != nil {
+		return err
+	}
+	if limit != 0 {
+		return s.passportPage(ctx, w, owner, limit, cursor)
+	}
 	flights, err := s.Store.CompletedFlights(ctx, owner)
 	if err != nil {
 		return err
@@ -92,29 +103,16 @@ func (s Server) passport(w http.ResponseWriter, r *http.Request, owner string) e
 		return err
 	}
 	value := passportResponse{
-		Flights: flights, Segments: make([]passportSegment, 0, len(flights)),
-		Stats:    passportStats{Flights: len(flights)},
-		Coverage: passportCoverage{PendingAirportLookups: pending},
+		Flights: flights,
+		passportSummary: passportSummary{
+			Segments: make([]passportSegment, 0, len(flights)),
+			Coverage: passportCoverage{PendingAirportLookups: pending},
+		},
 	}
 	aircraft := make(map[string]bool)
 	for _, f := range flights {
-		if tail := strings.ToUpper(strings.TrimSpace(f.TailNumber)); tail != "" {
-			aircraft[tail] = true
-		}
-		if f.ActualDeparture != nil && !f.ActualDeparture.IsZero() && f.ActualArrival != nil && f.ActualArrival.After(*f.ActualDeparture) {
-			value.Stats.Hours += f.ActualArrival.Sub(*f.ActualDeparture).Hours()
-		} else {
-			value.Coverage.MissingDurationFlights++
-		}
-		if f.ActualArrival == nil || f.ActualArrival.IsZero() || f.ScheduledArrival == nil || f.ScheduledArrival.IsZero() {
-			value.Coverage.MissingDelayFlights++
-		} else if f.ActualArrival.After(*f.ScheduledArrival) {
-			value.Stats.DelayMinutes += int(f.ActualArrival.Sub(*f.ScheduledArrival).Minutes())
-		}
-		distance := 0
-		if f.DistanceMiles != nil {
-			distance = max(*f.DistanceMiles, 0)
-		}
+		countPassportFlight(&value.passportSummary, aircraft, f)
+		distance := passportReportedDistance(f)
 		origin := coordinates[passportAirportKey(f.Origin, f.OriginICAO).primary]
 		destination := coordinates[passportAirportKey(f.Destination, f.DestinationICAO).primary]
 		if origin != nil && destination != nil {
@@ -140,6 +138,30 @@ func (s Server) passport(w http.ResponseWriter, r *http.Request, owner string) e
 	}
 	respond(w, http.StatusOK, value)
 	return nil
+}
+
+func countPassportFlight(value *passportSummary, aircraft map[string]bool, flight feeds.Flight) {
+	value.Stats.Flights++
+	if tail := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(flight.TailNumber), "-", "")); tail != "" {
+		aircraft[tail] = true
+	}
+	if flight.ActualDeparture != nil && !flight.ActualDeparture.IsZero() && flight.ActualArrival != nil && flight.ActualArrival.After(*flight.ActualDeparture) {
+		value.Stats.Hours += flight.ActualArrival.Sub(*flight.ActualDeparture).Hours()
+	} else {
+		value.Coverage.MissingDurationFlights++
+	}
+	if flight.ActualArrival == nil || flight.ActualArrival.IsZero() || flight.ScheduledArrival == nil || flight.ScheduledArrival.IsZero() {
+		value.Coverage.MissingDelayFlights++
+	} else if flight.ActualArrival.After(*flight.ScheduledArrival) {
+		value.Stats.DelayMinutes += int(flight.ActualArrival.Sub(*flight.ScheduledArrival).Minutes())
+	}
+}
+
+func passportReportedDistance(flight feeds.Flight) int {
+	if flight.DistanceMiles != nil {
+		return max(*flight.DistanceMiles, 0)
+	}
+	return 0
 }
 
 type passportAirportSource interface {
