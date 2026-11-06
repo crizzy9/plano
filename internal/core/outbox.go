@@ -999,6 +999,9 @@ AND newer.observed_ns>r.observed_ns AND newer.observed_ns<=?)`,
 	if _, err := tx.ExecContext(ctx, `DELETE FROM friend_invites WHERE expires_ns<=?`, now.UnixNano()); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM calendar_import_receipts WHERE expires<=?`, now.Unix()); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

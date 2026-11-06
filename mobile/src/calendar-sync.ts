@@ -1,47 +1,49 @@
 import * as BackgroundTask from 'expo-background-task';
+import { randomUUID } from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 import {
-  clearCalendarBackground, createAPI, loadServer, prepareCalendarBackground, serverStorageKey, type PlanoAPI,
+  clearCalendarBackground, createAPI, loadServer, prepareCalendarBackground, serverStorageKey, type CalendarFlight, type PlanoAPI,
 } from './api';
 import { dateKey } from './flight';
 
 const taskName = 'plano-calendar-sync-v1';
 const cadenceMinutes = 30;
+export const calendarSyncIntervalMs = cadenceMinutes * 60_000;
 const lookaheadDays = 30;
-const maxCandidates = 64;
+const maxLogEntries = 64;
+const legacyCandidateLimit = 64;
 const maxBatches = 3;
 const maxFlightsPerBatch = 4;
 const secureOptions = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY };
 const native = Platform.OS === 'ios' || Platform.OS === 'android';
 const codePattern = /\b(?:[A-Z]{2,3}|[A-Z][0-9]|[0-9][A-Z])[ -]?\d{1,4}[A-Z]?\b/;
 const routePattern = /\b[A-Z]{3}\b\s*(?:→|[-–]|to)\s*\b[A-Z]{3}\b/i;
+const flightKeyPattern = /^\d{4}-\d{2}-\d{2} [A-Z0-9]{3,8}(?: \d{6})?$/;
+const orderKeyPattern = /^\d{4}-\d{2}-\d{2} (?:\d{6})? [A-Z0-9]{3,8}$/;
+const timedConsentPattern = /^timed:[a-f0-9-]{36}$/;
 
 type CalendarEvent = {
   title?: string | null;
-  startDate: string | Date;
-  timeZone?: string;
+  startDate?: string | Date | null;
+  timeZone?: string | null;
   allDay?: boolean;
-  status?: string;
-};
-
-type CalendarFlight = {
-  day: string;
-  code: string;
-  utcTime?: string;
+  status?: string | null;
 };
 
 type SyncLog = {
   attemptedAt: number;
-  nextBatch: number;
+  after?: string;
+  nextBatch?: number;
   imported: string[];
+  consent?: string;
 };
 
 let scheduleQueue = Promise.resolve();
 let ongoingSync: Promise<void> | undefined;
 
-function calendarDate(departure: Date, timeZone?: string) {
+function calendarDate(departure: Date, timeZone?: string | null) {
   if (timeZone) {
     try {
       const parts = new Intl.DateTimeFormat('en-US', {
@@ -59,6 +61,10 @@ function flightKey({ day, code, utcTime }: CalendarFlight) {
   return utcTime ? `${day} ${code} ${utcTime}` : `${day} ${code}`;
 }
 
+function calendarOrderKey({ day, code, utcTime }: CalendarFlight) {
+  return `${day} ${utcTime ?? ''} ${code}`;
+}
+
 function flightLabel({ day, code }: CalendarFlight) {
   return `${code} · ${day}`;
 }
@@ -68,8 +74,9 @@ export function selectCalendarFlights(events: CalendarEvent[], from: Date, until
   const firstDay = dateKey(from);
   const lastDay = dateKey(until);
   for (const event of events) {
-    // Expo's iOS legacy bridge uses 'cancelled' for EKEventStatus.canceled.
+    // The native bridges use different spellings for cancellation.
     if (event.status === 'canceled' || event.status === 'cancelled') continue;
+    if (event.startDate == null) continue;
     const title = event.title?.trim() ?? '';
     const match = title.match(codePattern);
     if (!match) continue;
@@ -95,7 +102,12 @@ export function selectCalendarFlights(events: CalendarEvent[], from: Date, until
     const key = flightKey(flight);
     if (!candidates.has(key)) candidates.set(key, { flight, timestamp });
   }
-  return [...candidates.values()].sort((a, b) => a.timestamp - b.timestamp).slice(0, limit).map(({ flight }) => flight);
+  return [...candidates.values()].sort((a, b) => {
+    if (!automatic && a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
+    const left = calendarOrderKey(a.flight);
+    const right = calendarOrderKey(b.flight);
+    return left < right ? -1 : left > right ? 1 : 0;
+  }).slice(0, limit).map(({ flight }) => flight);
 }
 
 export function calendarImportBatches(flights: CalendarFlight[], size: number) {
@@ -129,15 +141,15 @@ export function importCalendarBatch(api: PlanoAPI, flights: CalendarFlight[]) {
 
 async function readCalendarFlights(prompt: boolean, includeTimes = true) {
   if (!native) return [];
-  const calendar = await import('expo-calendar/legacy');
+  const calendar = await import('expo-calendar');
   const permission = prompt
-    ? await calendar.requestCalendarPermissionsAsync()
-    : await calendar.getCalendarPermissionsAsync();
+    ? await calendar.requestCalendarPermissions()
+    : await calendar.getCalendarPermissions();
   if (!permission.granted) {
     if (prompt) throw new Error('Allow calendar access in device settings to import flight dates.');
     return [];
   }
-  const calendars = await calendar.getCalendarsAsync(calendar.EntityTypes.EVENT);
+  const calendars = await calendar.getCalendars(calendar.EntityTypes.EVENT);
   if (!calendars.length) return [];
   const from = new Date();
   const until = new Date(from);
@@ -153,8 +165,8 @@ async function readCalendarFlights(prompt: boolean, includeTimes = true) {
     queryFrom.setTime(Math.min(queryFrom.getTime(), utcFrom));
     queryUntil.setTime(Math.max(queryUntil.getTime(), utcUntil));
   }
-  const events = await calendar.getEventsAsync(calendars.map(({ id }) => id), queryFrom, queryUntil);
-  return selectCalendarFlights(events, from, until, prompt ? 12 : maxCandidates, !prompt, includeTimes);
+  const events = await calendar.listEvents(calendars, queryFrom, queryUntil);
+  return selectCalendarFlights(events, from, until, prompt ? 12 : Infinity, !prompt, includeTimes);
 }
 
 export function calendarFlights() {
@@ -162,17 +174,18 @@ export function calendarFlights() {
 }
 
 const optInKey = (server: string) => serverStorageKey('calendar-sync', server);
-const syncLogKey = (server: string) => serverStorageKey('calendar-imports', server);
+const legacyLogKey = (server: string) => serverStorageKey('calendar-imports', server);
+const syncLogKey = (server: string) => serverStorageKey('calendar-sync-imports', server);
 
-async function calendarSyncMode(server: string) {
+async function calendarSyncConsent(server: string) {
   if (!native || !server) return undefined;
-  const mode = await SecureStore.getItemAsync(optInKey(server));
-  if (mode !== 'on' && mode !== 'timed') return undefined;
-  return await createAPI(server, { access: 'background' }).hasSavedInstallationToken() ? mode : undefined;
+  const consent = await SecureStore.getItemAsync(optInKey(server));
+  if (!consent || consent !== 'on' && consent !== 'timed' && !timedConsentPattern.test(consent)) return undefined;
+  return await createAPI(server, { access: 'background' }).hasSavedInstallationToken() ? consent : undefined;
 }
 
 export async function calendarSyncEnabled(server: string) {
-  return (await calendarSyncMode(server)) !== undefined;
+  return (await calendarSyncConsent(server)) !== undefined;
 }
 
 function reconcileSchedule() {
@@ -196,17 +209,18 @@ export async function setCalendarSyncEnabled(server: string, enabled: boolean) {
   if (!enabled) {
     await SecureStore.deleteItemAsync(optInKey(server));
     await SecureStore.deleteItemAsync(syncLogKey(server));
+    await SecureStore.deleteItemAsync(legacyLogKey(server));
     await clearCalendarBackground(server);
     await reconcileSchedule();
     return;
   }
 
-  const calendar = await import('expo-calendar/legacy');
-  const permission = await calendar.requestCalendarPermissionsAsync();
+  const calendar = await import('expo-calendar');
+  const permission = await calendar.requestCalendarPermissions();
   if (!permission.granted) throw new Error('Allow calendar access in device settings to enable sync.');
   await prepareCalendarBackground(server);
   try {
-    await SecureStore.setItemAsync(optInKey(server), 'timed', secureOptions);
+    await SecureStore.setItemAsync(optInKey(server), `timed:${randomUUID()}`, secureOptions);
     await reconcileSchedule();
   } catch (cause) {
     await SecureStore.deleteItemAsync(optInKey(server));
@@ -216,16 +230,17 @@ export async function setCalendarSyncEnabled(server: string, enabled: boolean) {
   void synchronizeCalendar().catch(() => {});
 }
 
-async function readLog(server: string): Promise<SyncLog> {
-  const stored = await SecureStore.getItemAsync(syncLogKey(server));
+async function readLog(key: string, consent: string): Promise<SyncLog> {
+  const stored = await SecureStore.getItemAsync(key);
   if (stored) {
     try {
       const log = JSON.parse(stored) as Partial<SyncLog>;
-      if (typeof log.attemptedAt === 'number' && Array.isArray(log.imported)) {
-        const imported = log.imported.filter((pair) => typeof pair === 'string'
-          && /^\d{4}-\d{2}-\d{2} [A-Z0-9]{3,8}(?: \d{6})?$/.test(pair));
+      if (typeof log.attemptedAt === 'number' && Array.isArray(log.imported)
+        && (log.consent === undefined || log.consent === consent)) {
+        const imported = log.imported.filter((pair) => typeof pair === 'string' && flightKeyPattern.test(pair));
         const nextBatch = Number.isSafeInteger(log.nextBatch) && (log.nextBatch ?? 0) >= 0 ? log.nextBatch ?? 0 : 0;
-        return { attemptedAt: log.attemptedAt, nextBatch, imported: imported.slice(-maxCandidates) };
+        const after = typeof log.after === 'string' && orderKeyPattern.test(log.after) ? log.after : undefined;
+        return { attemptedAt: log.attemptedAt, nextBatch, after, imported: imported.slice(-maxLogEntries) };
       }
     } catch {
       // A stale or corrupt local log can be rebuilt from the calendar.
@@ -234,57 +249,103 @@ async function readLog(server: string): Promise<SyncLog> {
   return { attemptedAt: 0, nextBatch: 0, imported: [] };
 }
 
-async function storeLog(server: string, attemptedAt: number, nextBatch: number, imported: Set<string>) {
+async function storeLog(key: string, consent: string, attemptedAt: number, after: string | undefined, imported: Set<string>, nextBatch?: number) {
   // Calendar titles, event IDs, notes, and booking data never enter this log.
-  const log = { attemptedAt, nextBatch, imported: [...imported].slice(-maxCandidates) };
-  await SecureStore.setItemAsync(syncLogKey(server), JSON.stringify(log), secureOptions);
+  const log = { consent, attemptedAt, after, nextBatch, imported: [...imported].slice(-maxLogEntries) };
+  await SecureStore.setItemAsync(key, JSON.stringify(log), secureOptions);
 }
 
-async function activeConsent(server: string, mode: 'on' | 'timed') {
-  return (await loadServer({ savedOnly: true })) === server && await calendarSyncMode(server) === mode;
+async function activeConsent(server: string, consent: string) {
+  return (await loadServer({ savedOnly: true })) === server && await calendarSyncConsent(server) === consent;
+}
+
+function pendingCalendarBatches(candidates: CalendarFlight[], imported: Set<string>, otherImports: Set<string>, previous: SyncLog) {
+  const pending = candidates.filter((flight) => {
+    const key = flightKey(flight);
+    return !imported.has(key) && !otherImports.has(key);
+  });
+  const after = previous.after;
+  if (after !== undefined) {
+    const first = pending.findIndex((flight) => calendarOrderKey(flight) > after);
+    const ordered = first > 0 ? pending.slice(first).concat(pending.slice(0, first)) : pending;
+    return calendarImportBatches(ordered, maxFlightsPerBatch);
+  }
+  const batches = calendarImportBatches(pending, maxFlightsPerBatch);
+  if (!batches.length) return batches;
+  const first = (previous.nextBatch ?? 0) % batches.length;
+  return first > 0 ? batches.slice(first).concat(batches.slice(0, first)) : batches;
+}
+
+async function legacyCalendarBatch(api: PlanoAPI, group: CalendarFlight[]) {
+  const result = await importCalendarBatch(api, group);
+  const missed = new Set(result.unmatched);
+  const matched = group.filter((flight) => !missed.has(flightLabel(flight)));
+  // An older server deduplicates resolved flights across designators.
+  return result.flights.length === matched.length ? matched.map(flightKey) : [];
 }
 
 async function runSync() {
   if (!native) return;
   const server = await loadServer({ savedOnly: true });
   if (!server) return;
-  const mode = await calendarSyncMode(server);
-  if (!mode) return;
+  const consent = await calendarSyncConsent(server);
+  if (!consent) return;
   const now = Date.now();
-  const previous = await readLog(server);
-  if (now >= previous.attemptedAt && now - previous.attemptedAt < cadenceMinutes * 60_000) return;
+  const previous = await readLog(syncLogKey(server), consent);
+  const previousLegacy = await readLog(legacyLogKey(server), consent);
+  const attemptedAt = Math.max(
+    previous.attemptedAt <= now ? previous.attemptedAt : 0,
+    previousLegacy.attemptedAt <= now ? previousLegacy.attemptedAt : 0,
+  );
+  if (now - attemptedAt < calendarSyncIntervalMs) return;
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   const recent = dateKey(yesterday);
   const imported = new Set(previous.imported.filter((pair) => pair.slice(0, 10) >= recent));
+  // Flights imported through older servers have no server receipt to protect
+  // them from re-tracking if their local entries are displaced.
+  const legacyImported = new Set(previousLegacy.imported.filter((pair) => pair.slice(0, 10) >= recent));
+  if (legacyImported.size < previousLegacy.imported.length) {
+    if (!await activeConsent(server, consent)) return;
+    await storeLog(legacyLogKey(server), consent, previousLegacy.attemptedAt, previousLegacy.after, legacyImported, previousLegacy.nextBatch);
+  }
   // Existing background consent covered flight numbers and dates.
-  const candidates = await readCalendarFlights(false, mode === 'timed');
-  const groups = calendarImportBatches(candidates.filter((flight) => !imported.has(flightKey(flight))), maxFlightsPerBatch);
-  if (!await activeConsent(server, mode)) return;
+  const candidates = await readCalendarFlights(false, consent !== 'on');
+  let groups = pendingCalendarBatches(candidates, imported, legacyImported, previous);
+  if (!await activeConsent(server, consent)) return;
   if (!groups.length) {
-    await storeLog(server, now, 0, imported);
+    await storeLog(syncLogKey(server), consent, now, undefined, imported);
     return;
   }
 
-  const start = previous.nextBatch % groups.length;
-  for (let offset = 0; offset < Math.min(maxBatches, groups.length); offset += 1) {
-    if (!await activeConsent(server, mode)) return;
-    const current = (start + offset) % groups.length;
-    const group = groups[current];
-    if (!group) continue;
-    const next = (current + 1) % groups.length;
-    // Move past an unresolved or failed batch on the next run so it cannot
-    // prevent new flights from syncing.
-    await storeLog(server, now, next, imported);
-    const result = await importCalendarBatch(createAPI(server, { access: 'background' }), group);
-    const missed = new Set(result.unmatched);
-    const matched = group.filter((flight) => !missed.has(flightLabel(flight)));
-    // Multiple designators may resolve to one flight. Store a batch only when
-    // the reply accounts for every submitted pair.
-    if (result.flights.length !== matched.length) continue;
-    if (!await activeConsent(server, mode)) return;
-    for (const flight of matched) imported.add(flightKey(flight));
-    await storeLog(server, now, next, imported);
+  const calendar = await import('expo-calendar');
+  const api = createAPI(server, { access: 'background' });
+  let legacy = false;
+  for (let sent = 0; sent < maxBatches; ) {
+    const group = groups.shift();
+    const first = group?.[0];
+    if (!group || !first || !await activeConsent(server, consent)) return;
+    const last = group.at(-1) ?? first;
+    const checkpoint = calendarOrderKey(legacy ? last : first);
+    const key = legacy ? legacyLogKey(server) : syncLogKey(server);
+    const journal = legacy ? legacyImported : imported;
+    // If a provider lookup stalls a batch, give the remaining flights a
+    // chance to go first on the next run.
+    await storeLog(key, consent, now, checkpoint, journal);
+    if (!(await calendar.getCalendarPermissions()).granted || !await activeConsent(server, consent)) return;
+    const completed = legacy ? await legacyCalendarBatch(api, group) : await api.syncCalendarFlights(group);
+    if (completed === null) {
+      legacy = true;
+      groups = pendingCalendarBatches(candidates.slice(0, legacyCandidateLimit), legacyImported, imported, previousLegacy);
+      continue;
+    }
+    sent += 1;
+    if (!await activeConsent(server, consent)) return;
+    const keys = new Set(completed);
+    const acknowledged = group.map(flightKey).filter((flight) => keys.has(flight));
+    for (const flight of acknowledged) journal.add(flight);
+    const after = legacy || acknowledged.length === group.length ? calendarOrderKey(last) : checkpoint;
+    await storeLog(key, consent, now, after, journal);
   }
 }
 

@@ -8,7 +8,7 @@ import { createAPI, loadServer, removeRetiredDevices } from './src/api';
 import { errorText } from './src/flight';
 import { useFlightAlerts } from './src/alerts';
 import { useNotificationRouting } from './src/notification-routing';
-import { resumeCalendarSync } from './src/calendar-sync';
+import { calendarSyncIntervalMs, resumeCalendarSync } from './src/calendar-sync';
 import { Home, Search, FlightDetailScreen, ServerSettings, type Routes } from './src/screens';
 import { FriendsScreen } from './src/friends';
 import { Tools, ImportFlights, PassportScreen, ConnectionScreen } from './src/tools';
@@ -35,15 +35,26 @@ export default function App() {
   useNotificationRouting(server, server !== undefined && readyServer === server, navigation);
   useEffect(() => {
     if (!server) return;
+    let calendarTimer: ReturnType<typeof setInterval> | undefined;
+    const pauseCalendar = () => {
+      if (calendarTimer !== undefined) clearInterval(calendarTimer);
+      calendarTimer = undefined;
+    };
+    const syncCalendar = () => { void resumeCalendarSync().catch(() => {}); };
     const resume = () => {
       void removeRetiredDevices(server).catch(() => {});
-      void resumeCalendarSync().catch(() => {});
+      syncCalendar();
+      calendarTimer ??= setInterval(syncCalendar, calendarSyncIntervalMs);
     };
     if (AppState.currentState !== 'background' && AppState.currentState !== 'inactive') resume();
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') resume();
+      else pauseCalendar();
     });
-    return () => subscription.remove();
+    return () => {
+      pauseCalendar();
+      subscription.remove();
+    };
   }, [server]);
   const baseTheme = isDark ? DarkTheme : DefaultTheme;
   const theme = {

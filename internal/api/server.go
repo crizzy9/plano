@@ -106,6 +106,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/connection-monitors", s.auth(s.connectionMonitors))
 	mux.HandleFunc("DELETE /v1/connection-monitors", s.auth(s.connectionMonitors))
 	mux.HandleFunc("POST /v1/import", s.auth(s.importFlights))
+	mux.HandleFunc("POST /v1/import/calendar-sync", s.auth(s.syncCalendar))
 	mux.HandleFunc("POST /v1/import/tripit", s.auth(s.importTripIt))
 	mux.HandleFunc("GET /v1/import/tripit/subscription", s.auth(s.tripItSubscription))
 	mux.HandleFunc("PUT /v1/import/tripit/subscription", s.auth(s.tripItSubscription))

@@ -283,6 +283,12 @@ export interface PartnerBooking {
 
 export type ImportSource = 'calendar' | 'email' | 'tripit';
 
+export type CalendarFlight = {
+  day: string;
+  code: string;
+  utcTime?: string;
+};
+
 export interface Device {
   platform: 'ios' | 'android';
   token: string;
@@ -645,7 +651,7 @@ export async function saveServer(value: string, enrollmentCode?: string, previou
 }
 
 class APIError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly routeMissing = false) {
     super(message);
   }
 }
@@ -671,7 +677,10 @@ async function request<T>(server: string, path: string, init: RequestInit = {}, 
     if (!response.ok) {
       if (response.status === 401) throw new APIError(401, 'This installation needs to reconnect.');
       if (response.status === 403) throw new APIError(403, 'This server requires an enrollment code. Enter it in Settings.');
-      if (response.status === 404) throw new APIError(404, 'That information is unavailable on this server.');
+      if (response.status === 404) {
+        const type = response.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase();
+        throw new APIError(404, 'That information is unavailable on this server.', type === 'text/plain');
+      }
       if (response.status === 429) throw new APIError(429, 'Too many requests. Try again in a moment.');
       if (response.status >= 500) throw new APIError(response.status, 'Plano’s server is temporarily unavailable.');
       throw new APIError(response.status, 'Plano couldn’t complete that request.');
@@ -1006,6 +1015,20 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
       authenticated<ImportResult>('/v1/import', {
         method: 'POST', body: JSON.stringify({ source, text, date }),
       }, 22_000),
+    async syncCalendarFlights(flights: CalendarFlight[]) {
+      try {
+        const result = await authenticated<{ completed: string[] }>('/v1/import/calendar-sync', {
+          method: 'POST', body: JSON.stringify({ flights }),
+        }, 22_000);
+        if (!Array.isArray(result?.completed) || !result.completed.every((key) => typeof key === 'string')) {
+          throw new Error('Plano returned an invalid calendar sync response.');
+        }
+        return result.completed;
+      } catch (error) {
+        if (error instanceof APIError && error.routeMissing) return null;
+        throw error;
+      }
+    },
     async revokeDevices(binding?: string) {
       if (binding !== undefined && !androidBindingPattern.test(binding)) throw new Error('Invalid Android alert binding.');
       const token = await savedToken();
