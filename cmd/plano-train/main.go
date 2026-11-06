@@ -23,6 +23,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	inputPath := flags.String("input", "-", "Historical examples as JSON Lines. Use - for stdin.")
 	outputPath := flags.String("output", "", "New model artifact path. Use - for stdout.")
+	evaluatePath := flags.String("evaluate-model", "", "Score an existing model against later examples and print JSON metrics to stdout.")
 	holdout := flags.Float64("holdout", 0.2, "Fraction of newest forecasts reserved for evaluation.")
 	ridge := flags.Float64("ridge", 0.01, "L2 penalty on standardized feature coefficients.")
 	allowRegression := flags.Bool("allow-regression", false, "Write an experimental artifact even if the backtest fails the deployment gate.")
@@ -32,8 +33,36 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		}
 		return err
 	}
-	if *outputPath == "" || flags.NArg() != 0 {
-		return errors.New("usage: plano-train -input examples.jsonl -output delay-model.json")
+	var evaluate bool
+	var trainingFlag string
+	flags.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "evaluate-model":
+			evaluate = true
+		case "output", "holdout", "ridge", "allow-regression":
+			trainingFlag = f.Name
+		}
+	})
+	if flags.NArg() != 0 || !evaluate && *outputPath == "" {
+		return errors.New("usage: plano-train -input examples.jsonl (-output delay-model.json | -evaluate-model delay-model.json)")
+	}
+	var model *predict.Model
+	if evaluate {
+		if trainingFlag != "" {
+			return fmt.Errorf("-%s cannot be used with -evaluate-model", trainingFlag)
+		}
+		if *evaluatePath == "" {
+			return errors.New("-evaluate-model requires an artifact path")
+		}
+		file, err := os.Open(*evaluatePath)
+		if err != nil {
+			return err
+		}
+		model, err = predict.Load(file)
+		closeErr := file.Close()
+		if err := errors.Join(err, closeErr); err != nil {
+			return err
+		}
 	}
 	input := stdin
 	if *inputPath != "-" {
@@ -48,13 +77,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if evaluate {
+		report, err := predict.Evaluate(model, rows)
+		if err != nil {
+			return err
+		}
+		return writeMetrics(stdout, report)
+	}
 	model, report, err := predict.Fit(rows, predict.Options{HoldoutFraction: *holdout, Ridge: *ridge})
 	if err != nil {
 		return err
 	}
-	metrics := json.NewEncoder(stderr)
-	metrics.SetIndent("", "  ")
-	if err := metrics.Encode(report); err != nil {
+	if err := writeMetrics(stderr, report); err != nil {
 		return err
 	}
 	if !*allowRegression && (report.LearnedCoverage < 0.5 || report.LearnedOrFallback.MeanAbsoluteMinutes >= report.Operational.MeanAbsoluteMinutes ||
@@ -74,4 +108,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+func writeMetrics(output io.Writer, report any) error {
+	encoder := json.NewEncoder(output)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(report)
 }

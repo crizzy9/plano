@@ -72,6 +72,11 @@ type Backtest struct {
 	LearnedOrFallback ErrorMetrics `json:"learnedOrFallback"`
 }
 
+type Evaluation struct {
+	Backtest
+	ExcludedThroughTraining int `json:"excludedThroughTraining"`
+}
+
 type trainingPoint struct {
 	features [featureCount]float64
 	label    float64
@@ -101,23 +106,11 @@ func Fit(examples []Example, options Options) (*Model, Backtest, error) {
 	if !within(options.HoldoutFraction, 0.1, 0.5) || !validRidge(options.Ridge) {
 		return nil, Backtest{}, errors.New("invalid holdout fraction or ridge penalty")
 	}
-	seen := make(map[string]bool, len(examples))
-	for i, row := range examples {
-		if row.FlightID == "" || len(row.FlightID) > 128 || strings.TrimSpace(row.FlightID) != row.FlightID || seen[row.FlightID] {
-			return nil, Backtest{}, fmt.Errorf("invalid or repeated flight ID at example %d", i+1)
-		}
-		if _, valid := row.point(); !valid {
-			return nil, Backtest{}, fmt.Errorf("invalid timestamps, feature values, or label at example %d", i+1)
-		}
-		seen[row.FlightID] = true
+	if err := validateExamples(examples); err != nil {
+		return nil, Backtest{}, err
 	}
 	rows := slices.Clone(examples)
-	slices.SortFunc(rows, func(a, b Example) int {
-		if order := a.ObservedAt.Compare(b.ObservedAt); order != 0 {
-			return order
-		}
-		return strings.Compare(a.FlightID, b.FlightID)
-	})
+	sortExamples(rows)
 	holdoutSize := max(minTestRows, int(math.Ceil(float64(len(rows))*options.HoldoutFraction)))
 	boundary := rows[len(rows)-holdoutSize].ObservedAt.UTC()
 	training := make([]trainingPoint, 0, len(rows)-holdoutSize)
@@ -146,6 +139,56 @@ func Fit(examples []Example, options Options) (*Model, Backtest, error) {
 		return nil, Backtest{}, err
 	}
 	return model, backtest(model, holdout, boundary, purged), nil
+}
+
+// Evaluate scores an existing model on observations after its latest fitted label.
+func Evaluate(model *Model, examples []Example) (Evaluation, error) {
+	if model == nil || model.id == "" {
+		return Evaluation{}, errors.New("evaluation requires a fitted model")
+	}
+	if len(examples) > maxRows {
+		return Evaluation{}, fmt.Errorf("provide at most %d historical flight examples", maxRows)
+	}
+	if err := validateExamples(examples); err != nil {
+		return Evaluation{}, err
+	}
+	eligible := make([]Example, 0, len(examples))
+	for _, row := range examples {
+		if row.ObservedAt.After(model.artifact.TrainingUntil) {
+			eligible = append(eligible, row)
+		}
+	}
+	if len(eligible) < minTestRows {
+		return Evaluation{}, fmt.Errorf("evaluation requires at least %d flights observed after training", minTestRows)
+	}
+	sortExamples(eligible)
+	return Evaluation{
+		Backtest:                backtest(model, eligible, eligible[0].ObservedAt.UTC(), 0),
+		ExcludedThroughTraining: len(examples) - len(eligible),
+	}, nil
+}
+
+func validateExamples(examples []Example) error {
+	seen := make(map[string]bool, len(examples))
+	for i, row := range examples {
+		if row.FlightID == "" || len(row.FlightID) > 128 || strings.TrimSpace(row.FlightID) != row.FlightID || seen[row.FlightID] {
+			return fmt.Errorf("invalid or repeated flight ID at example %d", i+1)
+		}
+		if _, valid := row.point(); !valid {
+			return fmt.Errorf("invalid timestamps, feature values, or label at example %d", i+1)
+		}
+		seen[row.FlightID] = true
+	}
+	return nil
+}
+
+func sortExamples(rows []Example) {
+	slices.SortFunc(rows, func(a, b Example) int {
+		if order := a.ObservedAt.Compare(b.ObservedAt); order != 0 {
+			return order
+		}
+		return strings.Compare(a.FlightID, b.FlightID)
+	})
 }
 
 func train(points []trainingPoint, through time.Time, ridge float64) (*Model, error) {

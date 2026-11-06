@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -11,8 +12,26 @@ import (
 )
 
 func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, bool) {
+	validUntil := advisoryForecastValidity(a, at)
+	if !validUntil.After(at) {
+		return Event{}, false
+	}
+	if decoded, ok := feeds.DecodeNOTAM(a.RawReason); ok && decoded.Scope == "cancellation" {
+		return Event{}, false
+	}
 	target := advisoryTime(flight, a)
-	if target == nil || a.StartsAt != nil && a.StartsAt.After(*target) || a.EndsAt != nil && !a.EndsAt.After(*target) || target.Before(at.Add(-time.Hour)) {
+	if target == nil || target.Before(at.Add(-time.Hour)) {
+		return Event{}, false
+	}
+	arrivalProgram := a.Kind != "ground_stop" && a.Direction != "departure" &&
+		(a.Airport == flight.Destination || a.Airport == flight.DestinationICAO)
+	if arrivalProgram && (flight.ActualArrival != nil || finished(flight)) || !arrivalProgram && !flightBeforeDeparture(flight) {
+		return Event{}, false
+	}
+	if target.Before(at) {
+		target = &at
+	}
+	if a.StartsAt != nil && a.StartsAt.After(*target) || a.EndsAt != nil && !a.EndsAt.After(*target) {
 		return Event{}, false
 	}
 	body := a.Reason
@@ -20,7 +39,7 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, 
 		body = flight.Number
 	}
 	return Event{ID: hash(flight.ID + "\x00advisory\x00" + a.Source + "\x00" + a.ID), Kind: a.Kind,
-		Title: fmt.Sprintf("%s · %s", a.Airport, strings.ReplaceAll(a.Kind, "_", " ")), Body: body, At: at}, true
+		Title: fmt.Sprintf("%s · %s", a.Airport, strings.ReplaceAll(a.Kind, "_", " ")), Body: body, At: at, validUntil: &validUntil}, true
 }
 
 // PublishAdvisory commits the normalized program and affected flight alert
@@ -123,13 +142,22 @@ WHERE expires_ns>? OR observed_ns>? ORDER BY source,id`, now.UnixNano(), now.Add
 }
 
 func mergeAdvisories(polled []feeds.Advisory, pushed []advisoryRevision, now time.Time) []feeds.Advisory {
+	future := func(a feeds.Advisory) bool { return a.ObservedAt.After(now) }
+	if slices.ContainsFunc(polled, future) {
+		polled = slices.DeleteFunc(slices.Clone(polled), future)
+	}
 	if len(pushed) == 0 {
 		return polled
 	}
 	type key struct{ source, id string }
 	latest := make(map[key]advisoryRevision, len(pushed))
 	for _, r := range pushed {
-		latest[key{r.advisory.Source, r.advisory.ID}] = r
+		if !r.advisory.ObservedAt.After(now) {
+			latest[key{r.advisory.Source, r.advisory.ID}] = r
+		}
+	}
+	if len(latest) == 0 {
+		return polled
 	}
 	merged := make([]feeds.Advisory, 0, len(polled)+len(pushed))
 	seen := make(map[key]bool, len(pushed))
@@ -142,7 +170,7 @@ func mergeAdvisories(polled []feeds.Advisory, pushed []advisoryRevision, now tim
 		merged = append(merged, a)
 	}
 	for _, r := range pushed {
-		if r.expiresNS > now.UnixNano() && !seen[key{r.advisory.Source, r.advisory.ID}] {
+		if !r.advisory.ObservedAt.After(now) && r.expiresNS > now.UnixNano() && !seen[key{r.advisory.Source, r.advisory.ID}] {
 			merged = append(merged, r.advisory)
 		}
 	}

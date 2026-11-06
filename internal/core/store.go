@@ -350,8 +350,21 @@ EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flight
 			return d, err
 		}
 	}
-	if d.Prediction != nil && !predictionCurrent(d.Prediction, d.Flight, d.Inbound, time.Now()) {
-		d.Prediction = nil
+	if d.Prediction != nil {
+		now := time.Now()
+		if !predictionCurrent(d.Prediction, d.Flight, d.Inbound, now) {
+			d.Prediction = nil
+		} else {
+			revised, err := forecastAdvisoryRevised(ctx, s.db, d.Prediction, now)
+			if err != nil {
+				return d, err
+			}
+			if revised {
+				d.Prediction = nil
+			} else {
+				d.Prediction.AdvisoryEvidence = nil
+			}
+		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT data FROM events WHERE flight_id=? ORDER BY at_ns DESC,id LIMIT 200`, id)
 	if err != nil {
@@ -481,6 +494,15 @@ COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id)
 			predictionValue = nil
 		}
 	}
+	if predictionValue != nil {
+		revised, err := forecastAdvisoryRevised(ctx, tx, predictionValue, time.Now())
+		if err != nil {
+			return err
+		}
+		if revised {
+			predictionValue = nil
+		}
+	}
 
 	if len(track) > 0 && len(oldTrack) > 0 {
 		var earlier []feeds.Position
@@ -531,7 +553,7 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 		}
 	}
 
-	if s.collectDelaySamples && trackedRefresh {
+	if s.collectDelaySamples && (trackedRefresh || expectedAeroID != "" && flight.ActualDeparture != nil) {
 		if err := recordDelaySample(ctx, tx, flight, inbound, advisories, decisionAt); err != nil {
 			return err
 		}
@@ -545,7 +567,7 @@ ON CONFLICT(flight_id) DO UPDATE SET provider_id=excluded.provider_id`, provider
 			return err
 		}
 		if predictionValue != nil && predictionValue.DelayMinutes >= 10 && (old == nil || predictionValue.DelayMinutes >= old.DelayMinutes+10 || !slices.Equal(predictionValue.Reasons, old.Reasons)) {
-			events = append(events, Event{Kind: "delay_prediction", Title: "Departure delay predicted", Body: fmt.Sprintf("%s · %d min later", flight.Number, predictionValue.DelayMinutes), At: flight.ObservedAt})
+			events = append(events, Event{Kind: "delay_prediction", Title: "Departure delay predicted", Body: fmt.Sprintf("%s · %d min later", flight.Number, predictionValue.DelayMinutes), At: flight.ObservedAt, validUntil: predictionValue.ValidUntil})
 		}
 	}
 	for _, a := range advisories {
@@ -590,7 +612,14 @@ func saveEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event) er
 	if n, err := res.RowsAffected(); err != nil || n == 0 {
 		return err
 	}
-	msg := push.Message{Kind: push.Alert, FlightID: flightID, Title: event.Title, Body: truncate(event.Body, 180), Timestamp: event.At, ExpiresAt: event.At.Add(2 * time.Hour), CollapseID: event.ID}
+	expires := event.At.Add(2 * time.Hour)
+	if event.validUntil != nil {
+		expires = earliestTime(expires, *event.validUntil)
+	}
+	if !expires.After(event.At) {
+		return nil
+	}
+	msg := push.Message{Kind: push.Alert, FlightID: flightID, Title: event.Title, Body: truncate(event.Body, 180), Timestamp: event.At, ExpiresAt: expires, CollapseID: event.ID}
 	return enqueue(ctx, tx, flightID, msg, `SELECT d.id FROM devices d JOIN tracked t ON t.owner=d.owner WHERE t.flight_id=? AND d.kind='alert'`, flightID)
 }
 

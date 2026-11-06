@@ -19,3 +19,13 @@ go run ./cmd/plano-train -input examples.jsonl -output delay-model.json
 The command reports learned coverage, mean absolute error, root mean square error, and signed bias on the later flights. `learnedOrFallback` uses the model within its observed feature ranges and the operational baseline elsewhere. `publishedEstimateBaseline` uses the airline estimate when recorded and scheduled departure otherwise. By default the trainer writes an artifact only when learned coverage is at least 50% and mean absolute error beats both baselines on that holdout. `-allow-regression` writes an artifact for offline experiments even if the comparison fails. The minimum sample counts exercise the trainer. Validate operational accuracy with representative traffic and forecast lead times before deployment.
 
 Set `PLANO_DELAY_MODEL_FILE` to the artifact path on the server. A learned result exposes its historical baseline, signed feature contributions, and the model ID alongside the published schedule and estimates. Feature contributions explain the model's estimate. Provider advisories and inbound timing retain their own evidence. Unsupported values, missing observations, and absent model files leave the operational forecast available.
+
+## Evaluate a deployed artifact
+
+Use separately collected later forecasts with observed gate-out outcomes. Keep them separate from examples used to fit the model or choose its parameters. A training holdout can qualify by date, so passing the cutoff alone does not establish an independent validation set.
+
+```sh
+go run ./cmd/plano-train -evaluate-model delay-model.json -input later-examples.jsonl
+```
+
+The command writes a JSON report to stdout and leaves the model file intact. It needs at least eight flights with `observedAt` strictly after the artifact's last fitted label. The report counts earlier observations, including those exactly at the cutoff, in `excludedThroughTraining`. `holdoutFrom` and `holdoutRows` describe the evaluated cohort. Compare `learnedOrFallback` with both baselines and check `learnedCoverage` to see how often the model supplied the estimate. Evaluation reports the metrics even when the model underperforms. Synthetic examples verify the evaluation path. Assess live accuracy using representative traffic and forecast lead times.

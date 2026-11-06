@@ -261,6 +261,17 @@ The trainer reports holdout metrics on stderr and writes an artifact only if
 the default backtest gate passes. Mount a validated artifact read-only and
 set `PLANO_DELAY_MODEL_FILE` to its container path. [Delay model training](../cmd/plano-train/README.md)
 
+To measure a deployed model on separately collected later outcomes, use the
+path mounted inside the container and a later sample export.
+
+```sh
+docker compose exec -T plano plano-train \
+  -evaluate-model /path/to/mounted-delay-model.json -input - < later-examples.jsonl
+```
+
+Evaluation prints JSON metrics, excludes forecasts at or before the last
+fitted label, and leaves the artifact intact.
+
 ## Optional real-time callbacks
 
 Enable an HTTPS FlightAware callback or a signed FAA SWIM/EUROCONTROL bridge

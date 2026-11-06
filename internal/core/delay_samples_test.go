@@ -52,6 +52,51 @@ func TestCaptureDelaySamplesWithObservedLabel(t *testing.T) {
 	}
 }
 
+func TestAeroCallbackCompletesAnExistingDelaySample(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "test.db")
+	store, err := OpenWithOptions(path, StoreOptions{CollectDelaySamples: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	departure := time.Date(2026, 11, 12, 19, 30, 0, 0, time.UTC)
+	flight := feeds.Flight{ID: "XY123-abc", Number: "XY123", Source: "flightaware_aeroapi", Status: "scheduled",
+		ObservedAt: departure.Add(-time.Hour), ScheduledDeparture: &departure}
+	if err := store.observeTracked(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	token, err := store.CreateInstallation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.Installation(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Track(ctx, owner, flight.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	actual := departure.Add(10 * time.Minute)
+	label := actual.Add(time.Minute)
+	flight.Status, flight.ActualDeparture, flight.ObservedAt = "taxi_out", &actual, label
+	if err := store.observe(ctx, flight, nil, nil, nil, false, flight.ID); err != nil {
+		t.Fatal(err)
+	}
+	flight.ObservedAt = label.Add(time.Minute)
+	if err := store.observeTracked(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := ExportDelaySamples(ctx, path, &output); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := predict.ReadExamples(&output)
+	if err != nil || len(rows) != 1 || rows[0].LabelObservedAt == nil || !rows[0].LabelObservedAt.Equal(label) {
+		t.Fatalf("callback label was not kept: %+v %v", rows, err)
+	}
+}
+
 func TestGateHistoryUsesSameRouteWithObservedOperation(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "test.db"))

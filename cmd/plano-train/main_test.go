@@ -81,3 +81,54 @@ func TestTrainCLIFailsQualityGateWithoutWritingAnArtifact(t *testing.T) {
 		t.Fatalf("experimental artifact: %v", err)
 	}
 }
+
+func TestEvaluateCLIPrintsReportWithoutWritingModel(t *testing.T) {
+	input := exampleJSONL(t, true)
+	artifactPath := filepath.Join(t.TempDir(), "existing.json")
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"-output", artifactPath}, bytes.NewReader(input), &stdout, &stderr); err != nil {
+		t.Fatalf("fit fixture: %v\n%s", err, &stderr)
+	}
+	before, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := predict.Load(bytes.NewReader(before))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := run([]string{"-evaluate-model", artifactPath, "-input", "-"}, bytes.NewReader(input), &stdout, &stderr); err != nil {
+		t.Fatalf("evaluate: %v\n%s", err, &stderr)
+	}
+	var report predict.Evaluation
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || report.ModelVersion != model.ID() ||
+		report.ExcludedThroughTraining != 32 || report.HoldoutRows != 8 || report.LearnedCoverage != 1 || stderr.Len() != 0 {
+		t.Fatalf("stdout report = %+v, stderr = %q, error = %v", report, &stderr, err)
+	}
+	if after, err := os.ReadFile(artifactPath); err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("evaluation changed artifact: %v", err)
+	}
+}
+
+func TestEvaluateCLIRejectsTrainingFlagsAndMissingArtifact(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-evaluate-model", missing, "-output", "-"}, "-output cannot be used"},
+		{[]string{"-evaluate-model", missing, "-holdout", "0.2"}, "-holdout cannot be used"},
+		{[]string{"-evaluate-model", missing, "-ridge", "0.01"}, "-ridge cannot be used"},
+		{[]string{"-evaluate-model", missing, "-allow-regression=false"}, "-allow-regression cannot be used"},
+		{[]string{"-evaluate-model", ""}, "requires an artifact path"},
+		{[]string{"-evaluate-model", missing}, "missing.json"},
+	} {
+		var stdout, stderr bytes.Buffer
+		err := run(test.args, strings.NewReader(""), &stdout, &stderr)
+		if err == nil || !strings.Contains(err.Error(), test.want) || stdout.Len() != 0 {
+			t.Errorf("evaluate %v = stdout %q, error %v", test.args, &stdout, err)
+		}
+	}
+}

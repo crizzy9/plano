@@ -39,3 +39,26 @@ func TestEndedAdvisorySurvivesDelayedReplayAndSuppressesOldPoll(t *testing.T) {
 		t.Fatalf("stale advisory revived: %v", result)
 	}
 }
+
+func TestFutureAdvisoryRevisionDoesNotReplaceCurrentEvidence(t *testing.T) {
+	now := time.Date(2026, 11, 5, 20, 0, 0, 0, time.UTC)
+	current := feeds.Advisory{ID: "revision", Source: feeds.FAASWIM, ObservedAt: now.Add(-time.Minute)}
+	future := current
+	future.ObservedAt = now.Add(15 * time.Second)
+	end := now.Add(time.Hour).UnixNano()
+	for _, tc := range []struct {
+		name   string
+		polled feeds.Advisory
+		pushed feeds.Advisory
+	}{
+		{"future poll", future, current},
+		{"future callback", current, future},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mergeAdvisories([]feeds.Advisory{tc.polled}, []advisoryRevision{{advisory: tc.pushed, expiresNS: end}}, now)
+			if len(got) != 1 || !got[0].ObservedAt.Equal(current.ObservedAt) {
+				t.Fatalf("future revision displaced current evidence: %+v", got)
+			}
+		})
+	}
+}

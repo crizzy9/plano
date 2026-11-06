@@ -133,3 +133,59 @@ func TestFitRejectsDuplicateFlightsAndLeakedLabels(t *testing.T) {
 		t.Fatal("accepted an unknown row field")
 	}
 }
+
+func TestEvaluateUsesLatestFittedLabelAsStrictCutoff(t *testing.T) {
+	rows := syntheticExamples()
+	boundary := rows[64].ObservedAt
+	rows[63].LabelObservedAt = new(boundary.Add(30 * time.Minute))
+	rows[62].LabelObservedAt = new(boundary.Add(-time.Minute))
+	model, fitted, err := Fit(rows, Options{HoldoutFraction: 0.2, Ridge: 0.01})
+	if err != nil {
+		t.Fatal(err)
+	}
+	equal := rows[64]
+	equal.FlightID = "at-cutoff"
+	equal.ObservedAt = fitted.TrainingUntil
+	rows = append(rows, equal)
+	got, err := Evaluate(model, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fitted.PurgedRows = 0
+	if got.ExcludedThroughTraining != 65 || got.Backtest != fitted {
+		t.Fatalf("evaluation = %+v, want %d excluded and %+v", got, 65, fitted)
+	}
+	slices.Reverse(rows)
+	if reversed, err := Evaluate(model, rows); err != nil || reversed != got {
+		t.Fatalf("evaluation changed after row reordering: %+v, %v", reversed, err)
+	}
+}
+
+func TestEvaluateKeepsOperationalFallbackAndRejectsInvalidRows(t *testing.T) {
+	rows := syntheticExamples()
+	model, _, err := Fit(rows, Options{HoldoutFraction: 0.2, Ridge: 0.01})
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := rows[72:]
+	for i := range later {
+		later[i].Features = Features{AirlineDelayMinutes: 15, GroundStopMinutes: 120}
+		later[i].DepartedAt = later[i].ScheduledDeparture.Add(90 * time.Minute)
+	}
+	got, err := Evaluate(model, later)
+	if err != nil || got.ExcludedThroughTraining != 0 || got.HoldoutRows != 8 || got.LearnedCoverage != 0 ||
+		got.LearnedOrFallback != (ErrorMetrics{30, 30, 30}) || got.Operational != got.LearnedOrFallback ||
+		got.Published != (ErrorMetrics{75, 75, -75}) {
+		t.Fatalf("fallback evaluation = %+v, %v", got, err)
+	}
+	if _, err := Evaluate(model, later[:7]); err == nil || !strings.Contains(err.Error(), "at least 8") {
+		t.Fatalf("short evaluation error = %v", err)
+	}
+	if _, err := Evaluate(nil, later); err == nil || !strings.Contains(err.Error(), "requires a fitted model") {
+		t.Fatalf("missing model error = %v", err)
+	}
+	later[0].FlightID = later[1].FlightID
+	if _, err := Evaluate(model, later); err == nil || !strings.Contains(err.Error(), "repeated flight ID") {
+		t.Fatalf("duplicate flight error = %v", err)
+	}
+}

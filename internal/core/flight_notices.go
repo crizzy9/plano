@@ -194,8 +194,7 @@ func flightNoticeAppliesAt(a feeds.Advisory, at *time.Time, now time.Time) bool 
 }
 
 func flightNoticeSummary(a feeds.Advisory) (summary, airport string, ok bool) {
-	switch a.Kind {
-	case "cancelled", "canceled", "cancellation", "notam_cancelled", "notam_canceled", "notam_cancellation":
+	if advisoryCancelled(a.Kind) {
 		return "", "", false
 	}
 	summary = a.Reason
