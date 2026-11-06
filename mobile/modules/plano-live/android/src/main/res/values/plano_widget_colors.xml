@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <color name="plano_widget_surface">#E5F2EB</color>
+  <color name="plano_widget_primary">#132522</color>
+  <color name="plano_widget_secondary">#36544B</color>
+  <color name="plano_widget_track">#AFC6BB</color>
+  <color name="plano_widget_fill">#006952</color>
+</resources>

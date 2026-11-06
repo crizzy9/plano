@@ -9,15 +9,21 @@ class PlanoLiveModule : Module() {
     Name("PlanoLive")
 
     AsyncFunction("stop") { flightId: String ->
-      val manager = appContext.reactContext?.getSystemService(NotificationManager::class.java)
+      val context = appContext.reactContext
+      val manager = context?.getSystemService(NotificationManager::class.java)
       manager?.cancel("plano-live-$flightId", 0)
+      if (context != null) runCatching { PlanoFlightWidget.stop(context, flightId) }
+      Unit
     }
 
     AsyncFunction("clear") {
-      val manager = appContext.reactContext?.getSystemService(NotificationManager::class.java)
+      val context = appContext.reactContext
+      val manager = context?.getSystemService(NotificationManager::class.java)
       manager?.activeNotifications?.filter { it.tag?.startsWith("plano-") == true }?.forEach {
         manager.cancel(it.tag, it.id)
       }
+      if (context != null) runCatching { PlanoFlightWidget.clear(context) }
+      Unit
     }
   }
 }

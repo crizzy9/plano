@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+  android:description="@string/plano_widget_description"
+  android:initialKeyguardLayout="@layout/plano_flight_widget"
+  android:initialLayout="@layout/plano_flight_widget"
+  android:minHeight="112dp"
+  android:minWidth="146dp"
+  android:previewLayout="@layout/plano_flight_widget"
+  android:resizeMode="horizontal|vertical"
+  android:targetCellHeight="2"
+  android:targetCellWidth="3"
+  android:updatePeriodMillis="1800000"
+  android:widgetCategory="home_screen|keyguard" />

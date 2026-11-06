@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="plano_widget_label">Plano flight progress</string>
+  <string name="plano_widget_description">Live status, estimated progress, and countdown for one tracked flight.</string>
+  <string name="plano_widget_no_flight">No active flight</string>
+  <string name="plano_widget_hint">Open Plano to view your flights.</string>
+  <string name="plano_widget_progress">Estimated flight progress</string>
+  <string name="plano_widget_until_arrival">Until arrival</string>
+  <string name="plano_widget_until_departure">Until departure</string>
+  <string name="plano_widget_scheduled">Scheduled</string>
+  <string name="plano_widget_boarding">Boarding</string>
+  <string name="plano_widget_taxiing">Taxiing</string>
+  <string name="plano_widget_airborne">In flight</string>
+  <string name="plano_widget_diverted">Diverted</string>
+  <string name="plano_widget_landed">Landed</string>
+</resources>

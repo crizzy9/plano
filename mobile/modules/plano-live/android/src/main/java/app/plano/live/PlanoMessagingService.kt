@@ -10,15 +10,19 @@ import android.os.Bundle
 import com.google.firebase.messaging.RemoteMessage
 import expo.modules.notifications.service.ExpoFirebaseMessagingService
 
+// The official NotificationCompat wire key also works when compiling with API 36,
+// whose framework stub does not yet expose the API 36.1 constant.
+private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
+
 class PlanoMessagingService : ExpoFirebaseMessagingService() {
   private val manager by lazy { requireNotNull(getSystemService(NotificationManager::class.java)) }
 
-  override fun onMessageReceived(message: RemoteMessage) {
-    val data = message.data
+  override fun onMessageReceived(remoteMessage: RemoteMessage) {
+    val data = remoteMessage.data
     when (data["type"]) {
-      "alert" -> showAlert(data, message.messageId)
-      "live" -> showProgress(data, message.sentTime)
-      else -> super.onMessageReceived(message)
+      "alert" -> showAlert(data, remoteMessage.messageId)
+      "live" -> showProgress(data, remoteMessage.sentTime)
+      else -> super.onMessageReceived(remoteMessage)
     }
   }
 
@@ -51,15 +55,25 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     if (observedAt < lastObserved || observedAt == lastObserved && sentAt <= lastSent) return
     last.edit().putLong(flightId, observedAt).putLong("$flightId.sent", sentAt).apply()
     val status = data["status"].orEmpty()
-    if (data["event"] == "end" || status in listOf("arrived", "cancelled")) {
+    val ended = data["event"] == "end" || status in listOf("arrived", "cancelled")
+    val departure = data["departureEpoch"]?.toLongOrNull() ?: 0
+    val arrival = data["arrivalEpoch"]?.toLongOrNull() ?: 0
+    // Keep the opt-in widget independent of notification permission and pass
+    // only the fields it can display. A widget host failure must not drop alerts.
+    runCatching {
+      PlanoFlightWidget.onFlight(
+        this, flightId, data["event"] == "start", ended,
+        WidgetFlightProgress.fromEpochs(status, observedAt, departure, arrival),
+        sentAt.takeIf { it > 0 } ?: epochMillis(observedAt),
+      )
+    }
+    if (ended) {
       manager.cancel(tag, 0)
       return
     }
 
     if (!manager.areNotificationsEnabled()) return
     manager.createNotificationChannel(NotificationChannel("flight-progress", "Live flight progress", NotificationManager.IMPORTANCE_LOW))
-    val departure = data["departureEpoch"]?.toLongOrNull() ?: 0
-    val arrival = data["arrivalEpoch"]?.toLongOrNull() ?: 0
     val now = System.currentTimeMillis()
     val percent = when {
       status == "landed" -> 100
@@ -102,7 +116,7 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     if (Build.VERSION.SDK_INT >= 36) {
       builder.setStyle(Notification.ProgressStyle().setProgress(percent)
         .setProgressSegments(listOf(Notification.ProgressStyle.Segment(100).setColor(0xff57bfa1.toInt()))))
-        .addExtras(Bundle().apply { putBoolean(Notification.EXTRA_REQUEST_PROMOTED_ONGOING, true) })
+        .addExtras(Bundle().apply { putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true) })
     } else {
       builder.setProgress(100, percent, false)
     }
