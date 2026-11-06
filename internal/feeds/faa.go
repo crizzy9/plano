@@ -28,6 +28,8 @@ func NewFAANAS(client *http.Client) *FAANAS {
 	return &FAANAS{endpoint: faaNASEndpoint, client: feedClient(client)}
 }
 
+func (f *FAANAS) AdvisorySourceID() string { return faaNASSource }
+
 func (f *FAANAS) Advisories(ctx context.Context) ([]Advisory, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, f.endpoint, nil)
 	if err != nil {
@@ -128,6 +130,12 @@ func parseFAANAS(body []byte) ([]Advisory, error) {
 					row.StartsAt, row.EndsAt = start, end
 				}
 				row.Reason = explainClosure(row.RawReason)
+				if summary, ok := DecodeNOTAM(row.RawReason); ok {
+					row.Reason = summary.Text
+					if summary.FullAirportClosure {
+						row.Kind = "airport_closure"
+					}
+				}
 			}
 			add(row, strings.TrimSpace(event.Start))
 		}
@@ -168,7 +176,7 @@ func (e faaAirportEvent) advisory(kind, direction string) Advisory {
 
 var (
 	faaDuration = regexp.MustCompile(`(?i)^(?:(\d{1,2})\s*(?:hours?|hrs?|h)(?:\s+and\s+|\s*))?(?:(\d{1,4})\s*(?:minutes?|mins?|m))?$\z`)
-	notamRange  = regexp.MustCompile(`\b([0-9]{10})-([0-9]{10})(?:EST)?\b`)
+	notamRange  = regexp.MustCompile(`\b([0-9]{10}) ?[-–] ?([0-9]{10})(?: ?EST)?\b`)
 	faaZulu     = regexp.MustCompile(`^([0-9]{2})([0-9]{2})([0-9]{2})Z$\z`)
 )
 

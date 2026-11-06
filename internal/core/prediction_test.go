@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -63,11 +64,21 @@ func TestPredictionUsesTrainedModelAndRetainsOperationalFallback(t *testing.T) {
 	flight := feeds.Flight{ID: row.FlightID, Number: "UA7", Status: "scheduled", Origin: "SFO", Destination: "JFK",
 		ScheduledDeparture: &row.ScheduledDeparture, EstimatedDeparture: &published}
 	got := PredictWithModel(model, flight, nil, nil, row.ObservedAt)
-	if got == nil || got.Method != "learned_estimate" || got.DelayMinutes != 60 || got.ModelVersion != model.ID() || got.BaselineMinutes == nil || len(got.FeatureContributions) < 7 || len(got.Reasons) == 0 {
+	if got == nil || got.Method != "learned_estimate" || got.DelayMinutes != 60 || got.ModelVersion != model.ID() || got.ValidUntil != nil || got.BaselineMinutes == nil || len(got.FeatureContributions) < 7 || len(got.Reasons) == 0 {
 		t.Fatalf("learned forecast = %+v", got)
 	}
 	if !flight.EstimatedDeparture.Equal(published) || !flight.ScheduledDeparture.Equal(row.ScheduledDeparture) {
 		t.Fatal("forecast modified published flight times")
+	}
+	closureEnd := row.ScheduledDeparture.Add(100 * time.Minute)
+	closure := feeds.Advisory{Airport: "SFO", Direction: "departure", Kind: "airport_closure", Source: "faa_nas", RawReason: "AD AP CLSD",
+		ObservedAt: row.ObservedAt, StartsAt: new(row.ScheduledDeparture.Add(45 * time.Minute)), EndsAt: &closureEnd}
+	closed := PredictWithModel(model, flight, nil, []feeds.Advisory{closure}, row.ObservedAt)
+	if closed == nil || closed.Method != got.Method || closed.ModelVersion != got.ModelVersion || closed.DelayMinutes != 100 ||
+		!closed.Departure.Equal(closureEnd) || !slices.Equal(closed.FeatureContributions, got.FeatureContributions) ||
+		closed.ValidUntil == nil || !closed.ValidUntil.Equal(row.ObservedAt.Add(30*time.Minute)) ||
+		len(closed.Reasons) == 0 || !strings.Contains(closed.Reasons[len(closed.Reasons)-1], "full airport closure") {
+		t.Fatalf("closure-adjusted learned forecast = %+v", closed)
 	}
 	advisory := feeds.Advisory{Airport: "SFO", Direction: "departure", Kind: "departure_delay", Reason: "weather", Source: "faa_nas", DelayMinutes: new(35), ObservedAt: row.ObservedAt}
 	got = PredictWithModel(model, flight, nil, []feeds.Advisory{advisory}, row.ObservedAt)
@@ -77,5 +88,103 @@ func TestPredictionUsesTrainedModelAndRetainsOperationalFallback(t *testing.T) {
 	flight.Status = "airborne"
 	if got := PredictWithModel(model, flight, nil, nil, row.ObservedAt); got != nil {
 		t.Fatalf("predicted already departed flight: %+v", got)
+	}
+}
+
+func TestPredictionUsesEarliestExpiryAcrossClosureEvidence(t *testing.T) {
+	now := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)
+	departure := now.Add(5 * time.Minute)
+	flight := feeds.Flight{Status: "scheduled", Origin: "SFO", ScheduledDeparture: &departure}
+	first := feeds.Advisory{Airport: "SFO", Kind: "airport_closure", Source: "faa_nas", RawReason: "AD AP CLSD",
+		ObservedAt: now, EndsAt: new(now.Add(20 * time.Minute))}
+	second := feeds.Advisory{Airport: "SFO", Kind: "airport_closure", Source: "faa_nas", RawReason: "AD AP CLSD",
+		ObservedAt: now, StartsAt: new(now.Add(15 * time.Minute)), EndsAt: new(now.Add(90 * time.Minute))}
+	aged := first
+	aged.ObservedAt = now.Add(-5*time.Hour - 50*time.Minute)
+	for _, tc := range []struct {
+		name     string
+		first    feeds.Advisory
+		validFor time.Duration
+	}{
+		{name: "earlier notice end", first: first, validFor: 20 * time.Minute},
+		{name: "earlier observation expiry", first: aged, validFor: 10 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Predict(flight, nil, []feeds.Advisory{second, tc.first}, now)
+			if got == nil || !got.Departure.Equal(*second.EndsAt) || got.ValidUntil == nil || !got.ValidUntil.Equal(now.Add(tc.validFor)) {
+				t.Fatalf("chained closure forecast = %+v", got)
+			}
+		})
+	}
+}
+
+func TestPredictionUsesOverlappingFullDepartureClosures(t *testing.T) {
+	now := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)
+	departure := now.Add(time.Hour)
+	published := departure.Add(5 * time.Minute)
+	flight := feeds.Flight{Status: "scheduled", Origin: "SFO", OriginICAO: "KSFO", Destination: "JFK", DestinationICAO: "KJFK",
+		ScheduledDeparture: &departure, EstimatedDeparture: &published}
+	end := departure.Add(75*time.Minute + 30*time.Second)
+	advisories := []feeds.Advisory{
+		{Airport: "KSFO", Kind: "airport_closure", Direction: "departure", Source: "faa_nas", RawReason: "!SFO SFO AD AP CLSD",
+			ObservedAt: now, StartsAt: new(departure.Add(30 * time.Minute)), EndsAt: &end},
+		{Airport: "SFO", Kind: "airport_closure", Source: "faa_nas", RawReason: "AD AP CLSD",
+			ObservedAt: now, EndsAt: new(departure.Add(40 * time.Minute)), Reason: "weather and ATC", DelayMinutes: new(100)},
+	}
+	got := Predict(flight, nil, advisories, now)
+	if got == nil || got.Method != "operational_estimate" || got.DelayMinutes != 76 || !got.Departure.Equal(end) ||
+		len(got.Reasons) != 1 || !strings.Contains(got.Reasons[0], "FAA reports a full airport closure at KSFO") {
+		t.Fatalf("closure-adjusted forecast = %+v", got)
+	}
+	features, ok := ExtractDelayFeatures(flight, nil, advisories, now)
+	if !ok || features != (predict.Features{AirlineDelayMinutes: 5}) {
+		t.Fatalf("closure entered the model features: %+v, %t", features, ok)
+	}
+	if !flight.EstimatedDeparture.Equal(published) || !flight.ScheduledDeparture.Equal(departure) {
+		t.Fatal("closure forecast modified published flight times")
+	}
+}
+
+func TestPredictionLeavesAmbiguousAndUnrelatedNoticesAsContext(t *testing.T) {
+	now := time.Date(2026, time.November, 5, 18, 0, 0, 0, time.UTC)
+	departure := now.Add(time.Hour)
+	flight := feeds.Flight{Status: "scheduled", Origin: "SFO", OriginICAO: "KSFO", Destination: "JFK", DestinationICAO: "KJFK",
+		ScheduledDeparture: &departure}
+	valid := feeds.Advisory{Airport: "KSFO", Kind: "airport_closure", Source: "faa_nas", RawReason: "AD AP CLSD",
+		ObservedAt: now, EndsAt: new(departure.Add(time.Hour)), Reason: "weather and ATC", DelayMinutes: new(60)}
+	for _, tc := range []struct {
+		name   string
+		change func(*feeds.Advisory)
+	}{
+		{"arrival-only at origin", func(a *feeds.Advisory) { a.Direction = "arrival" }},
+		{"arrival airport", func(a *feeds.Advisory) { a.Airport = "KJFK" }},
+		{"different airport in raw text", func(a *feeds.Advisory) { a.RawReason = "!JFK JFK AD AP CLSD" }},
+		{"raw runway", func(a *feeds.Advisory) { a.RawReason = "RWY 02 CLSD" }},
+		{"raw conditional closure", func(a *feeds.Advisory) { a.RawReason = "AD AP CLSD EXC SKED ACFT" }},
+		{"runway closure context", func(a *feeds.Advisory) { a.Kind, a.RawReason = "runway_closure", "RWY 02 CLSD" }},
+		{"taxiway closure context", func(a *feeds.Advisory) { a.Kind, a.RawReason = "taxiway_closure", "TWY A CLSD" }},
+		{"airport restriction context", func(a *feeds.Advisory) { a.Kind = "airport_restriction" }},
+		{"cancellation kind context", func(a *feeds.Advisory) { a.Kind = "cancellation" }},
+		{"NOTAM cancellation kind context", func(a *feeds.Advisory) { a.Kind = "notam_cancelled" }},
+		{"cancellation", func(a *feeds.Advisory) { a.RawReason = "(A1234/26 NOTAMC A1233/26\nA) KSFO\nE) AD CLSD)" }},
+		{"attached estimated end", func(a *feeds.Advisory) { a.RawReason = "AD AP CLSD 2611051900-2611052000EST" }},
+		{"estimated ICAO end", func(a *feeds.Advisory) {
+			a.RawReason = "(A1234/26 NOTAMN\nA) KSFO B) 2611051900 C) 2611052000 EST\nE) AD CLSD)"
+		}},
+		{"permanent ICAO end", func(a *feeds.Advisory) { a.RawReason = "(A1234/26 NOTAMN\nA) KSFO B) 2611051900 C) PERM\nE) AD CLSD)" }},
+		{"missing end", func(a *feeds.Advisory) { a.EndsAt = nil }},
+		{"stale observation", func(a *feeds.Advisory) { a.ObservedAt = now.Add(-6 * time.Hour) }},
+		{"future observation", func(a *feeds.Advisory) { a.ObservedAt = now.Add(time.Second) }},
+		{"closure ends at departure", func(a *feeds.Advisory) { a.EndsAt = &departure }},
+		{"closure begins after departure", func(a *feeds.Advisory) { a.StartsAt = new(departure.Add(time.Second)) }},
+		{"closure extends beyond the forecast horizon", func(a *feeds.Advisory) { a.EndsAt = new(departure.Add(25 * time.Hour)) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			advisory := valid
+			tc.change(&advisory)
+			if got := Predict(flight, nil, []feeds.Advisory{advisory}, now); got != nil {
+				t.Fatalf("context-only advisory changed the forecast: %+v", got)
+			}
+		})
 	}
 }

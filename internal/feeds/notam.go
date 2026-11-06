@@ -11,18 +11,19 @@ import (
 type NOTAMSummary struct {
 	Scope              string
 	Text               string
+	Airport            string
 	FullAirportClosure bool
 }
 
 var (
 	// FAA Order 7930.2U sections 3-3, 4-2, 5-1, and 8-1 document the
 	// domestic contractions, movement area qualifiers, and ICAO fields.
-	notamDomesticHeader = regexp.MustCompile(`^![A-Za-z0-9]{2,7} (?:[0-9]{1,2}/[0-9]{3,4} )?[A-Za-z0-9]{2,7} (.+)$`)
+	notamDomesticHeader = regexp.MustCompile(`^![A-Za-z0-9]{2,7} (?:[0-9]{1,2}/[0-9]{3,4} )?([A-Za-z0-9]{2,7}) (.+)$`)
 	notamICAOHeader     = regexp.MustCompile(`^\(?[A-Z][0-9]{4}/[0-9]{2}\s+NOTAM([NRC])(?:\s+[A-Z][0-9]{4}/[0-9]{2})?$`)
 	notamField          = regexp.MustCompile(`(?:^|[\t\r\n ])([QABCDEFG])\)[\t ]*`)
 	notamToken          = regexp.MustCompile(`[A-Za-z0-9]+(?:/[A-Za-z0-9]+)?`)
 	notamUnit           = regexp.MustCompile(`^([0-9]+)(FT|HR|MIN)$`)
-	notamFullClosure    = regexp.MustCompile(`^(?:CLSD|CLOSED)(?: [0-9]{10} ?[-–] ?(?:[0-9]{10}(?: EST)?|PERM))?[.]?$`)
+	notamFullClosure    = regexp.MustCompile(`^(?:CLSD|CLOSED)(?: [0-9]{10} ?[-–] ?(?:[0-9]{10}(?: ?EST)?|PERM))?[.]?$`)
 	notamNonScheduled   = regexp.MustCompile(`(?i)\bNON[- ]SKED\b`)
 )
 
@@ -60,13 +61,17 @@ func DecodeNOTAM(raw string) (NOTAMSummary, bool) {
 	if len(raw) > 8192 || !utf8.ValidString(raw) {
 		return NOTAMSummary{}, false
 	}
-	body, schedule, cancelled := notamText(raw)
+	body, schedule, airport, cancelled := notamText(raw)
 	if cancelled {
 		return NOTAMSummary{Scope: "cancellation", Text: "This NOTAM cancels an earlier notice."}, true
 	}
 	body = advisoryPlainText(body)
 	if header := notamDomesticHeader.FindStringSubmatchIndex(body); header != nil {
-		body = body[header[2]:]
+		airport = strings.ToUpper(body[header[2]:header[3]])
+		body = body[header[4]:]
+	}
+	if !airportCode.MatchString(airport) {
+		airport = ""
 	}
 	for _, subject := range notamSubjects {
 		size := len(subject.code)
@@ -82,29 +87,29 @@ func DecodeNOTAM(raw string) (NOTAMSummary, bool) {
 			return NOTAMSummary{}, false
 		}
 		return NOTAMSummary{
-			Scope: subject.scope, Text: text,
+			Scope: subject.scope, Text: text, Airport: airport,
 			FullAirportClosure: subject.scope == "airport" && schedule == "" && notamFullClosure.MatchString(strings.ToUpper(details)),
 		}, true
 	}
 	return NOTAMSummary{}, false
 }
 
-func notamText(raw string) (body, schedule string, cancelled bool) {
+func notamText(raw string) (body, schedule, airport string, cancelled bool) {
 	fields := notamField.FindAllStringSubmatchIndex(raw, -1)
 	if len(fields) == 0 {
 		if header := notamICAOHeader.FindStringSubmatch(strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(raw)), ")")); header != nil && header[1] == "C" {
-			return "", "", true
+			return "", "", "", true
 		}
-		return raw, "", false
+		return raw, "", "", false
 	}
 	prefix := strings.ToUpper(strings.TrimSpace(raw[:fields[0][0]]))
 	if prefix != "" {
 		header := notamICAOHeader.FindStringSubmatch(prefix)
 		if header == nil {
-			return raw, "", false
+			return raw, "", "", false
 		}
 		if header[1] == "C" {
-			return "", "", true
+			return "", "", "", true
 		}
 	}
 	for i, match := range fields {
@@ -117,13 +122,15 @@ func notamText(raw string) (body, schedule string, cancelled bool) {
 			value = strings.TrimSpace(strings.TrimSuffix(value, ")"))
 		}
 		switch raw[match[2]] {
+		case 'A':
+			airport = strings.ToUpper(value)
 		case 'D':
 			schedule = advisoryPlainText(value)
 		case 'E':
 			body = value
 		}
 	}
-	return body, schedule, false
+	return body, schedule, airport, false
 }
 
 func expandNOTAMText(value string) string {

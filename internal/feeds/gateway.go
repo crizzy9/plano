@@ -50,6 +50,8 @@ func validFeedEndpoint(endpoint string) bool {
 	return parsed.Scheme == "http" && address != nil && address.IsLoopback()
 }
 
+func (g *AdvisoryGateway) AdvisorySourceID() string { return g.source }
+
 func (g *AdvisoryGateway) Advisories(ctx context.Context) ([]Advisory, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, g.endpoint, nil)
 	if err != nil {

@@ -50,6 +50,12 @@ func (r Refresher) refresh(ctx context.Context) error {
 			r.Logger.Warn("advisory source unavailable", "error", err)
 			continue
 		}
+		if named, ok := source.(interface{ AdvisorySourceID() string }); ok {
+			id := named.AdvisorySourceID()
+			if err := r.Store.cachePolledFlightNotices(ctx, id, result, time.Now()); err != nil && ctx.Err() == nil {
+				r.Logger.Warn("could not cache flight notices", "source", id, "error", err)
+			}
+		}
 		if advisories == nil {
 			advisories = make([]feeds.Advisory, 0)
 		}

@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 // Prediction preserves the official schedule and labels the inputs behind an estimate.
 type Prediction struct {
 	Departure            *time.Time             `json:"departure,omitempty"`
+	ValidUntil           *time.Time             `json:"validUntil,omitempty"`
 	DelayMinutes         int                    `json:"delayMinutes"`
 	Reasons              []string               `json:"reasons"`
 	Method               string                 `json:"method"`
@@ -36,21 +38,29 @@ func PredictWithModel(model *predict.Model, flight feeds.Flight, rotation []feed
 		return nil
 	}
 	scheduled := *flight.ScheduledDeparture
+	minutes := max(features.AirlineDelayMinutes, features.InboundDelayMinutes, features.AirportDelayMinutes, features.GroundStopMinutes)
+	forecast := Prediction{Method: "operational_estimate", DelayMinutes: int(minutes)}
 	if estimate, ok := model.Estimate(features, now, scheduled); ok {
-		delay := int(math.Round(estimate.DelayMinutes))
-		departure := scheduled.Add(time.Duration(estimate.DelayMinutes * float64(time.Minute)))
+		minutes = estimate.DelayMinutes
 		reasons = append(reasons, learnedReason(estimate.Contributions))
-		return &Prediction{
-			Departure: &departure, DelayMinutes: delay, Reasons: reasons, Method: "learned_estimate",
-			ModelVersion: model.ID(), BaselineMinutes: &estimate.Baseline, FeatureContributions: estimate.Contributions,
+		forecast = Prediction{Method: "learned_estimate", DelayMinutes: int(math.Round(minutes)), ModelVersion: model.ID(),
+			BaselineMinutes: &estimate.Baseline, FeatureContributions: estimate.Contributions}
+	}
+	departure := scheduled.Add(time.Duration(minutes * float64(time.Minute)))
+	if end, validUntil, reason := departureClosureFloor(flight, advisories, now, departure); !end.IsZero() {
+		if end.Sub(scheduled) > 24*time.Hour {
+			return nil
 		}
+		departure = end
+		forecast.ValidUntil = &validUntil
+		forecast.DelayMinutes = int(math.Ceil(end.Sub(scheduled).Minutes()))
+		reasons = append(reasons, reason)
 	}
 	if len(reasons) == 0 {
 		return nil
 	}
-	minutes := max(features.AirlineDelayMinutes, features.InboundDelayMinutes, features.AirportDelayMinutes, features.GroundStopMinutes)
-	departure := scheduled.Add(time.Duration(minutes * float64(time.Minute)))
-	return &Prediction{Departure: &departure, DelayMinutes: int(minutes), Reasons: reasons, Method: "operational_estimate"}
+	forecast.Departure, forecast.Reasons = &departure, reasons
+	return &forecast
 }
 
 // ExtractDelayFeatures gives historical snapshot exporters the same feature
@@ -82,8 +92,15 @@ func delayInputs(flight feeds.Flight, rotation []feeds.Flight, advisories []feed
 		}
 	}
 	for _, a := range advisories {
+		// NOTAM text is airport context. A verified full closure constrains
+		// the forecast separately, without changing trained model features.
+		switch a.Kind {
+		case "notam", "airport_closure", "airport_restriction", "runway_closure", "taxiway_closure", "apron_closure", "airport_operations",
+			"cancelled", "canceled", "cancellation", "notam_cancelled", "notam_canceled", "notam_cancellation":
+			continue
+		}
 		at := advisoryTime(flight, a)
-		if at == nil || a.Kind == "airport_restriction" || a.ObservedAt.After(now) {
+		if at == nil || a.ObservedAt.After(now) {
 			continue
 		}
 		if at.Before(now) {
@@ -109,6 +126,66 @@ func delayInputs(flight feeds.Flight, rotation []feeds.Flight, advisories []feed
 		features.AirTrafficControl = features.AirTrafficControl || containsAny(reason, "atc", "staffing", "airport volume", "capacity", "congestion", "traffic management")
 	}
 	return features, reasons, true
+}
+
+func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now, departure time.Time) (time.Time, time.Time, string) {
+	type closureWindow struct {
+		start, end, freshUntil time.Time
+		airport, source        string
+	}
+	var closures []closureWindow
+	for _, a := range advisories {
+		freshUntil := a.ObservedAt.Add(6 * time.Hour)
+		if a.Kind != "airport_closure" || a.Direction != "" && a.Direction != "departure" ||
+			a.Airport == "" || a.Airport != flight.Origin && a.Airport != flight.OriginICAO ||
+			a.ObservedAt.IsZero() || !freshUntil.After(now) || a.ObservedAt.After(now) ||
+			a.EndsAt == nil || !a.EndsAt.After(now) {
+			continue
+		}
+		start := a.ObservedAt
+		if a.StartsAt != nil {
+			start = *a.StartsAt
+		}
+		if !a.EndsAt.After(start) {
+			continue
+		}
+		summary, ok := feeds.DecodeNOTAM(a.RawReason)
+		if !ok || !summary.FullAirportClosure ||
+			summary.Airport != "" && summary.Airport != flight.Origin && summary.Airport != flight.OriginICAO {
+			continue
+		}
+		// The decoder checks closure scope. An estimated or indefinite validity
+		// marker, including in an ICAO C field, cannot set a departure floor.
+		words := strings.FieldsFunc(strings.ToUpper(a.RawReason), func(r rune) bool { return r < 'A' || r > 'Z' })
+		if slices.Contains(words, "EST") || slices.Contains(words, "PERM") || slices.Contains(words, "UFN") {
+			continue
+		}
+		closures = append(closures, closureWindow{start: start, end: *a.EndsAt, freshUntil: freshUntil, airport: a.Airport, source: a.Source})
+	}
+	slices.SortStableFunc(closures, func(a, b closureWindow) int { return a.start.Compare(b.start) })
+	if departure.Before(now) {
+		departure = now
+	}
+	var last closureWindow
+	validUntil := now.Add(30 * time.Minute)
+	for _, closure := range closures {
+		if closure.start.After(departure) {
+			break
+		}
+		if closure.end.After(departure) {
+			departure, last = closure.end, closure
+			if closure.end.Before(validUntil) {
+				validUntil = closure.end
+			}
+			if closure.freshUntil.Before(validUntil) {
+				validUntil = closure.freshUntil
+			}
+		}
+	}
+	if last.end.IsZero() {
+		return time.Time{}, time.Time{}, ""
+	}
+	return last.end, validUntil, fmt.Sprintf("%s reports a full airport closure at %s. The estimate allows for the published closure window.", advisorySourceName(last.source), last.airport)
 }
 
 func inboundLeg(flight feeds.Flight, rotation []feeds.Flight, now time.Time) *feeds.Flight {

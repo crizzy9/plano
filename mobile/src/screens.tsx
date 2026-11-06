@@ -3,7 +3,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { AppState, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { saveServer, type Flight, type PlanoAPI, type Position } from './api';
+import { saveServer, type Flight, type FlightNotice, type PlanoAPI, type Position } from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
 import { usePalette } from './theme';
 import { PickupLinks } from './pickup-links';
@@ -208,8 +208,16 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const [pickupRevision, setPickupRevision] = useState(0);
   const flight = value?.detail.flight ?? initial;
   const detail = value?.detail;
-  const prediction = detail?.prediction;
   const weather = detail?.weather?.filter((report) => Date.parse(report.validUntil) > Date.now()) ?? [];
+  const notices = value?.tracked && detail?.flight.id === id ? detail.notices : undefined;
+  const noticeRows = useMemo(() => notices?.slice(0, 8).map((notice) => ({ notice, expires: Date.parse(notice.validUntil) })) ?? [], [notices]);
+  const predictionExpiry = detail?.prediction?.validUntil;
+  const predictionExpiresAt = predictionExpiry === undefined ? Infinity : Date.parse(predictionExpiry);
+  const expiries = useMemo(() => [predictionExpiresAt, ...noticeRows.map(({ expires }) => expires)].filter(Number.isFinite),
+    [predictionExpiresAt, noticeRows]);
+  const now = useExpiryClock(expiries);
+  const prediction = predictionExpiresAt > now ? detail?.prediction : undefined;
+  const currentNotices = noticeRows.filter(({ expires }) => expires > now).map(({ notice }) => notice);
 
   async function toggleTrack() {
     if (!value || operation) return;
@@ -219,7 +227,9 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
       if (value.tracked) {
         await api.untrack(id);
         refresh();
-        setValue((old) => old && ({ ...old, tracked: false, detail: { ...old.detail, telemetry: undefined, weather: undefined } }));
+        setValue((old) => old && ({
+          ...old, tracked: false, detail: { ...old.detail, telemetry: undefined, weather: undefined, notices: undefined },
+        }));
         await stopLiveActivity(id);
       } else {
         await api.track(id, seat.trim().toUpperCase() || undefined);
@@ -312,6 +322,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
               })}
             </View>
           )}
+          {currentNotices.length > 0 && <AirportNotices flight={flight} notices={currentNotices} />}
           {!!detail?.inbound?.length && (
             <View style={layout.section}>
               <Heading>Where’s my plane?</Heading>
@@ -339,6 +350,55 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
         </>
       )}
     </Page>
+  );
+}
+
+const noticeSourceLabels: Record<string, string> = {
+  faa_nas: 'FAA NAS', faa_swim: 'FAA SWIM', eurocontrol_nm: 'EUROCONTROL Network Manager',
+};
+
+function useExpiryClock(expiries: number[]) {
+  const [checkedAt, setCheckedAt] = useState(Date.now);
+  useFocusEffect(useCallback(() => {
+    if (!expiries.length) return;
+    let timer: ReturnType<typeof setTimeout>;
+    function checkExpiry() {
+      const now = Date.now();
+      setCheckedAt(now);
+      const next = Math.min(...expiries.filter((expiry) => expiry > now));
+      if (Number.isFinite(next)) timer = setTimeout(checkExpiry, Math.min(next - now, 6 * 60 * 60_000));
+    }
+    checkExpiry();
+    return () => clearTimeout(timer);
+  }, [expiries]));
+  return Math.max(checkedAt, Date.now());
+}
+
+function AirportNotices({ flight, notices }: { flight: Flight; notices: FlightNotice[] }) {
+  const { colors } = usePalette();
+  return (
+    <View style={layout.section}>
+      <Heading>Airport notices</Heading>
+      <Body>These notices describe airport operations. Check your airline for flight-specific updates.</Body>
+      {notices.map((notice) => {
+        const departure = notice.operation === 'departure';
+        const zone = departure ? flight.originTimeZone : flight.destinationTimeZone;
+        const time = (value: string) => {
+          const timeZone = zone || 'UTC';
+          return `${formatDay(value, timeZone)} at ${formatTime(value, timeZone)}${zone ? '' : ' UTC'}`;
+        };
+        const window = [notice.startsAt && `Published start ${time(notice.startsAt)}`,
+          notice.endsAt && `Published end ${time(notice.endsAt)}`].filter(Boolean).join(' · ');
+        return (
+          <View key={`${notice.source}:${notice.id}:${notice.operation}`} style={[styles.event, { borderColor: colors.divider }]}>
+            <Text style={[styles.strong, { color: colors.text }]}>{notice.airport} · {departure ? 'Departure' : 'Arrival'} airport</Text>
+            <Body>{notice.summary}</Body>
+            <Body>{noticeSourceLabels[notice.source] ?? 'Airport notice feed'} · Observed {time(notice.observedAt)}</Body>
+            {!!window && <Body>{window}</Body>}
+          </View>
+        );
+      })}
+    </View>
   );
 }
 

@@ -88,6 +88,12 @@ CREATE TABLE IF NOT EXISTS pushed_advisories (
   expires_ns INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(source,id)
 );
 CREATE INDEX IF NOT EXISTS pushed_advisories_expiry ON pushed_advisories(expires_ns);
+CREATE INDEX IF NOT EXISTS pushed_advisories_airport ON pushed_advisories(json_extract(data,'$.airport'),expires_ns,observed_ns);
+CREATE TABLE IF NOT EXISTS polled_flight_notices (
+  source TEXT NOT NULL, id TEXT NOT NULL, airport TEXT NOT NULL, observed_ns INTEGER NOT NULL,
+  expires_ns INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(source,id)
+);
+CREATE INDEX IF NOT EXISTS polled_flight_notices_airport ON polled_flight_notices(airport,expires_ns);
 CREATE TABLE IF NOT EXISTS aero_instance_keys (
   provider_id TEXT NOT NULL, flight_id TEXT NOT NULL REFERENCES flights(id) ON DELETE CASCADE,
   PRIMARY KEY(provider_id,flight_id), UNIQUE(flight_id)
@@ -339,6 +345,9 @@ EXISTS(SELECT 1 FROM tracked WHERE owner=? AND flight_id=flights.id) FROM flight
 			return d, err
 		}
 	}
+	if d.Prediction != nil && d.Prediction.ValidUntil != nil && !d.Prediction.ValidUntil.After(time.Now()) {
+		d.Prediction = nil
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT data FROM events WHERE flight_id=? ORDER BY at_ns DESC,id LIMIT 200`, id)
 	if err != nil {
 		return d, err
@@ -462,6 +471,9 @@ COALESCE((SELECT provider_id FROM aero_instance_keys WHERE flight_id=flights.id)
 	if (!trackedRefresh || advisories == nil && predictionValue == nil) && len(oldPrediction) > 0 && flight.ActualDeparture == nil && flight.ActualTakeoff == nil && flight.Status != "taxi_out" && flight.Status != "airborne" && flight.Status != "landed" && !finished(flight) {
 		if err := json.Unmarshal(oldPrediction, &predictionValue); err != nil {
 			return err
+		}
+		if predictionValue != nil && predictionValue.ValidUntil != nil && !predictionValue.ValidUntil.After(decisionAt) {
+			predictionValue = nil
 		}
 	}
 

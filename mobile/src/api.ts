@@ -65,6 +65,7 @@ export interface Prediction {
   reasons?: string[];
   departure?: string;
   method?: string;
+  validUntil?: string;
 }
 
 export interface AirportWeather {
@@ -75,6 +76,19 @@ export interface AirportWeather {
   validUntil: string;
 }
 
+export interface FlightNotice {
+  id: string;
+  airport: string;
+  operation: 'departure' | 'arrival';
+  kind: string;
+  source: string;
+  summary: string;
+  observedAt: string;
+  startsAt?: string;
+  endsAt?: string;
+  validUntil: string;
+}
+
 export interface FlightDetail {
   flight: Flight;
   events?: FlightEvent[];
@@ -82,6 +96,7 @@ export interface FlightDetail {
   inbound?: Flight[];
   prediction?: Prediction | null;
   weather?: AirportWeather[];
+  notices?: FlightNotice[];
 }
 
 export interface Friend {

@@ -40,7 +40,7 @@ A) EGLL B) 2611051900 C) 2611052300
 D) DLY 1900-2000
 E) RWY 09L/27R CLSD (EXC TAX))`
 	got, ok := DecodeNOTAM(raw)
-	if !ok || got.Scope != "runway" || got.FullAirportClosure || got.Text != "Runway 09L/27R closed (except taxiing). Published schedule daily 1900-2000." {
+	if !ok || got.Scope != "runway" || got.Airport != "EGLL" || got.FullAirportClosure || got.Text != "Runway 09L/27R closed (except taxiing). Published schedule daily 1900-2000." {
 		t.Fatalf("ICAO notice = %+v, %t", got, ok)
 	}
 	for _, raw := range []string{

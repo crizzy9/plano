@@ -183,6 +183,25 @@ func TestFAANASNormalizesDirectionalAirportAndAreaAdvisories(t *testing.T) {
 	}
 }
 
+func TestFAANASRetainsFullAirportClosureScopeAndPublishedEnd(t *testing.T) {
+	fixture := strings.Replace(faaFixture,
+		"AD AP CLSD TO NON SKED TRANSIENT GA ACFT EXC PPR 2612290000-2701030000",
+		"AD AP CLSD 2612312200 - 2701010300EST", 1)
+	rows, err := parseFAANAS([]byte(fixture))
+	if err != nil || len(rows) != 7 {
+		t.Fatalf("FAA advisories = %+v, %v", rows, err)
+	}
+	closure := rows[4]
+	if closure.Kind != "airport_closure" || !strings.HasPrefix(closure.Reason, "Airport closed") ||
+		closure.StartsAt == nil || !closure.StartsAt.Equal(instant(t, "2026-12-31T22:00:00Z")) ||
+		closure.EndsAt == nil || !closure.EndsAt.Equal(instant(t, "2027-01-01T03:00:00Z")) {
+		t.Fatalf("closure notice = %+v", closure)
+	}
+	if decoded, ok := DecodeNOTAM(closure.RawReason); !ok || decoded.Airport != "LAS" {
+		t.Fatalf("affected airport missing from domestic notice: %+v", decoded)
+	}
+}
+
 func TestAdvisoryGatewayBindsSourceAndRejectsUnusableRecords(t *testing.T) {
 	body := `{"version":1,"advisories":[{"id":"nm-1","kind":"ground_delay","airport":"egll","observedAt":"2026-11-05T00:00:00Z","source":"untrusted-label","delayMinutes":25}]}`
 	client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {

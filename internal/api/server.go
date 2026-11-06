@@ -212,13 +212,23 @@ func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) er
 		return err
 	}
 	var weather []core.AirportWeather
+	var notices []core.FlightNotice
 	if d.Tracked {
-		weather = s.Weather.ForFlight(d.Flight, time.Now())
+		now := time.Now()
+		weather = s.Weather.ForFlight(d.Flight, now)
+		notices, err = s.Store.FlightNotices(r.Context(), d.Flight, now)
+		if err != nil {
+			notices = nil
+			if r.Context().Err() == nil && s.Logger != nil {
+				s.Logger.Warn("flight notice context unavailable")
+			}
+		}
 	}
 	respond(w, 200, struct {
 		core.Details
 		Weather []core.AirportWeather `json:"weather,omitempty"`
-	}{d, weather})
+		Notices []core.FlightNotice   `json:"notices,omitempty"`
+	}{d, weather, notices})
 	return nil
 }
 
