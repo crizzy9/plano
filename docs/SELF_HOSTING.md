@@ -153,7 +153,7 @@ published port if both projects run on the same host.
 | FAA SWIM radar | Set `PLANO_SWIM_POSITION_KEY_FILE` to a dedicated mounted key file if your authorized bridge supplies permitted airborne positions. [Radar relay setup](AVIATION_CALLBACKS.md#faa-swim-radar-positions) |
 | EUROCONTROL radar | Set `PLANO_EUROCONTROL_POSITION_KEY_FILE` to a separate mounted key file if your authorized bridge supplies observed airborne positions permitted for enrolled trackers. [Radar relay setup](AVIATION_CALLBACKS.md#eurocontrol-radar-positions) |
 | FAA NAS Status | Public aviation advisories are enabled in live mode by default. Set `PLANO_FAA_NAS=false` to disable this feed. |
-| NOAA Aviation Weather Center | Set `PLANO_METAR=true` in live mode to show recent adverse airport observations in the delay outlook. No account key is needed. |
+| NOAA Aviation Weather Center | Set `PLANO_METAR=true` for recent airport observations or `PLANO_TAF=true` for terminal forecasts in the delay outlook. Either can run independently in live mode without an account key. |
 | FAA SWIM | Set `PLANO_SWIM_URL` to your advisory bridge. If it requires authentication, set either `PLANO_SWIM_TOKEN_FILE` or `PLANO_SWIM_TOKEN`. |
 | EUROCONTROL Network Manager | Set `PLANO_EUROCONTROL_URL` to your advisory bridge. If it requires authentication, set either `PLANO_EUROCONTROL_TOKEN_FILE` or `PLANO_EUROCONTROL_TOKEN`. |
 | readsb ADS-B | Set `PLANO_ADSB_URL` to an operator receiver's `aircraft.json` endpoint. Coverage depends on the receiver. |
@@ -166,11 +166,15 @@ published port if both projects run on the same host.
 `PLANO_FCM_BANDWIDTH_CONSTRAINED=true` only after validating delivery with the
 Android build on a supported constrained network.
 
-The optional weather worker requests at most 24 ICAO station codes every five
-minutes, rotating across airports with imminent tracked arrivals or departures.
-Requests contain station codes. The delay view for a tracked flight shows report time and observed
-conditions separately from operational reasons and model estimates. Reports
-expire 90 minutes after observation. [Aviation Weather Center data API](https://aviationweather.gov/data/api/)
+Each optional weather worker requests up to 24 ICAO station codes at a time,
+rotating across airports with pending tracked arrivals or departures. METAR
+refreshes every five minutes and expires 90 minutes after observation. TAF
+refreshes every 15 minutes for operations within the next 24 hours. The delay
+outlook shows adverse forecast periods that cover the expected departure or
+arrival, with the forecast window and any published probability. Weather is
+shown as airport context alongside the operational reasons and delay estimate.
+[Aviation Weather Center data API](https://aviationweather.gov/data/api/) ·
+[Terminal forecast change groups](https://aviationweather.gov/help/data/)
 
 The FAA SWIM and EUROCONTROL options consume an operator-managed bridge with
 authorized upstream access. Each bridge serves an HTTPS endpoint whose `GET`

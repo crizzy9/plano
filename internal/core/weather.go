@@ -64,22 +64,12 @@ func (w *WeatherCache) refresh(ctx context.Context, store *Store, now time.Time)
 	}
 	w.mu.Unlock()
 
-	stations, err := store.weatherStations(ctx, now, w.after)
+	stations, err := store.weatherStationBatch(ctx, now, weatherLead, feeds.MaxMETARStations, &w.after)
 	if err != nil {
 		return err
 	}
-	if len(stations) == 0 && w.after != "" {
-		stations, err = store.weatherStations(ctx, now, "")
-		if err != nil {
-			return err
-		}
-	}
-	w.after = ""
 	if len(stations) == 0 {
 		return nil
-	}
-	if len(stations) == feeds.MaxMETARStations {
-		w.after = stations[len(stations)-1]
 	}
 	observations, err := w.provider.Observations(ctx, stations, now)
 	if err != nil {
@@ -103,7 +93,22 @@ func (w *WeatherCache) refresh(ctx context.Context, store *Store, now time.Time)
 	return nil
 }
 
-func (s *Store) weatherStations(ctx context.Context, now time.Time, after string) ([]string, error) {
+func (s *Store) weatherStationBatch(ctx context.Context, now time.Time, lead time.Duration, limit int, after *string) ([]string, error) {
+	stations, err := s.weatherStations(ctx, now, lead, limit, *after)
+	if err == nil && len(stations) == 0 && *after != "" {
+		stations, err = s.weatherStations(ctx, now, lead, limit, "")
+	}
+	if err != nil {
+		return nil, err
+	}
+	*after = ""
+	if len(stations) == limit {
+		*after = stations[len(stations)-1]
+	}
+	return stations, nil
+}
+
+func (s *Store) weatherStations(ctx context.Context, now time.Time, lead time.Duration, limit int, after string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `WITH tracked_snapshot AS NOT MATERIALIZED (
   SELECT snapshot FROM (SELECT DISTINCT flight_id FROM tracked) tracked_flights JOIN flights ON flights.id=tracked_flights.flight_id
   WHERE json_extract(snapshot,'$.status') NOT IN ('cancelled','arrived','diverted')
@@ -119,12 +124,12 @@ func (s *Store) weatherStations(ctx context.Context, now time.Time, after string
 )
 SELECT DISTINCT airport FROM operations WHERE airport GLOB '[A-Z][A-Z][A-Z][A-Z]' AND airport>?
 AND julianday(operation_at) BETWEEN julianday(?) AND julianday(?) ORDER BY airport LIMIT ?`,
-		after, now.Add(-weatherLookback).Format(time.RFC3339), now.Add(weatherLead).Format(time.RFC3339), feeds.MaxMETARStations)
+		after, now.Add(-weatherLookback).Format(time.RFC3339), now.Add(lead).Format(time.RFC3339), limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	stations := make([]string, 0, feeds.MaxMETARStations)
+	stations := make([]string, 0, limit)
 	for rows.Next() {
 		var station string
 		if err := rows.Scan(&station); err != nil {
@@ -152,11 +157,15 @@ func (w *WeatherCache) ForFlight(flight feeds.Flight, now time.Time) []AirportWe
 		}
 		weather = append(weather, AirportWeather{Airport: airport, Operation: operation, Conditions: observation.Reason, ObservedAt: observation.ObservedAt, ValidUntil: *observation.EndsAt})
 	}
-	if flight.ActualDeparture == nil && flight.ActualTakeoff == nil && flight.Status != "taxi_out" && flight.Status != "airborne" && flight.Status != "landed" {
+	forWeatherOperations(flight, add)
+	return weather
+}
+
+func forWeatherOperations(flight feeds.Flight, add func(airport, operation string, at *time.Time)) {
+	if flightBeforeDeparture(flight) {
 		add(flight.OriginICAO, "departure", effectiveDeparture(flight))
 	}
 	if flight.ActualArrival == nil {
 		add(flight.DestinationICAO, "arrival", effectiveArrival(flight))
 	}
-	return weather
 }

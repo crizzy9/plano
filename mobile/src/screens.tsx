@@ -4,7 +4,8 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { AppState, Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
-  saveServer, type ATFMSlot, type Flight, type FlightNotice, type HistoricalDepartureRisk, type PassportFlight, type PlanoAPI, type Position, type RadarCursor,
+  saveServer, type AirportWeatherForecast, type ATFMSlot, type Flight, type FlightNotice, type HistoricalDepartureRisk,
+  type PassportFlight, type PlanoAPI, type Position, type RadarCursor,
 } from './api';
 import { dateKey, errorText, formatDay, formatTime, isFinished, nextFlight, validDate } from './flight';
 import { usePalette } from './theme';
@@ -229,6 +230,11 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
     flight.scheduledDeparture, flight.tailNumber, flight.actualTakeoff, detail?.receiverRevision, radarTracked].join('|');
   const rotationSnapshot = detail?.rotationSnapshot === true;
   const weather = detail?.weather?.filter((report) => Date.parse(report.validUntil) > Date.now()) ?? [];
+  const forecasts = value?.tracked && !savedAt && !error && !rotationOf && !rotationSnapshot && detail?.flight.id === id
+    ? detail.weatherForecasts : undefined;
+  const forecastRows = useMemo(() => forecasts?.map((forecast) => ({
+    forecast, issued: Date.parse(forecast.issuedAt), starts: Date.parse(forecast.startsAt), expires: Date.parse(forecast.endsAt),
+  })) ?? [], [forecasts]);
   const notices = value?.tracked && detail?.flight.id === id ? detail.notices : undefined;
   const noticeRows = useMemo(() => notices?.slice(0, 8).map((notice) => ({ notice, expires: Date.parse(notice.validUntil) })) ?? [], [notices]);
   const slots = value?.tracked && !savedAt && !error && !rotationSnapshot && detail?.flight.id === id && flight &&
@@ -246,13 +252,15 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
     !flight.actualDeparture && !flight.actualTakeoff && !flight.actualLanding && !flight.actualArrival
     ? Date.parse(flight.scheduledDeparture ?? '') : NaN;
   const expiries = useMemo(() => [predictionExpiresAt, historicalRiskExpiresAt,
-    ...noticeRows.map(({ expires }) => expires), ...slotRows.map(({ expires }) => expires)]
-    .filter(Number.isFinite), [predictionExpiresAt, historicalRiskExpiresAt, noticeRows, slotRows]);
+    ...noticeRows.map(({ expires }) => expires), ...slotRows.map(({ expires }) => expires),
+    ...forecastRows.flatMap(({ issued, expires }) => [issued, expires])]
+    .filter(Number.isFinite), [predictionExpiresAt, historicalRiskExpiresAt, noticeRows, slotRows, forecastRows]);
   const now = useExpiryClock(expiries);
   const prediction = predictionExpiresAt > now ? detail?.prediction : undefined;
   const currentHistoricalRisk = historicalRiskExpiresAt > now ? historicalRisk : undefined;
   const currentNotices = noticeRows.filter(({ expires }) => expires > now).map(({ notice }) => notice);
   const currentSlots = slotRows.filter(({ takeoff, expires }) => Number.isFinite(takeoff) && expires > now);
+  const currentForecasts = forecastRows.filter(({ issued, starts, expires }) => issued <= now && starts < expires && expires > now);
 
   async function toggleTrack() {
     if (!value || savedAt || rotationSnapshot || operation) return;
@@ -264,7 +272,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
         refresh();
         setValue((old) => old && ({
           ...old, tracked: false,
-          detail: { ...old.detail, telemetry: undefined, weather: undefined, notices: undefined, atfmSlots: undefined },
+          detail: { ...old.detail, telemetry: undefined, weather: undefined, weatherForecasts: undefined, notices: undefined, atfmSlots: undefined },
         }));
         await stopLiveActivity(id);
       } else {
@@ -352,7 +360,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
               <Body>Check your airline for gate and boarding times.</Body>
             </View>
           )}
-          {(prediction || currentHistoricalRisk || weather.length > 0) && (
+          {(prediction || currentHistoricalRisk || weather.length > 0 || currentForecasts.length > 0) && (
             <View style={layout.section}>
               <Heading>Delay outlook</Heading>
               {prediction && (
@@ -370,7 +378,9 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
                   <Body>Based on {riskSampleCount.format(currentHistoricalRisk.sampleSize)} past departures from {flight.origin} in this scheduled time window. Records through {riskTrainingDay.format(new Date(currentHistoricalRisk.trainingThrough))}.</Body>
                 </View>
               )}
-              {weather.length > 0 && <Heading>Observed airport weather</Heading>}
+              {weather.length > 0 && (
+                <Text accessibilityRole="header" style={[styles.weatherHeading, { color: colors.text }]}>Observed airport weather</Text>
+              )}
               {weather.map((report) => {
                 const timeZone = report.operation === 'departure' ? flight.originTimeZone : flight.destinationTimeZone;
                 return (
@@ -378,6 +388,24 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
                     <Body>{report.airport} · {report.operation === 'departure' ? 'Departure' : 'Arrival'}</Body>
                     <Body>{report.conditions}</Body>
                     <Body>NOAA report at {formatTime(report.observedAt, timeZone)}</Body>
+                  </View>
+                );
+              })}
+              {currentForecasts.length > 0 && (
+                <Text accessibilityRole="header" style={[styles.weatherHeading, { color: colors.text }]}>Airport weather forecast</Text>
+              )}
+              {currentForecasts.map(({ forecast, issued, starts, expires }) => {
+                const departure = forecast.operation === 'departure';
+                const zone = departure ? flight.originTimeZone : flight.destinationTimeZone;
+                return (
+                  <View key={`${forecast.airport}:${forecast.operation}:${forecast.startsAt}:${forecast.endsAt}:${forecast.qualifier}:${forecast.probability ?? ''}:${forecast.conditions}`}
+                    style={[styles.event, { borderColor: colors.divider }]}>
+                    <Text style={[styles.strong, { color: colors.text }]}>
+                      {forecast.airport} · {departure ? 'Departure' : 'Arrival'} airport
+                    </Text>
+                    <Body>{forecastConditionLabel(forecast)} · {forecast.conditions}</Body>
+                    <Body>{airportDateTime(starts, zone)} to {airportDateTime(expires, zone)}</Body>
+                    <Body>NOAA forecast issued {airportDateTime(issued, zone)}</Body>
                   </View>
                 );
               })}
@@ -450,6 +478,17 @@ function airportDateTime(time: number, zone?: string) {
     try { return new Intl.DateTimeFormat(undefined, { ...options, timeZone: zone }).format(time); } catch { /* use UTC */ }
   }
   return new Intl.DateTimeFormat(undefined, { ...options, timeZone: 'UTC', timeZoneName: 'short' }).format(time);
+}
+
+function forecastConditionLabel({ qualifier, probability }: AirportWeatherForecast) {
+  const chance = probability !== undefined && probability > 0 && probability <= 100
+    ? `${riskPercent.format(probability / 100)} chance` : undefined;
+  switch (qualifier) {
+    case 'temporary': return chance ? `${chance} of temporary conditions` : 'Temporary conditions';
+    case 'probability': return chance ?? 'Possible conditions';
+    case 'becoming': return 'Possible during a weather transition';
+    case 'prevailing': return 'Expected conditions';
+  }
 }
 
 function inboundArrival(leg: Flight, now: number, stale: boolean) {
@@ -928,5 +967,6 @@ const styles = StyleSheet.create({
   radarValue: { fontSize: 18, fontWeight: '600', fontVariant: ['tabular-nums'] },
   rotationSummary: { gap: 4 },
   strong: { fontSize: 16, fontWeight: '600' },
+  weatherHeading: { fontSize: 18, fontWeight: '700' },
   historicalRisk: { gap: 4 },
 });

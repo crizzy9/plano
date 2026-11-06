@@ -31,56 +31,33 @@ type METAR struct {
 }
 
 func NewMETAR(client *http.Client) *METAR {
-	bounded := feedClient(client)
-	bounded.Timeout = min(bounded.Timeout, 8*time.Second)
-	bounded.Jar = nil
-	return &METAR{client: bounded}
+	return &METAR{client: awcWeatherClient(client)}
 }
 
 type metarReport struct {
-	Station     string          `json:"icaoId"`
-	Observed    int64           `json:"obsTime"`
-	Received    string          `json:"receiptTime"`
-	Wind        int             `json:"wspd"`
-	Gust        int             `json:"wgst"`
-	Visibility  json.RawMessage `json:"visib"`
-	Weather     string          `json:"wxString"`
-	CloudLayers []struct {
-		Cover string `json:"cover"`
-		Base  *int   `json:"base"`
-	} `json:"clouds"`
+	Station  string `json:"icaoId"`
+	Observed int64  `json:"obsTime"`
+	Received string `json:"receiptTime"`
+	awcWeatherValues
 }
 
 // Observations returns current adverse conditions from the latest observation
 // for each requested station. A missing station or a clear report has no entry.
 func (m *METAR) Observations(ctx context.Context, stations []string, now time.Time) ([]Advisory, error) {
-	if len(stations) == 0 {
-		return nil, nil
+	ids, err := awcWeatherStations(stations)
+	if err != nil || len(ids) == 0 {
+		return nil, err
 	}
-	requested := make(map[string]bool)
-	ids := make([]string, 0, min(len(stations), MaxMETARStations))
-	for _, station := range stations {
-		id := strings.ToUpper(strings.TrimSpace(station))
-		if !metarStationID.MatchString(id) {
-			return nil, ErrInvalidQuery
-		}
-		if !requested[id] {
-			if len(ids) == MaxMETARStations {
-				return nil, ErrInvalidQuery
-			}
-			requested[id] = true
-			ids = append(ids, id)
-		}
-	}
-	slices.Sort(ids)
-	reports, err := m.reports(ctx, ids)
+	query := url.Values{"ids": {strings.Join(ids, ",")}, "format": {"json"}}
+	reports, err := readAWCWeatherReports[metarReport](ctx, m.client, metarEndpoint, "METAR", query, maxMETARBytes)
 	if err != nil {
 		return nil, err
 	}
 	latest := make(map[string]metarReport, len(ids))
 	for _, report := range reports {
+		_, requested := slices.BinarySearch(ids, report.Station)
 		at := time.Unix(report.Observed, 0).UTC()
-		if !requested[report.Station] || report.Observed <= 0 || at.After(now) || !at.Add(metarValidity).After(now) {
+		if !requested || report.Observed <= 0 || at.After(now) || !at.Add(metarValidity).After(now) {
 			continue
 		}
 		previous := latest[report.Station]
@@ -108,48 +85,91 @@ func (m *METAR) Observations(ctx context.Context, stations []string, now time.Ti
 	return result, nil
 }
 
-func (m *METAR) reports(ctx context.Context, stations []string) ([]metarReport, error) {
-	query := url.Values{"ids": {strings.Join(stations, ",")}, "format": {"json"}}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, metarEndpoint+"?"+query.Encode(), nil)
+func awcWeatherClient(client *http.Client) *http.Client {
+	bounded := feedClient(client)
+	bounded.Timeout = min(bounded.Timeout, 8*time.Second)
+	bounded.Jar = nil
+	return bounded
+}
+
+func awcWeatherStations(stations []string) ([]string, error) {
+	requested := make(map[string]bool)
+	ids := make([]string, 0, min(len(stations), MaxMETARStations))
+	for _, station := range stations {
+		id := strings.ToUpper(strings.TrimSpace(station))
+		if !metarStationID.MatchString(id) {
+			return nil, ErrInvalidQuery
+		}
+		if !requested[id] {
+			if len(ids) == MaxMETARStations {
+				return nil, ErrInvalidQuery
+			}
+			requested[id] = true
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return ids, nil
+}
+
+func readAWCWeatherReports[T any](ctx context.Context, client *http.Client, endpoint, product string, query url.Values, limit int64) ([]T, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "Plano/1.0 (self-hosted flight tracker)")
-	response, err := m.client.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("%w: METAR request failed", ErrUnavailable)
+		return nil, fmt.Errorf("%w: %s request failed", ErrUnavailable, product)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNoContent {
 		return nil, nil
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: METAR returned HTTP %d", ErrUnavailable, response.StatusCode)
+		return nil, fmt.Errorf("%w: %s returned HTTP %d", ErrUnavailable, product, response.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxMETARBytes+1))
-	if err != nil || len(body) > maxMETARBytes {
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil || int64(len(body)) > limit {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("%w: invalid METAR response length", ErrUnavailable)
+		return nil, fmt.Errorf("%w: invalid %s response length", ErrUnavailable, product)
 	}
-	var reports []metarReport
+	var reports []T
 	if err := json.Unmarshal(body, &reports); err != nil || reports == nil || len(reports) > 8*MaxMETARStations {
-		return nil, fmt.Errorf("%w: invalid METAR response", ErrUnavailable)
+		return nil, fmt.Errorf("%w: invalid %s response", ErrUnavailable, product)
 	}
 	return reports, nil
 }
 
 func (r metarReport) receivedAt() time.Time {
-	value, _ := time.Parse(time.RFC3339Nano, strings.Replace(r.Received, " ", "T", 1))
+	return awcWeatherTime(r.Received)
+}
+
+func awcWeatherTime(raw string) time.Time {
+	value, _ := time.Parse(time.RFC3339Nano, strings.Replace(raw, " ", "T", 1))
 	return value
 }
 
-func (r metarReport) adverseConditions() string {
+type awcWeatherValues struct {
+	Wind        int               `json:"wspd"`
+	Gust        int               `json:"wgst"`
+	Visibility  json.RawMessage   `json:"visib"`
+	Weather     string            `json:"wxString"`
+	CloudLayers []awcWeatherCloud `json:"clouds"`
+}
+
+type awcWeatherCloud struct {
+	Cover string `json:"cover"`
+	Base  *int   `json:"base"`
+}
+
+func (r awcWeatherValues) adverseConditions() string {
 	var conditions []string
 	for group := range strings.FieldsSeq(r.Weather) {
 		condition := metarWeatherCondition(strings.TrimLeft(group, "+-"))

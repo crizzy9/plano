@@ -260,6 +260,7 @@ func run(logger *slog.Logger, checkOnly bool) error {
 	var reservationSource feeds.ReservationSource
 	var tripItSync *api.TripItSync
 	var weather *core.WeatherCache
+	var weatherForecast *core.WeatherForecastCache
 	if demo {
 		flights = demodata.Source{}
 	} else {
@@ -278,6 +279,13 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		}
 		if enableMETAR {
 			weather = core.NewWeatherCache(feeds.NewMETAR(nil))
+		}
+		enableTAF, err := flag("PLANO_TAF", false)
+		if err != nil {
+			return err
+		}
+		if enableTAF {
+			weatherForecast = core.NewWeatherForecastCache(feeds.NewTAF(nil))
 		}
 		enableSubscriptions, err := flag("PLANO_AERO_SUBSCRIPTIONS", false)
 		if err != nil {
@@ -439,8 +447,8 @@ func run(logger *slog.Logger, checkOnly bool) error {
 	defer store.Close()
 	service := api.Server{
 		Store: store, Source: flights, PublicURL: publicURL, EnrollmentCode: string(enrollment),
-		BookingKey: bookingKey, ReservationSource: reservationSource, TripItSync: tripItSync, ConnectionRules: connections, Weather: weather,
-		HistoricalRisk:  historicalRisk,
+		BookingKey: bookingKey, ReservationSource: reservationSource, TripItSync: tripItSync, ConnectionRules: connections,
+		Weather: weather, WeatherForecast: weatherForecast, HistoricalRisk: historicalRisk,
 		AeroCallbackKey: aeroCallbackKey, AdvisoryIngressKey: advisoryIngressKey, Demo: demo, Logger: logger,
 		FlightObservationKey: flightObservationKey, SWIMPositionKey: swimPositionKey, EurocontrolPositionKey: eurocontrolPositionKey,
 	}
@@ -475,6 +483,9 @@ func run(logger *slog.Logger, checkOnly bool) error {
 	}
 	if weather != nil {
 		workers.Go(func() { weather.Run(ctx, store, logger) })
+	}
+	if weatherForecast != nil {
+		workers.Go(func() { weatherForecast.Run(ctx, store, logger) })
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()

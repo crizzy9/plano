@@ -28,6 +28,7 @@ type Server struct {
 	ReservationSource      feeds.ReservationSource
 	TripItSync             *TripItSync
 	Weather                *core.WeatherCache
+	WeatherForecast        *core.WeatherForecastCache
 	ConnectionRules        *ConnectionRules
 	HistoricalRisk         *historicalrisk.Model
 	Demo                   bool
@@ -253,11 +254,13 @@ func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) er
 		return err
 	}
 	var weather []core.AirportWeather
+	var weatherForecasts []core.AirportWeatherForecast
 	var notices []core.FlightNotice
 	var atfmSlots []core.ATFMSlotView
 	now := time.Now()
 	if d.Tracked {
 		weather = s.Weather.ForFlight(d.Flight, now)
+		weatherForecasts = s.WeatherForecast.ForFlight(d.Flight, now)
 		notices, err = s.Store.FlightNotices(r.Context(), d.Flight, now)
 		if err != nil {
 			notices = nil
@@ -279,12 +282,13 @@ func (s Server) details(w http.ResponseWriter, r *http.Request, owner string) er
 	}
 	respond(w, 200, struct {
 		core.Details
-		Weather                 []core.AirportWeather    `json:"weather,omitempty"`
-		Notices                 []core.FlightNotice      `json:"notices,omitempty"`
-		ATFMSlots               []core.ATFMSlotView      `json:"atfmSlots,omitempty"`
-		RotationSnapshot        bool                     `json:"rotationSnapshot,omitempty"`
-		HistoricalDepartureRisk *historicalrisk.Estimate `json:"historicalDepartureRisk,omitempty"`
-	}{d, weather, notices, atfmSlots, rotationSnapshot, historicalRisk})
+		Weather                 []core.AirportWeather         `json:"weather,omitempty"`
+		WeatherForecasts        []core.AirportWeatherForecast `json:"weatherForecasts,omitempty"`
+		Notices                 []core.FlightNotice           `json:"notices,omitempty"`
+		ATFMSlots               []core.ATFMSlotView           `json:"atfmSlots,omitempty"`
+		RotationSnapshot        bool                          `json:"rotationSnapshot,omitempty"`
+		HistoricalDepartureRisk *historicalrisk.Estimate      `json:"historicalDepartureRisk,omitempty"`
+	}{d, weather, weatherForecasts, notices, atfmSlots, rotationSnapshot, historicalRisk})
 	return nil
 }
 

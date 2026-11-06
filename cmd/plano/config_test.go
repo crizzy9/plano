@@ -21,7 +21,7 @@ func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 	const invalidFlag = "fixture-invalid-flag"
 	for _, tc := range []struct {
 		name, demo, allowOpen, enrollment, aeroKey, addr, origin, wantError string
-		subscriptions, includeInbound, requireEnrollment                    string
+		subscriptions, includeInbound, requireEnrollment, taf               string
 		withAeroCallback                                                    bool
 	}{
 		{name: "demo without providers", demo: "true"},
@@ -33,6 +33,9 @@ func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 		{name: "live requires enrollment before provider configuration", wantError: "PLANO_ENROLLMENT_CODE"},
 		{name: "live with explicit closed enrollment", allowOpen: "false", aeroKey: aeroKey, wantError: "PLANO_ENROLLMENT_CODE"},
 		{name: "protected live", enrollment: enrollment, aeroKey: aeroKey},
+		{name: "live with terminal forecasts", enrollment: enrollment, aeroKey: aeroKey, taf: "true"},
+		{name: "invalid terminal forecast flag", enrollment: enrollment, aeroKey: aeroKey, taf: invalidFlag, wantError: "PLANO_TAF"},
+		{name: "demo skips terminal forecast settings", demo: "true", taf: invalidFlag},
 		{name: "explicit private enrollment", allowOpen: "true", aeroKey: aeroKey},
 		{name: "invalid open enrollment flag", allowOpen: invalidFlag, enrollment: enrollment, aeroKey: aeroKey,
 			wantError: "PLANO_ALLOW_OPEN_ENROLLMENT"},
@@ -56,6 +59,7 @@ func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
 			t.Setenv("PLANO_REQUIRE_ENROLLMENT", tc.requireEnrollment)
 			t.Setenv("PLANO_ENROLLMENT_CODE", tc.enrollment)
 			t.Setenv("PLANO_AEROAPI_KEY", tc.aeroKey)
+			t.Setenv("PLANO_TAF", tc.taf)
 			t.Setenv("PLANO_PUBLIC_URL", tc.origin)
 			t.Setenv("PLANO_AERO_SUBSCRIPTIONS", tc.subscriptions)
 			t.Setenv("PLANO_AERO_SUBSCRIPTIONS_INBOUND", tc.includeInbound)
@@ -238,7 +242,7 @@ func isolateStartupEnvironment(t *testing.T) {
 	for _, name := range []string{
 		"PLANO_PUBLIC_URL", "PLANO_REQUIRE_ENROLLMENT", "PLANO_ENROLLMENT_CODE_FILE", "PLANO_BOOKING_KEY_FILE", "PLANO_AIRPORT_TRANSFERS_FILE",
 		"PLANO_AEROALERTS_KEY_FILE", "PLANO_ADVISORY_INGRESS_KEY_FILE", flightObservationKeyFile, swimPositionKeyFile, eurocontrolPositionKeyFile, "PLANO_AEROAPI_KEY_FILE",
-		"PLANO_METAR", "PLANO_AERO_SUBSCRIPTIONS", "PLANO_AERO_SUBSCRIPTIONS_INBOUND", "PLANO_AERO_SUBSCRIPTIONS_MAX", "PLANO_AERO_SUBSCRIPTIONS_INTERVAL",
+		"PLANO_METAR", "PLANO_TAF", "PLANO_AERO_SUBSCRIPTIONS", "PLANO_AERO_SUBSCRIPTIONS_INBOUND", "PLANO_AERO_SUBSCRIPTIONS_MAX", "PLANO_AERO_SUBSCRIPTIONS_INTERVAL",
 		"PLANO_TRIPIT_SYNC_KEY_FILE", "PLANO_RESERVATION_GATEWAY_URL",
 		"PLANO_FAA_NAS", "PLANO_SWIM_URL", "PLANO_EUROCONTROL_URL", "PLANO_ADSB_URL", "PLANO_FAA_REGISTRY_FILE",
 		"PLANO_APNS_TEAM_ID", "PLANO_APNS_KEY_ID", "PLANO_APNS_BUNDLE_ID", "PLANO_APNS_PRIVATE_KEY_FILE", "PLANO_APNS_SANDBOX",

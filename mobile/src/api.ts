@@ -111,6 +111,17 @@ export interface AirportWeather {
   validUntil: string;
 }
 
+export interface AirportWeatherForecast {
+  airport: string;
+  operation: 'departure' | 'arrival';
+  conditions: string;
+  issuedAt: string;
+  startsAt: string;
+  endsAt: string;
+  qualifier: 'prevailing' | 'temporary' | 'probability' | 'becoming';
+  probability?: number;
+}
+
 export interface FlightNotice {
   id: string;
   airport: string;
@@ -142,6 +153,7 @@ export interface FlightDetail {
   prediction?: Prediction | null;
   historicalDepartureRisk?: HistoricalDepartureRisk;
   weather?: AirportWeather[];
+  weatherForecasts?: AirportWeatherForecast[];
   notices?: FlightNotice[];
   atfmSlots?: ATFMSlot[];
 }
