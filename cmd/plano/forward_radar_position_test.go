@@ -115,11 +115,14 @@ func TestForwardPositionsToPrivateRadar(t *testing.T) {
 	send(swimPositionRelay, body, bytes.Repeat([]byte("x"), 32), false, http.StatusUnauthorized, relayPermission)
 	send(swimPositionRelay, body, key, true, http.StatusUnauthorized, relayPermission)
 	send(swimPositionRelay, strings.Replace(body, `"KSFO"`, `"KOAK"`, 1), key, false, http.StatusNoContent, 0)
+	tailBody := strings.Replace(body, `"originICAO"`, `"tailNumber":"n888aa","originICAO"`, 1)
+	send(swimPositionRelay, strings.Replace(tailBody, `"n888aa"`, `"N8/88AA"`, 1), key, false, 0, relayDataError)
+	send(swimPositionRelay, strings.Replace(tailBody, `"n888aa"`, `"N777AA"`, 1), key, false, http.StatusNoContent, 0)
 	const query = "provider=1&swim=1"
 	if raw := get(ownerToken, query, http.StatusOK).Body.String(); !strings.Contains(raw, `"swimPositions":[]`) {
 		t.Fatalf("mismatched report reached private radar: %s", raw)
 	}
-	send(swimPositionRelay, body, key, false, http.StatusNoContent, 0)
+	send(swimPositionRelay, tailBody, key, false, http.StatusNoContent, 0)
 	send(swimPositionRelay, body, key, false, http.StatusNoContent, 0)
 	send(eurocontrolPositionRelay, body, eurocontrolKey, false, 0, relayDataError)
 	eurocontrolBody := strings.Replace(body, `"displayAllowed":true`, `"displayAllowed":true,"observedAirborne":true`, 1)
@@ -156,8 +159,8 @@ func TestForwardPositionsToPrivateRadar(t *testing.T) {
 	}
 	cat062At := now.Add(-500 * time.Millisecond)
 	bindingPath := filepath.Join(t.TempDir(), "cat062.json")
-	binding := fmt.Sprintf(`{"version":1,"edition":"1.21","displayAllowed":true,"observedAirborne":true,"providerFlightId":%q,"originICAO":"KSFO","destinationICAO":"KEWR","scheduledDeparture":%q,"actualTakeoff":%q,"trackDate":%q,"sac":3,"sic":17,"serviceId":7,"trackNumber":43981,"aircraftAddress":"A1B2C3"}`,
-		flight.ID, scheduled.Format(time.RFC3339), takeoff.Format(time.RFC3339), cat062At.Format(time.DateOnly))
+	binding := fmt.Sprintf(`{"version":1,"edition":"1.21","displayAllowed":true,"observedAirborne":true,"providerFlightId":%q,"originICAO":"KSFO","destinationICAO":"KEWR","tailNumber":%q,"scheduledDeparture":%q,"actualTakeoff":%q,"trackDate":%q,"sac":3,"sic":17,"serviceId":7,"trackNumber":43981,"aircraftAddress":"A1B2C3"}`,
+		flight.ID, flight.TailNumber, scheduled.Format(time.RFC3339), takeoff.Format(time.RFC3339), cat062At.Format(time.DateOnly))
 	if err := os.WriteFile(bindingPath, []byte(binding), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -175,6 +178,9 @@ func TestForwardPositionsToPrivateRadar(t *testing.T) {
 	normalized, err := io.ReadAll(input)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Contains(normalized, []byte(`"tailNumber":"N888AA"`)) {
+		t.Fatalf("CAT062 relay omitted the bound registration: %s", normalized)
 	}
 	send(eurocontrolPositionRelay, string(normalized), eurocontrolKey, false, http.StatusNoContent, 0)
 	if err := json.Unmarshal(get(ownerToken, both+"&eurocontrolAfter="+page.SWIMCursor, http.StatusOK).Body.Bytes(), &bothPage); err != nil ||

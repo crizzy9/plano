@@ -100,6 +100,7 @@ plano forward-swim-position < positions.json
   "destinationICAO": "KEWR",
   "scheduledDeparture": "2026-11-06T13:30:00Z",
   "actualTakeoff": "2026-11-06T13:48:05Z",
+  "tailNumber": "N123AA",
   "positions": [
     {"at": "2026-11-06T14:06:15.250Z", "latitude": 39.08, "longitude": -119.02, "altitudeFeet": 32000}
   ]
@@ -115,7 +116,12 @@ For direct delivery to `POST /v1/webhooks/swim-position`, use the same
 `X-Plano-Timestamp` and `X-Plano-Signature` format as [signed flight snapshots](#signed-flight-snapshots).
 
 Plano checks the provider instance, ICAO route, scheduled departure and
-actual takeoff against one current tracked airborne leg. A valid request
+actual takeoff against one current tracked airborne leg. Include the
+independently verified `tailNumber` when available. Plano checks a supplied
+registration against the current flight. Once Plano observes a registration
+change on an identified airborne movement, reports for that flight require
+the current registration. Refresh the bridge binding before forwarding more
+fixes after a correction or withdrawal. A valid request
 receives `204`, including when the flight is ineligible or all fixes have
 already been seen. Each source has its own radar cursor. SWIM fixes are
 available to authenticated installations tracking that flight while the
@@ -130,7 +136,8 @@ An authorized SFDPS subscriber can feed FIXM-NAS 3.0 XML to the relay.
 Prepare one version 1 binding for the verified AeroAPI instance. Use the
 UUID from `flight/gufi` and the callsign from `flightIdentification` in the
 SFDPS record. Supply the independently verified AeroAPI scheduled gate-out
-and actual wheels-off times. `displayAllowed` has the same meaning as in
+and actual wheels-off times. When both the binding and the SFDPS report name
+a registration, their registrations must agree. `displayAllowed` has the same meaning as in
 the normalized position envelope. Keep the binding file within 4 KiB.
 
 ```json
@@ -142,6 +149,7 @@ the normalized position envelope. Keep the binding file within 4 KiB.
   "destinationICAO": "KEWR",
   "scheduledDeparture": "2026-11-06T13:30:00Z",
   "actualTakeoff": "2026-11-06T13:48:05Z",
+  "tailNumber": "N123AA",
   "gufi": "78ea026f-0232-48c2-bb86-506463508daa",
   "aircraftId": "UAL88"
 }
@@ -210,7 +218,8 @@ including legacy CPR editions, to the normalized JSON envelope.
 Create a version 1 JSON binding of up to 4 KiB for one independently verified
 AeroAPI instance. Match the source SAC and SIC, track number and six-digit
 hexadecimal aircraft address. Include `serviceId` to require a service ID
-match. Use AeroAPI's scheduled gate-out and actual wheels-off times. Supply
+match. Use AeroAPI's scheduled gate-out and actual wheels-off times and
+include the independently verified `tailNumber` when available. Supply
 the UTC day of the source records in `trackDate` and split batches at UTC midnight.
 Each invocation accepts up to 256 KiB, 128 records and 32 matching fixes.
 
@@ -225,6 +234,7 @@ Each invocation accepts up to 256 KiB, 128 records and 32 matching fixes.
   "destinationICAO": "EDDF",
   "scheduledDeparture": "2026-11-05T22:15:00Z",
   "actualTakeoff": "2026-11-05T22:37:10Z",
+  "tailNumber": "D-ABCD",
   "trackDate": "2026-11-06",
   "sac": 42,
   "sic": 7,

@@ -219,3 +219,79 @@ func TestAeroInboundObservationReplacesInferredFallback(t *testing.T) {
 		t.Fatalf("recovered inbound state = %+v, error %v", got, err)
 	}
 }
+
+func TestAeroInboundRevalidatesOlderLegsAfterDirectCorrection(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		oldLink  string
+		change   func(*feeds.Flight)
+		wantLegs int
+	}{
+		{name: "ordinary update keeps explicit history", oldLink: "UAL902", wantLegs: 2},
+		{name: "unchanged explicit link keeps verified tail fallback", oldLink: "UAL903", wantLegs: 2},
+		{name: "new explicit link confirms earlier leg", wantLegs: 2, change: func(f *feeds.Flight) { f.InboundID = "UAL902" }},
+		{name: "corrected explicit link excludes old leg", oldLink: "UAL902", wantLegs: 1, change: func(f *feeds.Flight) {
+			f.InboundID = "UAL903"
+		}},
+		{name: "corrected gate-out excludes late predecessor", oldLink: "UAL902", wantLegs: 1, change: func(f *feeds.Flight) {
+			f.ActualDeparture = new(f.ScheduledDeparture.Add(-2 * time.Hour))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			store, err := Open(filepath.Join(t.TempDir(), "inbound-history.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			now := time.Now().UTC().Truncate(time.Second)
+			seen := now.Add(-time.Minute)
+			const source = "flightaware_aeroapi"
+			onward := feeds.Flight{
+				ID: "UAL900", Number: "UA900", Origin: "SFO", Destination: "JFK", Status: "scheduled",
+				TailNumber: "N123AA", InboundID: "UAL901", Source: source, ObservedAt: seen,
+				ScheduledDeparture: new(now.Add(time.Hour)),
+			}
+			direct := feeds.Flight{
+				ID: "UAL901", Number: "UA901", Origin: "DEN", Destination: "SFO", Status: "airborne",
+				TailNumber: onward.TailNumber, InboundID: tc.oldLink, Source: source, ObservedAt: seen,
+				ScheduledDeparture: new(now.Add(-2 * time.Hour)), ScheduledArrival: new(now.Add(20 * time.Minute)),
+			}
+			earlier := feeds.Flight{
+				ID: "UAL902", Number: "UA902", Origin: "ORD", Destination: "DEN", Status: "arrived",
+				TailNumber: onward.TailNumber, Source: source, ObservedAt: seen,
+				ScheduledDeparture: new(now.Add(-6 * time.Hour)), ActualArrival: new(now.Add(-3 * time.Hour)),
+			}
+			rotation := []feeds.Flight{direct, earlier}
+			if err := store.Observe(ctx, onward, nil, rotation, nil); err != nil {
+				t.Fatal(err)
+			}
+			trackAeroCallbackFixture(t, store, onward.ID)
+			updated := direct
+			updated.ObservedAt, updated.EstimatedArrival = now.Add(-10*time.Second), new(now.Add(25*time.Minute))
+			if tc.change != nil {
+				tc.change(&updated)
+			}
+			if err := store.IngestAeroObservation(ctx, updated, now); err != nil {
+				t.Fatal(err)
+			}
+			assertRotation := func(stage string) {
+				t.Helper()
+				details, err := store.Details(ctx, onward.ID)
+				if err != nil || len(details.Inbound) != tc.wantLegs || details.Inbound[0].ID != updated.ID ||
+					!details.Inbound[0].ObservedAt.Equal(updated.ObservedAt) || details.Inbound[0].InboundID != updated.InboundID ||
+					tc.wantLegs == 2 && details.Inbound[1].ID != earlier.ID {
+					t.Fatalf("%s rotation = %+v, want %d legs from the corrected direct observation, error %v", stage, details.Inbound, tc.wantLegs, err)
+				}
+			}
+			assertRotation("callback")
+			// The poll refreshed the onward flight but fetched its rotation
+			// before the callback committed the correction to the direct leg.
+			onward.ObservedAt = now
+			if err := store.observeTracked(ctx, onward, nil, rotation, nil); err != nil {
+				t.Fatal(err)
+			}
+			assertRotation("racing poll")
+		})
+	}
+}

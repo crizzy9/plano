@@ -26,6 +26,7 @@ type CAT062PositionBinding struct {
 	ProviderFlightID   string    `json:"providerFlightId"`
 	OriginICAO         string    `json:"originICAO"`
 	DestinationICAO    string    `json:"destinationICAO"`
+	TailNumber         string    `json:"tailNumber,omitempty"`
 	ScheduledDeparture time.Time `json:"scheduledDeparture"`
 	ActualTakeoff      time.Time `json:"actualTakeoff"`
 	TrackDate          string    `json:"trackDate"`
@@ -44,6 +45,7 @@ func DecodeCAT062Positions(input io.Reader, binding CAT062PositionBinding, now t
 	if binding.Version != 1 || binding.Edition != cat062PositionEdition || !binding.DisplayAllowed || !binding.ObservedAirborne ||
 		!providerIdentifier.MatchString(binding.ProviderFlightID) ||
 		!aeroAlertAirport.MatchString(binding.OriginICAO) || !aeroAlertAirport.MatchString(binding.DestinationICAO) ||
+		!validRadarTailNumber(binding.TailNumber) ||
 		binding.OriginICAO == "ZZZZ" || binding.OriginICAO == "AFIL" || binding.DestinationICAO == "ZZZZ" || binding.DestinationICAO == "AFIL" ||
 		binding.ScheduledDeparture.Year() < 2000 || binding.ScheduledDeparture.Year() > 2100 ||
 		binding.ActualTakeoff.Year() < 2000 || binding.ActualTakeoff.Year() > 2100 || binding.ActualTakeoff.After(now) ||
@@ -99,6 +101,7 @@ func DecodeCAT062Positions(input io.Reader, binding CAT062PositionBinding, now t
 	slices.SortFunc(positions, func(a, b Position) int { return a.At.Compare(b.At) })
 	return RadarPositionReport{
 		ProviderFlightID: binding.ProviderFlightID, OriginICAO: binding.OriginICAO, DestinationICAO: binding.DestinationICAO,
+		TailNumber:         binding.TailNumber,
 		ScheduledDeparture: binding.ScheduledDeparture.UTC(), ActualTakeoff: binding.ActualTakeoff.UTC(), Positions: positions,
 	}, nil
 }

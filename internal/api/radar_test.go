@@ -1,19 +1,94 @@
 package api
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/crizzy9/plano/internal/core"
 	"github.com/crizzy9/plano/internal/feeds"
 )
+
+func TestSignedSWIMRadarRequiresCurrentTailAfterCorrection(t *testing.T) {
+	ctx := t.Context()
+	store, err := core.Open(filepath.Join(t.TempDir(), "radar-tail.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	key := bytes.Repeat([]byte("s"), 32)
+	handler := (Server{Store: store, SWIMPositionKey: key, Logger: slog.New(slog.DiscardHandler)}).Handler()
+	token, owner := newImportTestInstallation(t, store)
+	now := time.Now().UTC().Truncate(time.Second)
+	flight := feeds.Flight{ID: "radar-tail-correction", Number: "XY123", Source: "flightaware_aeroapi", Status: "airborne",
+		OriginICAO: "KSFO", DestinationICAO: "KEWR", TailNumber: "N123AA", ObservedAt: now.Add(-time.Minute),
+		ScheduledDeparture: new(now.Add(-time.Hour)), ActualTakeoff: new(now.Add(-50 * time.Minute))}
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Track(ctx, owner, flight.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	send := func(tail string, at time.Time) {
+		t.Helper()
+		payload := map[string]any{"version": 1, "displayAllowed": true, "providerFlightId": flight.ID,
+			"originICAO": flight.OriginICAO, "destinationICAO": flight.DestinationICAO,
+			"scheduledDeparture": flight.ScheduledDeparture, "actualTakeoff": flight.ActualTakeoff,
+			"positions": []map[string]any{{"latitude": 42, "longitude": -96, "at": at}}}
+		if tail != "" {
+			payload["tailNumber"] = tail
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stamp := strconv.FormatInt(now.Unix(), 10)
+		mac := hmac.New(sha256.New, key)
+		mac.Write([]byte(stamp + "."))
+		mac.Write(body)
+		r := httptest.NewRequest(http.MethodPost, "/v1/webhooks/swim-position", bytes.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("X-Plano-Timestamp", stamp)
+		r.Header.Set("X-Plano-Signature", hex.EncodeToString(mac.Sum(nil)))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("tail %q callback returned %d: %s", tail, w.Code, w.Body)
+		}
+	}
+	assertFixCount := func(want int) {
+		t.Helper()
+		path := "/v1/flights/" + flight.ID + "/radar?provider=1&swim=1"
+		body := importTestRequest(t, handler, http.MethodGet, path, token, "", http.StatusOK)
+		var page struct{ SWIMPositions []feeds.Position }
+		if err := json.Unmarshal([]byte(body), &page); err != nil || len(page.SWIMPositions) != want {
+			t.Fatalf("got %d SWIM positions, want %d: %v", len(page.SWIMPositions), want, err)
+		}
+	}
+	send("", now.Add(-10*time.Second))
+	assertFixCount(1)
+	flight.TailNumber, flight.ObservedAt = "N222AA", now.Add(-5*time.Second)
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	send("", now)
+	send("N123AA", now)
+	assertFixCount(0)
+	send("N222AA", now)
+	assertFixCount(1)
+}
 
 func TestRadarSnapshotSamplesAllRetainedStreams(t *testing.T) {
 	ctx := t.Context()

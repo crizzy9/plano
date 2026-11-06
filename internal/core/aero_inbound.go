@@ -78,7 +78,7 @@ func (s *Store) applyAeroInbound(ctx context.Context, providerID string, incomin
 		}
 		rotation := []feeds.Flight{direct}
 		if sameDirect && len(previous) > 1 && connectsAeroInbound(flight, incoming) && sameInboundHistory(previous[0], incoming) {
-			rotation = append(rotation, previous[1:]...)
+			rotation = append(rotation, feeds.RevalidateRotationSuffix(flight, previous[0], direct, previous[1:])...)
 		}
 		advisories, deadlines, err := readCurrentFlightAdvisories(ctx, tx, flight, now)
 		if err != nil {
@@ -195,9 +195,8 @@ func keepNewerAeroInbound(flight feeds.Flight, rotation []feeds.Flight, previous
 		// A newer authoritative contradiction must not carry the poll's chain.
 		return []feeds.Flight{previous[0]}, true, nil
 	}
-	rotation = slices.Clone(rotation)
-	rotation[0] = previous[0]
-	return rotation, true, nil
+	suffix := feeds.RevalidateRotationSuffix(flight, rotation[0], previous[0], rotation[1:])
+	return append([]feeds.Flight{previous[0]}, suffix...), true, nil
 }
 
 func isExactAeroInbound(flight, inbound feeds.Flight) bool {

@@ -72,12 +72,14 @@ func encodeRadarPositionRelay(report feeds.RadarPositionReport) (io.Reader, int,
 		ProviderFlightID   string    `json:"providerFlightId"`
 		OriginICAO         string    `json:"originICAO"`
 		DestinationICAO    string    `json:"destinationICAO"`
+		TailNumber         string    `json:"tailNumber,omitempty"`
 		ScheduledDeparture time.Time `json:"scheduledDeparture"`
 		ActualTakeoff      time.Time `json:"actualTakeoff"`
 		Positions          []fix     `json:"positions"`
 	}{
 		Version: 1, DisplayAllowed: true, ObservedAirborne: true,
 		ProviderFlightID: report.ProviderFlightID, OriginICAO: report.OriginICAO, DestinationICAO: report.DestinationICAO,
+		TailNumber:         report.TailNumber,
 		ScheduledDeparture: report.ScheduledDeparture, ActualTakeoff: report.ActualTakeoff,
 		Positions: make([]fix, 0, len(report.Positions)),
 	}

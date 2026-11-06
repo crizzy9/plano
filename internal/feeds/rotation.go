@@ -126,25 +126,46 @@ func RestoreRotationSuffix(flight Flight, prefix, saved []Flight) []Flight {
 	if next.InboundID == "" || next.InboundID != saved[len(prefix)-1].InboundID {
 		return prefix
 	}
-	end := len(prefix)
-	for _, cached := range saved[len(prefix):min(len(saved), maxRotationLegs)] {
-		linked := cached.ID == next.InboundID
-		if !providerIdentifier.MatchString(cached.ID) || seen[cached.ID] || cached.ObservedAt.IsZero() ||
-			next.InboundID != "" && !linked || !linked && (tail == "" || cached.TailNumber == "") ||
-			!rotationTailMatches(cached, tail) || !rotationAirportMatches(cached, next) ||
-			!rotationPrecedes(cached, next, cutoff, linked) {
-			break
-		}
-		seen[cached.ID] = true
-		next, tail = cached, first(tail, cached.TailNumber)
-		end++
-	}
-	if end == len(prefix) {
+	suffix := verifiedRotationSuffix(next, tail, cutoff, seen, saved[len(prefix):min(len(saved), maxRotationLegs)], true)
+	if len(suffix) == 0 {
 		return prefix
 	}
-	result := make([]Flight, 0, end)
+	result := make([]Flight, 0, len(prefix)+len(suffix))
 	result = append(result, prefix...)
-	return append(result, saved[len(prefix):end]...)
+	return append(result, suffix...)
+}
+
+// RevalidateRotationSuffix keeps the connected prefix of older legs when a
+// newer observation replaces their direct leg. An unchanged explicit link
+// can still have a verified tail fallback. A revised link must agree with the
+// first older leg before that history can be carried forward.
+func RevalidateRotationSuffix(flight, prior, direct Flight, suffix []Flight) []Flight {
+	if len(suffix) == 0 {
+		return suffix
+	}
+	departure := rotationDeparture(flight)
+	if departure == nil || direct.InboundID != "" && direct.InboundID != prior.InboundID && direct.InboundID != suffix[0].ID {
+		return suffix[:0]
+	}
+	cutoff := departure.Add(-rotationWindow)
+	seen := map[string]bool{flight.ID: true, flight.AeroProviderID(): true, direct.ID: true}
+	tail := first(flight.TailNumber, direct.TailNumber, prior.TailNumber)
+	return verifiedRotationSuffix(direct, tail, cutoff, seen, suffix, false)
+}
+
+func verifiedRotationSuffix(next Flight, tail string, cutoff time.Time, seen map[string]bool, suffix []Flight, requireExplicitMatch bool) []Flight {
+	for i, older := range suffix {
+		linked := older.ID == next.InboundID
+		if !providerIdentifier.MatchString(older.ID) || seen[older.ID] || older.ObservedAt.IsZero() ||
+			requireExplicitMatch && next.InboundID != "" && !linked ||
+			!linked && (tail == "" || older.TailNumber == "") || !rotationTailMatches(older, tail) ||
+			!rotationAirportMatches(older, next) || !rotationPrecedes(older, next, cutoff, linked) {
+			return suffix[:i]
+		}
+		seen[older.ID] = true
+		next, tail = older, first(tail, older.TailNumber)
+	}
+	return suffix
 }
 
 func (a *AeroAPI) rotationTailRows(ctx context.Context, tail string, departure, cutoff time.Time) ([]Flight, error) {

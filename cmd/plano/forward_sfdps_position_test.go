@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -54,14 +55,15 @@ func TestForwardSFDPSPositionToPrivateRadar(t *testing.T) {
 	}
 	const gufi = "e2747c10-1cd0-4e18-9320-9ac72c4b1ad3"
 	bindingPath := filepath.Join(dir, "binding.json")
-	binding := fmt.Sprintf(`{"version":1,"displayAllowed":true,"providerFlightId":%q,"originICAO":"KSFO","destinationICAO":"KEWR","scheduledDeparture":%q,"actualTakeoff":%q,"gufi":%q,"aircraftId":"UAL88"}`,
-		flight.ID, scheduled.Format(time.RFC3339), takeoff.Format(time.RFC3339), gufi)
+	binding := fmt.Sprintf(`{"version":1,"displayAllowed":true,"providerFlightId":%q,"originICAO":"KSFO","destinationICAO":"KEWR","tailNumber":%q,"scheduledDeparture":%q,"actualTakeoff":%q,"gufi":%q,"aircraftId":"UAL88"}`,
+		flight.ID, flight.TailNumber, scheduled.Format(time.RFC3339), takeoff.Format(time.RFC3339), gufi)
 	if err := os.WriteFile(bindingPath, []byte(binding), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	xml := fmt.Sprintf(`<nas:MessageCollection xmlns:nas="http://www.faa.aero/nas/3.0" xmlns:fb="http://www.fixm.aero/base/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <message xsi:type="nas:FlightMessageType">
     <flight source="TH" timestamp=%q xsi:type="nas:NasFlightType">
+      <aircraftDescription registration="n888aa"/>
       <arrival arrivalPoint="KEWR" xsi:type="nas:NasArrivalType"/>
       <departure departurePoint="KSFO" xsi:type="nas:NasDepartureType">
         <runwayPositionAndTime><runwayTime><actual time=%q/></runwayTime></runwayPositionAndTime>
@@ -87,9 +89,20 @@ func TestForwardSFDPSPositionToPrivateRadar(t *testing.T) {
 	if input, status, err := sfdpsPositionRelayInput(strings.NewReader(mismatch), bindingPath, now); input != nil || status != 0 || err != nil {
 		t.Fatalf("unmatched GUFI should be ignored: input present %v, status %d, error %v", input != nil, status, err)
 	}
+	mismatch = strings.Replace(xml, `registration="n888aa"`, `registration="N777AA"`, 1)
+	if input, status, err := sfdpsPositionRelayInput(strings.NewReader(mismatch), bindingPath, now); input != nil || status != 0 || err != nil {
+		t.Fatalf("mismatched reported registration should be ignored: input present %v, status %d, error %v", input != nil, status, err)
+	}
 	input, status, err := sfdpsPositionRelayInput(strings.NewReader(xml), bindingPath, now)
 	if input == nil || status != 0 || err != nil {
 		t.Fatalf("SFDPS normalization returned input present %v, status %d, error %v", input != nil, status, err)
+	}
+	normalized, err := io.ReadAll(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(normalized, []byte(`"tailNumber":"N888AA"`)) {
+		t.Fatalf("SFDPS relay omitted the bound registration: %s", normalized)
 	}
 	key := bytes.Repeat([]byte("s"), 32)
 	handler := (api.Server{Store: store, SWIMPositionKey: key, Logger: slog.New(slog.DiscardHandler)}).Handler()
@@ -104,7 +117,7 @@ func TestForwardSFDPSPositionToPrivateRadar(t *testing.T) {
 		}
 		return w.Result(), nil
 	})
-	if status, err := swimPositionRelay.forward(ctx, input, "https://plano.invalid"+swimPositionRelay.path, key, transport); status != 0 || err != nil || !posted {
+	if status, err := swimPositionRelay.forward(ctx, bytes.NewReader(normalized), "https://plano.invalid"+swimPositionRelay.path, key, transport); status != 0 || err != nil || !posted {
 		t.Fatalf("relay returned status %d, error %v, invoked transport %v", status, err, posted)
 	}
 	type radarPage struct {

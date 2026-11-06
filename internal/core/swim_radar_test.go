@@ -28,6 +28,7 @@ func TestSWIMRadarPrivateIndependentPaging(t *testing.T) {
 		func(r *feeds.RadarPositionReport) { r.ProviderFlightID = "unknown-instance" },
 		func(r *feeds.RadarPositionReport) { r.OriginICAO = "KOAK" },
 		func(r *feeds.RadarPositionReport) { r.DestinationICAO = "KJFK" },
+		func(r *feeds.RadarPositionReport) { r.TailNumber = "N222AA" },
 		func(r *feeds.RadarPositionReport) { r.ScheduledDeparture = r.ScheduledDeparture.Add(time.Nanosecond) },
 		func(r *feeds.RadarPositionReport) { r.ActualTakeoff = r.ActualTakeoff.Add(time.Nanosecond) },
 	} {
@@ -152,6 +153,7 @@ func TestSWIMRadarScopeResetAndLanding(t *testing.T) {
 	between.At = now.Add(1500 * time.Millisecond)
 	newFix := old
 	newFix.At = now.Add(3 * time.Second)
+	report.TailNumber = flight.TailNumber
 	report.Positions = []feeds.Position{old, between, newFix}
 	recordSWIMRadarFixture(t, s, report, newFix.At)
 	// A stale revision takes precedence over a stale cursor, even one ahead of the new path.
@@ -196,6 +198,48 @@ func TestSWIMRadarDelayedScopeChangeRejectsErasedFixReplay(t *testing.T) {
 	recordSWIMRadarFixture(t, s, report, now)
 	if page := readSWIMRadarFixture(t, s, owner, flight.ID, nil, nil); page.SWIMRevision == nil || len(page.SWIMPositions) != 0 {
 		t.Fatalf("delayed scope change allowed erased fix to reappear: %+v", page)
+	}
+	// A newer timestamp clears the time floor but does not identify the plane.
+	report.Positions[0].At = now
+	for _, tail := range []string{"", "N123AA"} {
+		report.TailNumber = tail
+		recordSWIMRadarFixture(t, s, report, now)
+		if page := readSWIMRadarFixture(t, s, owner, flight.ID, nil, nil); len(page.SWIMPositions) != 0 {
+			t.Fatalf("fresh fix for tail %q repopulated the previous track: %+v", tail, page)
+		}
+	}
+	report.TailNumber = "n222aa"
+	recordSWIMRadarFixture(t, s, report, now)
+	if page := readSWIMRadarFixture(t, s, owner, flight.ID, nil, nil); len(page.SWIMPositions) != 1 || !page.SWIMPositions[0].At.Equal(now) {
+		t.Fatalf("updated bridge binding did not admit its fresh fix: %+v", page)
+	}
+}
+
+func TestSWIMRadarRequiresTailWhenTakeoffReturnsWithNewAircraft(t *testing.T) {
+	s, flight, report, now := swimRadarFixture(t)
+	observe := func() {
+		t.Helper()
+		if err := s.Observe(t.Context(), flight, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observe()
+	owner := trackSWIMRadarFixture(t, s, flight.ID)
+	recordSWIMRadarFixture(t, s, report, now)
+	takeoff := flight.ActualTakeoff
+	flight.ActualTakeoff, flight.ObservedAt = nil, now.Add(-3*time.Second)
+	observe()
+	flight.ActualTakeoff, flight.TailNumber, flight.ObservedAt = takeoff, "N222AA", now.Add(-2*time.Second)
+	observe()
+	report.Positions[0].At = now
+	recordSWIMRadarFixture(t, s, report, now)
+	if page := readSWIMRadarFixture(t, s, owner, flight.ID, nil, nil); len(page.SWIMPositions) != 0 {
+		t.Fatalf("unbound fix entered a scope after the takeoff was restored: %+v", page)
+	}
+	report.TailNumber = flight.TailNumber
+	recordSWIMRadarFixture(t, s, report, now)
+	if page := readSWIMRadarFixture(t, s, owner, flight.ID, nil, nil); len(page.SWIMPositions) != 1 {
+		t.Fatalf("current tail did not recover the track: %+v", page)
 	}
 }
 

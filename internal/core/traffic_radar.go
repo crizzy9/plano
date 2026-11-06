@@ -34,6 +34,9 @@ CREATE INDEX IF NOT EXISTS eurocontrol_radar_positions_expiry ON eurocontrol_rad
 CREATE TABLE IF NOT EXISTS eurocontrol_radar_revisions (
   flight_id TEXT PRIMARY KEY REFERENCES flights(id) ON DELETE CASCADE,
   revision_ns INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS traffic_radar_tail_requirements (
+  flight_id TEXT PRIMARY KEY REFERENCES flights(id) ON DELETE CASCADE
 );`
 
 // Table names come exclusively from these server-owned stream definitions.
@@ -67,13 +70,15 @@ func (s *Store) recordTrafficPositions(ctx context.Context, report feeds.RadarPo
 	defer tx.Rollback()
 	var raw []byte
 	var latest int64
+	var tailRequired bool
 	err = tx.QueryRowContext(ctx, `WITH targets AS (SELECT id FROM (`+aeroTargetsSQL+`) LIMIT 2)
 SELECT snapshot, MAX(COALESCE((SELECT MAX(p.at_ns) FROM `+stream.positions+` p WHERE p.flight_id=flights.id),0),
-  COALESCE((SELECT r.revision_ns FROM `+stream.revisions+` r WHERE r.flight_id=flights.id),0))
+  COALESCE((SELECT r.revision_ns FROM `+stream.revisions+` r WHERE r.flight_id=flights.id),0)),
+  EXISTS(SELECT 1 FROM traffic_radar_tail_requirements t WHERE t.flight_id=flights.id)
 FROM flights WHERE id=(SELECT CASE WHEN COUNT(*)=1 THEN MIN(id) END FROM targets)
 AND json_extract(snapshot,'$.source')='flightaware_aeroapi' AND observed_ns<=? `+radarFlightFreshness,
 		report.ProviderFlightID, report.ProviderFlightID, now.UnixNano(), now.Add(-15*time.Minute).UnixNano(),
-		now.Add(-30*time.Minute).Format(time.RFC3339)).Scan(&raw, &latest)
+		now.Add(-30*time.Minute).Format(time.RFC3339)).Scan(&raw, &latest, &tailRequired)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -84,7 +89,7 @@ AND json_extract(snapshot,'$.source')='flightaware_aeroapi' AND observed_ns<=? `
 	if err := json.Unmarshal(raw, &flight); err != nil {
 		return err
 	}
-	if !report.MatchesFlight(flight) {
+	if tailRequired && report.TailNumber == "" || !report.MatchesFlight(flight) {
 		return nil
 	}
 	appended := false
@@ -125,15 +130,26 @@ func retireTrafficRadarScope(ctx context.Context, tx *sql.Tx, prior, flight feed
 	if previousProvider == "" {
 		previousProvider = prior.AeroProviderID()
 	}
+	sameTail := strings.EqualFold(strings.TrimSpace(prior.TailNumber), strings.TrimSpace(flight.TailNumber))
 	if (provider == "" || provider == previousProvider) && prior.Source == flight.Source &&
 		prior.OriginICAO == flight.OriginICAO && prior.DestinationICAO == flight.DestinationICAO &&
-		strings.EqualFold(prior.TailNumber, flight.TailNumber) &&
+		sameTail &&
 		sameRadarInstant(prior.ScheduledDeparture, flight.ScheduledDeparture) &&
 		sameRadarInstant(prior.ActualTakeoff, flight.ActualTakeoff) {
 		return nil
 	}
 	priorScope := previousProvider != "" && prior.Source == "flightaware_aeroapi" && prior.OriginICAO != "" &&
 		prior.DestinationICAO != "" && prior.ScheduledDeparture != nil && prior.ActualTakeoff != nil
+	if !sameTail {
+		// A fresh timestamp alone cannot distinguish the prior aircraft from
+		// its replacement. A previous revision also covers a flight whose
+		// provider temporarily withdrew part of the radar binding.
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO traffic_radar_tail_requirements(flight_id)
+SELECT ? WHERE ? OR EXISTS(SELECT 1 FROM swim_radar_revisions WHERE flight_id=?)
+OR EXISTS(SELECT 1 FROM eurocontrol_radar_revisions WHERE flight_id=?)`, flight.ID, priorScope, flight.ID, flight.ID); err != nil {
+			return err
+		}
+	}
 	// A provider update can describe a change that precedes a fix we already
 	// stored. Advance past the erased track as well as the provider timestamp.
 	for _, stream := range [...]trafficRadarStream{swimRadarStream, eurocontrolRadarStream} {

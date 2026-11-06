@@ -67,6 +67,11 @@ func TestEurocontrolRadarIndependentPagingAndReplayFloor(t *testing.T) {
 	// two old watermarks is valid only for the stream with the older floor.
 	between := first
 	between.At = first.At.Add(150 * time.Millisecond)
+	recordEurocontrol(between)
+	if page := read(owner, swimCursor, eurocontrolCursor); len(page.EurocontrolPositions) != 0 {
+		t.Fatalf("unbound fix repopulated the retired EUROCONTROL track: %+v", page)
+	}
+	report.TailNumber = flight.TailNumber
 	report.Positions = []feeds.Position{between, swimLatest}
 	recordSWIMRadarFixture(t, s, report, now)
 	recordEurocontrol(eurocontrolLatest, between)

@@ -41,6 +41,7 @@ type SFDPSPositionBinding struct {
 	ProviderFlightID   string    `json:"providerFlightId"`
 	OriginICAO         string    `json:"originICAO"`
 	DestinationICAO    string    `json:"destinationICAO"`
+	TailNumber         string    `json:"tailNumber,omitempty"`
 	ScheduledDeparture time.Time `json:"scheduledDeparture"`
 	ActualTakeoff      time.Time `json:"actualTakeoff"`
 	GUFI               string    `json:"gufi"`
@@ -53,6 +54,7 @@ type SFDPSPositionBinding struct {
 func DecodeSFDPSPositions(input io.Reader, binding SFDPSPositionBinding, now time.Time) (RadarPositionReport, error) {
 	if binding.Version != 1 || !binding.DisplayAllowed || !providerIdentifier.MatchString(binding.ProviderFlightID) ||
 		!aeroAlertAirport.MatchString(binding.OriginICAO) || !aeroAlertAirport.MatchString(binding.DestinationICAO) ||
+		!validRadarTailNumber(binding.TailNumber) ||
 		binding.OriginICAO == "ZZZZ" || binding.OriginICAO == "AFIL" || binding.DestinationICAO == "ZZZZ" || binding.DestinationICAO == "AFIL" ||
 		!sfdpsGUFI.MatchString(binding.GUFI) || binding.GUFI == "00000000-0000-0000-0000-000000000000" || !sfdpsAircraftID.MatchString(binding.AircraftID) ||
 		binding.ScheduledDeparture.Year() < 2000 || binding.ScheduledDeparture.Year() > 2100 ||
@@ -98,6 +100,7 @@ func DecodeSFDPSPositions(input io.Reader, binding SFDPSPositionBinding, now tim
 	slices.SortFunc(positions, func(a, b Position) int { return a.At.Compare(b.At) })
 	return RadarPositionReport{
 		ProviderFlightID: binding.ProviderFlightID, OriginICAO: binding.OriginICAO, DestinationICAO: binding.DestinationICAO,
+		TailNumber:         binding.TailNumber,
 		ScheduledDeparture: binding.ScheduledDeparture.UTC(), ActualTakeoff: binding.ActualTakeoff.UTC(), Positions: positions,
 	}, nil
 }
@@ -353,6 +356,16 @@ func sfdpsTrackPosition(message *sfdpsXMLNode, binding SFDPSPositionBinding, now
 	}
 	if aircraft != binding.AircraftID || origin != binding.OriginICAO || destination != binding.DestinationICAO || status != "ACTIVE" {
 		return nil, nil
+	}
+	if binding.TailNumber != "" {
+		// The SFDPS FIXM mapping puts the optional REG indicator here.
+		registration, _ := fields.attribute(fields.child(flight, "aircraftDescription"), "registration")
+		if fields.invalid {
+			return nil, errInvalidSFDPSPosition
+		}
+		if registration = strings.TrimSpace(registration); registration != "" && !strings.EqualFold(registration, binding.TailNumber) {
+			return nil, nil
+		}
 	}
 	enRoute := fields.child(flight, "enRoute")
 	track := fields.child(enRoute, "position")

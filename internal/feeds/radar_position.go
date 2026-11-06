@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -15,12 +17,19 @@ const (
 	maxRadarPositionFixes  = 32
 )
 
+var radarTailNumber = regexp.MustCompile(`^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$`)
+
+func validRadarTailNumber(tail string) bool {
+	return tail == "" || len(tail) <= 16 && radarTailNumber.MatchString(tail)
+}
+
 // RadarPositionReport binds operator-normalized airborne fixes to an exact
 // provider instance. The bridge must already have filtered restricted data.
 type RadarPositionReport struct {
 	ProviderFlightID   string
 	OriginICAO         string
 	DestinationICAO    string
+	TailNumber         string
 	ScheduledDeparture time.Time
 	ActualTakeoff      time.Time
 	Positions          []Position
@@ -42,6 +51,7 @@ func DecodeRadarPositionReport(input io.Reader, now time.Time, source string) (R
 		ProviderFlightID   string    `json:"providerFlightId"`
 		OriginICAO         string    `json:"originICAO"`
 		DestinationICAO    string    `json:"destinationICAO"`
+		TailNumber         string    `json:"tailNumber"`
 		ScheduledDeparture time.Time `json:"scheduledDeparture"`
 		ActualTakeoff      time.Time `json:"actualTakeoff"`
 		Positions          []struct {
@@ -59,6 +69,7 @@ func DecodeRadarPositionReport(input io.Reader, now time.Time, source string) (R
 	if decoder.Decode(&wire) != nil || decoder.Decode(new(any)) != io.EOF ||
 		wire.Version != 1 || !wire.DisplayAllowed || !providerIdentifier.MatchString(wire.ProviderFlightID) ||
 		!aeroAlertAirport.MatchString(wire.OriginICAO) || !aeroAlertAirport.MatchString(wire.DestinationICAO) ||
+		!validRadarTailNumber(wire.TailNumber) ||
 		wire.ScheduledDeparture.Year() < 2000 || wire.ScheduledDeparture.Year() > 2100 ||
 		wire.ActualTakeoff.Year() < 2000 || wire.ActualTakeoff.After(now) ||
 		len(wire.Positions) < 1 || len(wire.Positions) > maxRadarPositionFixes {
@@ -69,6 +80,7 @@ func DecodeRadarPositionReport(input io.Reader, now time.Time, source string) (R
 	}
 	report := RadarPositionReport{
 		ProviderFlightID: wire.ProviderFlightID, OriginICAO: wire.OriginICAO, DestinationICAO: wire.DestinationICAO,
+		TailNumber:         wire.TailNumber,
 		ScheduledDeparture: wire.ScheduledDeparture.UTC(), ActualTakeoff: wire.ActualTakeoff.UTC(),
 		Positions: make([]Position, 0, len(wire.Positions)),
 	}
@@ -103,6 +115,7 @@ func sameRadarMeasurement(a, b *float64) bool {
 
 func (r RadarPositionReport) MatchesFlight(f Flight) bool {
 	return f.OriginICAO == r.OriginICAO && f.DestinationICAO == r.DestinationICAO &&
+		(r.TailNumber == "" || strings.EqualFold(r.TailNumber, strings.TrimSpace(f.TailNumber))) &&
 		f.ScheduledDeparture != nil && f.ScheduledDeparture.Equal(r.ScheduledDeparture) &&
 		f.ActualTakeoff != nil && f.ActualTakeoff.Equal(r.ActualTakeoff) &&
 		(f.Status == "airborne" || f.Status == "diverted") && f.ActualLanding == nil && f.ActualArrival == nil
