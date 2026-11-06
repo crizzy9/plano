@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
-	"net/url"
-	"path/filepath"
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
@@ -44,12 +42,7 @@ AND scheduled_ns>=? AND (departed_ns IS NULL OR departed_ns<>?)`, departed.UnixN
 // ExportDelaySamples opens the operator database read-only and streams training
 // inputs without passenger records, email, flight numbers, or booking codes.
 func ExportDelaySamples(ctx context.Context, path string, dst io.Writer) error {
-	path, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	dsn := (&url.URL{Scheme: "file", Path: path}).String() + "?mode=ro&_busy_timeout=5000"
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := openReadOnly(path)
 	if err != nil {
 		return err
 	}

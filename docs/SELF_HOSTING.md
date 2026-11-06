@@ -177,22 +177,37 @@ from the exact build and environment you deploy.
 ## Maintain and back up
 
 The named volume `plano_data` holds SQLite and its WAL files. Normal service
-recreation preserves the volume. To make a consistent cold backup, stop
-Plano and copy the entire data directory into a private backup directory.
+recreation preserves the volume. `plano backup` captures a consistent snapshot
+while the service runs, including committed changes still in the WAL. It
+checks the snapshot, then publishes one SQLite file with mode `0600` at a
+new destination. The destination filesystem must support hard links.
 
 ```sh
 umask 077
 backup=$(mktemp -d ./plano-backup.XXXXXX)
-docker compose stop plano
-docker compose cp plano:/data/. "$backup/"
-docker compose start plano
+snapshot="plano-$(date -u +%Y%m%dT%H%M%SZ)-${backup##*.}.db"
+docker compose exec -T plano plano backup "/data/$snapshot" &&
+  docker compose cp "plano:/data/$snapshot" "$backup/plano.db"
 ```
 
 Use the same Compose files for maintenance commands if you start with an
-override. Keep the backup private because the database includes device tokens
-and flight-tracking state. Restore the complete backup to a dedicated data
-directory while Plano is stopped, mount that directory at `/data`, and
-verify the container user can write to it before starting the service.
+override. After verifying the copy, remove the staged snapshot from `/data`
+and retain the copy on separate storage. Leave space for the snapshot and for
+WAL growth during a large backup. Keep copies private because the database
+includes device tokens and flight-tracking state. Back up your Compose
+configuration and mounted files separately, including the TripIt encryption
+key if configured. For a standalone server, run
+`PLANO_DB=./data/plano.db ./plano backup /private/backup/plano.db`.
+
+To restore, copy `plano.db` into a fresh data directory with no prior SQLite
+sidecar files. Give the container's UID and GID `10001:10001` access to write
+the directory and the database, using your runtime's host UID mapping. Mount
+that directory at `/data` in a Compose override and retain the original
+configuration and mounted keys. Stop the previous instance before starting
+the restored one with the same live configuration. A restore can retry a
+pending push from the backup. Use demo mode and a separate port for a restore
+drill, then check health and open a tracked flight using an existing
+installation before putting the restored instance into service.
 
 ## Run without containers
 

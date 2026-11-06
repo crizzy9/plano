@@ -51,6 +51,19 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "backup" {
+		if len(os.Args) != 3 || os.Args[2] == "" {
+			fmt.Fprintln(os.Stderr, "usage: plano backup <destination.db>")
+			os.Exit(2)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := core.Backup(ctx, env("PLANO_DB", "plano.db"), os.Args[2]); err != nil {
+			logger.Error("backup failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(logger); err != nil {
 		logger.Error("plano stopped", "error", err)
 		os.Exit(1)
