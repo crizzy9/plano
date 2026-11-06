@@ -70,15 +70,19 @@ func TestPredictionUsesTrainedModelAndRetainsOperationalFallback(t *testing.T) {
 	if !flight.EstimatedDeparture.Equal(published) || !flight.ScheduledDeparture.Equal(row.ScheduledDeparture) {
 		t.Fatal("forecast modified published flight times")
 	}
-	closureEnd := row.ScheduledDeparture.Add(100 * time.Minute)
-	closure := feeds.Advisory{Airport: "SFO", Direction: "departure", Kind: "airport_closure", Source: "faa_nas", RawReason: "AD AP CLSD",
-		ObservedAt: row.ObservedAt, StartsAt: new(row.ScheduledDeparture.Add(45 * time.Minute)), EndsAt: &closureEnd}
-	closed := PredictWithModel(model, flight, nil, []feeds.Advisory{closure}, row.ObservedAt)
-	if closed == nil || closed.Method != got.Method || closed.ModelVersion != got.ModelVersion || closed.DelayMinutes != 100 ||
-		!closed.Departure.Equal(closureEnd) || !slices.Equal(closed.FeatureContributions, got.FeatureContributions) ||
-		closed.ValidUntil == nil || !closed.ValidUntil.Equal(row.ObservedAt.Add(30*time.Minute)) ||
-		len(closed.Reasons) == 0 || !strings.Contains(closed.Reasons[len(closed.Reasons)-1], "full airport closure") {
-		t.Fatalf("closure-adjusted learned forecast = %+v", closed)
+	closureStart, closureEnd := row.ScheduledDeparture.Add(45*time.Minute), row.ScheduledDeparture.Add(100*time.Minute)
+	daily := fmt.Sprintf("AD AP CLSD DLY %s-%s %s-%s", closureStart.Format("1504"), closureEnd.Format("1504"),
+		closureStart.Format("0601021504"), closureEnd.Format("0601021504"))
+	for _, raw := range []string{"AD AP CLSD", daily} {
+		closure := feeds.Advisory{Airport: "SFO", Direction: "departure", Kind: "airport_closure", Source: "faa_nas", RawReason: raw,
+			ObservedAt: row.ObservedAt, StartsAt: &closureStart, EndsAt: &closureEnd}
+		closed := PredictWithModel(model, flight, nil, []feeds.Advisory{closure}, row.ObservedAt)
+		if closed == nil || closed.Method != got.Method || closed.ModelVersion != got.ModelVersion || closed.DelayMinutes != 100 ||
+			!closed.Departure.Equal(closureEnd) || !slices.Equal(closed.FeatureContributions, got.FeatureContributions) ||
+			closed.ValidUntil == nil || !closed.ValidUntil.Equal(row.ObservedAt.Add(30*time.Minute)) ||
+			len(closed.Reasons) == 0 || !strings.Contains(closed.Reasons[len(closed.Reasons)-1], "full airport closure") {
+			t.Fatalf("closure-adjusted learned forecast for %q = %+v", raw, closed)
+		}
 	}
 	advisory := feeds.Advisory{Airport: "SFO", Direction: "departure", Kind: "departure_delay", Reason: "weather", Source: "faa_nas", DelayMinutes: new(35), ObservedAt: row.ObservedAt}
 	got = PredictWithModel(model, flight, nil, []feeds.Advisory{advisory}, row.ObservedAt)
@@ -142,6 +146,92 @@ func TestPredictionUsesOverlappingFullDepartureClosures(t *testing.T) {
 	}
 	if !flight.EstimatedDeparture.Equal(published) || !flight.ScheduledDeparture.Equal(departure) {
 		t.Fatal("closure forecast modified published flight times")
+	}
+}
+
+func TestPredictionUsesOnlyTheMatchingDailyClosure(t *testing.T) {
+	at := func(hour, minute int) time.Time {
+		return time.Date(2026, time.November, 6, hour, minute, 0, 0, time.UTC)
+	}
+	const daytime = "!SFO SFO AD AP CLSD DLY 0730-0815 2611050730-2611080815"
+	const overnight = "(A1234/26 NOTAMN\nA) KSFO B) 2611052330 C) 2611070100\nD) DLY 2330-0100\nE) AD CLSD)"
+	const clipped = "!SFO SFO AD AP CLSD DLY 0730-0815 2611050730-2611060805"
+	for _, tc := range []struct {
+		name, raw           string
+		now, departure, end time.Time
+	}{
+		{"before today's closure", daytime, at(7, 25), at(7, 29), time.Time{}},
+		{"at the start", daytime, at(7, 25), at(7, 30), at(8, 15)},
+		{"during today's closure", daytime, at(7, 55), at(8, 0), at(8, 15)},
+		{"at the end", daytime, at(7, 55), at(8, 15), time.Time{}},
+		{"between occurrences", daytime, at(8, 0), at(15, 0), time.Time{}},
+		{"in yesterday's overnight closure", overnight, at(0, 45), at(0, 50), at(1, 0)},
+		{"at the end of yesterday's overnight closure", overnight, at(0, 45), at(1, 0), time.Time{}},
+		{"clipped by the notice end", clipped, at(7, 55), at(8, 0), at(8, 5)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flight := feeds.Flight{Status: "scheduled", Origin: "SFO", OriginICAO: "KSFO", ScheduledDeparture: &tc.departure}
+			closure := feeds.Advisory{ID: "daily", Airport: "KSFO", Kind: "airport_closure", Source: feeds.FAASWIM,
+				RawReason: tc.raw, ObservedAt: tc.now}
+			got := Predict(flight, nil, []feeds.Advisory{closure}, tc.now)
+			if tc.end.IsZero() {
+				if got != nil {
+					t.Fatalf("flight outside the occurrence got closure forecast %+v", got)
+				}
+				return
+			}
+			if got == nil || got.Departure == nil || !got.Departure.Equal(tc.end) || got.DelayMinutes != int(tc.end.Sub(tc.departure).Minutes()) ||
+				got.ValidUntil == nil || !got.ValidUntil.Equal(earliestTime(tc.now.Add(advisoryForecastTTL), tc.end)) ||
+				!slices.Equal(got.AdvisoryEvidence, []forecastAdvisory{advisoryEvidence(closure)}) ||
+				len(got.Reasons) != 1 || !strings.Contains(got.Reasons[0], "full airport closure at KSFO") {
+				t.Fatalf("forecast = %+v, want closure until %s", got, tc.end)
+			}
+		})
+	}
+}
+
+func TestPredictionChainsDailyAndFixedClosures(t *testing.T) {
+	now := time.Date(2026, time.November, 6, 7, 30, 0, 0, time.UTC)
+	departure := now.Add(5 * time.Minute)
+	flight := feeds.Flight{Status: "scheduled", Origin: "SFO", OriginICAO: "KSFO", ScheduledDeparture: &departure}
+	before := feeds.Advisory{ID: "before", Airport: "SFO", Kind: "airport_closure", Source: "faa_nas", RawReason: "AD AP CLSD",
+		ObservedAt: now, EndsAt: new(now.Add(10 * time.Minute))}
+	daily := feeds.Advisory{ID: "daily", Airport: "KSFO", Kind: "airport_closure", Source: feeds.FAASWIM, ObservedAt: now,
+		RawReason: "!SFO SFO AD AP CLSD DLY 0736-0750 2611050736-2611080750"}
+	after := feeds.Advisory{ID: "after", Airport: "SFO", Kind: "airport_closure", Source: "faa_nas", RawReason: "AD AP CLSD",
+		ObservedAt: now, StartsAt: new(now.Add(15 * time.Minute)), EndsAt: new(now.Add(55 * time.Minute))}
+	wantEvidence := []forecastAdvisory{advisoryEvidence(before), advisoryEvidence(daily), advisoryEvidence(after)}
+	for _, rows := range [][]feeds.Advisory{{before, daily, after}, {after, daily, before}} {
+		got := Predict(flight, nil, rows, now)
+		if got == nil || got.Departure == nil || !got.Departure.Equal(*after.EndsAt) ||
+			got.ValidUntil == nil || !got.ValidUntil.Equal(*before.EndsAt) || !slices.Equal(got.AdvisoryEvidence, wantEvidence) {
+			t.Fatalf("forecast across fixed and daily closures = %+v", got)
+		}
+	}
+}
+
+func TestPredictionChecksDailyClosureAtTheForecastLimit(t *testing.T) {
+	now := time.Date(2026, time.November, 6, 8, 0, 0, 0, time.UTC)
+	flight := feeds.Flight{Status: "scheduled", Origin: "SFO", OriginICAO: "KSFO", ScheduledDeparture: &now}
+	limit := now.Add(closureForecastLimit)
+	before := feeds.Advisory{ID: "before", Airport: "SFO", Kind: "airport_closure", Source: "faa_nas", RawReason: "AD AP CLSD",
+		ObservedAt: now, EndsAt: &limit}
+	daily := feeds.Advisory{ID: "daily", Airport: "KSFO", Kind: "airport_closure", Source: feeds.FAASWIM, ObservedAt: now,
+		RawReason: "!SFO SFO AD AP CLSD DLY 0800-0900 2611070800-2611080900"}
+	if got := Predict(flight, nil, []feeds.Advisory{before}, now); got == nil || got.Departure == nil || !got.Departure.Equal(limit) {
+		t.Fatalf("forecast at the delay limit = %+v", got)
+	}
+	if got := Predict(flight, nil, []feeds.Advisory{daily, before}, now); got != nil {
+		t.Fatalf("daily closure begins exactly at the limit but forecast continues: %+v", got)
+	}
+	flight.EstimatedDeparture = new(limit.Add(30 * time.Minute))
+	delay := feeds.Advisory{ID: "wind", Airport: "KSFO", Kind: "departure_delay", Direction: "departure", Source: "faa_nas",
+		ObservedAt: now, Reason: "wind"}
+	if got := Predict(flight, nil, []feeds.Advisory{delay}, now); got == nil || got.Departure == nil || !got.Departure.Equal(*flight.EstimatedDeparture) {
+		t.Fatalf("baseline beyond the closure limit = %+v", got)
+	}
+	if got := Predict(flight, nil, []feeds.Advisory{delay, daily}, now); got != nil {
+		t.Fatalf("initial estimate beyond the limit falls in a daily closure: %+v", got)
 	}
 }
 

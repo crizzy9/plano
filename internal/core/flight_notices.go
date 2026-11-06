@@ -137,7 +137,6 @@ func (s *Store) FlightNotices(ctx context.Context, flight feeds.Flight, now time
 			// Show the published context and respect its expiry, even if the
 			// normalized times conflict and prevent a flight prediction.
 			a.StartsAt, a.EndsAt = decoded.StartsAt, decoded.EndsAt
-			validUntil = earliestTime(validUntil, *a.EndsAt)
 		}
 		for _, operation := range []struct {
 			name, code, icao string
@@ -155,13 +154,21 @@ func (s *Store) FlightNotices(ctx context.Context, flight feeds.Flight, now time
 			if operation.name == "arrival" && a.Kind == "ground_stop" {
 				at = departure
 			}
-			if !flightNoticeAppliesAt(a, at, now) {
+			if at == nil {
 				continue
+			}
+			occurrence, active := advisoryOccurrence(a, decoded, *at, now)
+			if !active || !flightNoticeAppliesAt(occurrence, at, now) {
+				continue
+			}
+			deadline := validUntil
+			if occurrence.EndsAt != nil {
+				deadline = earliestTime(deadline, *occurrence.EndsAt)
 			}
 			notices = append(notices, FlightNotice{
 				ID: hash(source + "\x00" + id + "\x00" + operation.name), Airport: a.Airport, Operation: operation.name,
 				Kind: a.Kind, Source: source, Summary: summary, ObservedAt: time.Unix(0, observed).UTC(),
-				ValidUntil: validUntil, StartsAt: a.StartsAt, EndsAt: a.EndsAt,
+				ValidUntil: deadline, StartsAt: occurrence.StartsAt, EndsAt: occurrence.EndsAt,
 			})
 			if len(notices) == maxFlightNotices {
 				return notices, rows.Close()

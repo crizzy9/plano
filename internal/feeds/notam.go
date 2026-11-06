@@ -18,7 +18,10 @@ type NOTAMSummary struct {
 	EndsAt             *time.Time
 	HasValidity        bool // A date range or structured ICAO notice was present.
 	FixedValidity      bool // Both bounds are unambiguous and the end is definitive.
+	dailyClosure       dailyNOTAMWindow
 }
+
+type dailyNOTAMWindow struct{ start, duration time.Duration }
 
 const notamCancellationText = "This NOTAM cancels an earlier notice."
 
@@ -26,6 +29,38 @@ const notamCancellationText = "This NOTAM cancels an earlier notice."
 // every supplied structured bound. Either structured bound may be absent.
 func (s NOTAMSummary) MatchesValidity(start, end *time.Time) bool {
 	return s.FixedValidity && (start == nil || start.Equal(*s.StartsAt)) && (end == nil || end.Equal(*s.EndsAt))
+}
+
+// HasDailyClosure reports whether the notice closes the entire airport on a
+// single daily UTC schedule within definitive published validity bounds.
+func (s NOTAMSummary) HasDailyClosure() bool { return s.dailyClosure.duration > 0 }
+
+// NextDailyClosure finds the first occurrence that ends strictly after at.
+// It can contain at or start later, and is clipped to the published validity.
+func (s NOTAMSummary) NextDailyClosure(at time.Time) (start, end time.Time, ok bool) {
+	if !s.HasDailyClosure() || !at.Before(*s.EndsAt) {
+		return time.Time{}, time.Time{}, false
+	}
+	if at.Before(*s.StartsAt) {
+		at = *s.StartsAt
+	}
+	const day = 24 * time.Hour
+	midnight := at.UTC().Truncate(day)
+	// The previous day's closure can run past midnight into this day.
+	for _, offset := range [...]time.Duration{-day, 0, day} {
+		start = midnight.Add(offset + s.dailyClosure.start)
+		end = start.Add(s.dailyClosure.duration)
+		if start.Before(*s.StartsAt) {
+			start = *s.StartsAt
+		}
+		if end.After(*s.EndsAt) {
+			end = *s.EndsAt
+		}
+		if end.After(start) && end.After(at) {
+			return start, end, true
+		}
+	}
+	return time.Time{}, time.Time{}, false
 }
 
 var (
@@ -40,6 +75,8 @@ var (
 	notamUnit           = regexp.MustCompile(`^([0-9]+)(FT|HR|MIN)$`)
 	notamFullClosure    = regexp.MustCompile(`^(?:CLSD|CLOSED)(?: [0-9]{10} ?[-‐‑–] ?(?:[0-9]{10}(?: ?EST)?|PERM|UFN))?[.]?$`)
 	notamDomesticRange  = regexp.MustCompile(`(?i)(?:^| )([0-9]{8,12}) ?[-‐‑–] ?([0-9]{0,12}(?: ?[A-Z]{1,4})?)[.]?$`)
+	notamDailySchedule  = regexp.MustCompile(`(?i)^DLY ([0-9]{4}) ?[-‐‑–] ?([0-9]{4})$`)
+	notamDomesticDaily  = regexp.MustCompile(`(?i)^(?:CLSD|CLOSED) DLY ([0-9]{4}) ?[-‐‑–] ?([0-9]{4}) [0-9]{10} ?[-‐‑–] ?[0-9]{10}[.]?$`)
 	notamNonScheduled   = regexp.MustCompile(`(?i)\bNON[- ]SKED\b`)
 )
 
@@ -119,6 +156,13 @@ func DecodeNOTAM(raw string) (NOTAMSummary, bool) {
 		} else if validity != nil {
 			summary.setValidity(validity[1], validity[2])
 		}
+		if subject.scope == "airport" && summary.FixedValidity {
+			if parts.structured && parts.hasSchedule && !parts.hasLimits && notamFullClosure.MatchString(strings.ToUpper(details)) {
+				summary.setDailyClosure(notamDailySchedule.FindStringSubmatch(parts.schedule))
+			} else if !parts.structured && subject.code == "AD AP" {
+				summary.setDailyClosure(notamDomesticDaily.FindStringSubmatch(details))
+			}
+		}
 		return summary, true
 	}
 	return NOTAMSummary{}, false
@@ -129,6 +173,7 @@ type notamParts struct {
 	action                                  byte
 	structured, headerValid, referenceValid bool
 	hasAirport, hasSchedule, invalidOrder   bool
+	hasLimits                               bool
 }
 
 func (parts notamParts) icaoLocation() string {
@@ -182,6 +227,8 @@ func notamText(raw string) notamParts {
 			parts.hasSchedule = true
 		case 'E':
 			parts.body = value
+		case 'F', 'G':
+			parts.hasLimits = true
 		}
 	}
 	return parts
@@ -221,6 +268,28 @@ func (summary *NOTAMSummary) setValidity(start, end string) {
 	summary.StartsAt = notamTimestamp(start)
 	summary.EndsAt = notamTimestamp(strings.TrimSpace(endTime))
 	summary.FixedValidity = !estimated && summary.StartsAt != nil && summary.EndsAt != nil && summary.EndsAt.After(*summary.StartsAt)
+}
+
+func (summary *NOTAMSummary) setDailyClosure(hours []string) {
+	if hours == nil || hours[1] == hours[2] {
+		return
+	}
+	start, startErr := time.Parse("1504", hours[1])
+	end, endErr := time.Parse("1504", hours[2])
+	if startErr != nil || endErr != nil {
+		return
+	}
+	startOffset := time.Duration(start.Hour())*time.Hour + time.Duration(start.Minute())*time.Minute
+	duration := end.Sub(start)
+	if duration < 0 {
+		duration += 24 * time.Hour
+	}
+	summary.dailyClosure = dailyNOTAMWindow{start: startOffset, duration: duration}
+	if _, _, ok := summary.NextDailyClosure(*summary.StartsAt); !ok {
+		summary.dailyClosure = dailyNOTAMWindow{}
+		return
+	}
+	summary.FullAirportClosure = true
 }
 
 func notamTimestamp(value string) *time.Time {

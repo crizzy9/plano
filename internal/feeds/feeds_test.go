@@ -212,6 +212,40 @@ func TestFAANASRetainsFullAirportClosureScopeAndPublishedEnd(t *testing.T) {
 	}
 }
 
+func TestFAANASPreservesDailyClosureScheduleAndExplicitDates(t *testing.T) {
+	const raw = "!SNA 11/003 SNA AD AP CLSD DLY 0730-1415 2611030730-2611081415"
+	start, end := instant(t, "2026-11-03T07:30:00Z"), instant(t, "2026-11-08T14:15:00Z")
+	for _, tc := range []struct {
+		name, reopen string
+		wantEnd      time.Time
+		compatible   bool
+	}{
+		{"raw dates only", "", end, true},
+		{"matching reopen", "Nov 8 at 14:15 UTC.", end, true},
+		{"conflicting reopen", "Nov 8 at 15:15 UTC.", end.Add(time.Hour), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := `<AIRPORT_STATUS_INFORMATION><Update_Time>Fri Nov 6 09:00:00 2026 UTC</Update_Time>
+<Delay_type><Airport_Closure_List><Airport><ARPT>SNA</ARPT><Reason>` + raw + `</Reason>
+<Reopen>` + tc.reopen + `</Reopen></Airport></Airport_Closure_List></Delay_type></AIRPORT_STATUS_INFORMATION>`
+			rows, err := parseFAANAS([]byte(fixture))
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("FAA advisories = %+v, %v", rows, err)
+			}
+			closure := rows[0]
+			summary, ok := DecodeNOTAM(closure.RawReason)
+			if !ok || !summary.HasDailyClosure() || summary.MatchesValidity(closure.StartsAt, closure.EndsAt) != tc.compatible ||
+				closure.Kind != "airport_closure" || !strings.Contains(closure.Reason, "closed daily 0730-1415") ||
+				closure.EndsAt == nil || !closure.EndsAt.Equal(tc.wantEnd) {
+				t.Fatalf("daily closure notice = %+v", closure)
+			}
+			if tc.compatible && (closure.StartsAt == nil || !closure.StartsAt.Equal(start)) {
+				t.Fatalf("published start was lost: %+v", closure)
+			}
+		})
+	}
+}
+
 func TestAdvisoryGatewayBindsSourceAndRejectsUnusableRecords(t *testing.T) {
 	body := `{"version":1,"advisories":[{"id":"nm-1","kind":"ground_delay","airport":"egll","observedAt":"2026-11-05T00:00:00Z","source":"untrusted-label","delayMinutes":25}]}`
 	client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {

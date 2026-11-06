@@ -54,6 +54,15 @@ type LiveState struct {
 	ObservedEpoch     int64  `json:"observedEpoch"`
 }
 
+// AdvisoryWindow records the exact occurrence a queued alert describes.
+// It is stored with the outbox message for revalidation before delivery.
+type AdvisoryWindow struct {
+	Airport   string
+	Direction string
+	StartsAt  time.Time
+	EndsAt    time.Time
+}
+
 type Message struct {
 	Kind                Kind
 	FlightID            string
@@ -63,7 +72,8 @@ type Message struct {
 	Title               string
 	Body                string
 	CollapseID          string
-	APNsCollapseID      string `json:",omitempty"`
+	APNsCollapseID      string          `json:",omitempty"`
+	AdvisoryWindow      *AdvisoryWindow `json:",omitempty"`
 	State               *LiveState
 	Timestamp           time.Time
 	ExpiresAt           time.Time

@@ -16,7 +16,7 @@ func TestDecodeNOTAMConservesClosureScopeAndQualifiers(t *testing.T) {
 	}{
 		{"full airport", "!SFO SFO AD AP CLSD 2611051900-2611052300", "airport", "Airport closed 2611051900-2611052300", true},
 		{"conditional airport", "!LAX 05/277 LAX AD AP CLSD TO NON SKED TRANSIENT GA ACFT EXC 24HR PPR", "airport", "Airport closed to non-scheduled visiting general aviation aircraft except 24 hr prior permission required", false},
-		{"recurring airport", "AD AP CLSD DLY 0730-1415 2611030730-2611081415", "airport", "Airport closed daily 0730-1415", false},
+		{"recurring airport", "AD AP CLSD DLY 0730-1415 2611030730-2611081415", "airport", "Airport closed daily 0730-1415", true},
 		{"terminal only", "AD AP NOT ATTENDED MAIN TERMINAL CLSD", "airport", "MAIN TERMINAL closed", false},
 		{"partial runway", "!JFK JFK RWY 02 FIRST 1000FT CLSD EXC TAX", "runway", "Runway 02 FIRST 1000 ft closed except taxiing", false},
 		{"taxiway segment", "TWY A BTN TWY B AND RWY 01/19 CLSD", "taxiway", "Taxiway A between taxiway B and runway 01/19 closed", false},
@@ -75,7 +75,7 @@ func TestDecodeNOTAMValidity(t *testing.T) {
 		{"domestic indefinite", "!SFO SFO AD AP CLSD 2611051900-UFN", start, "", true, false, true},
 		{"domestic truncated end", "!SFO SFO AD AP CLSD 2611051900-261105230", start, "", true, false, false},
 		{"ICAO", "(A1234/26 NOTAMN\nA) EGLL B) 2611051900 C) 2611052300\nE) AD CLSD)", start, end, true, true, true},
-		{"ICAO recurring", "A) EGLL B) 2611051900 C) 2611052300 D) DLY 1900-2000 E) AD CLSD", start, end, true, true, false},
+		{"ICAO recurring", "A) EGLL B) 2611051900 C) 2611052300 D) DLY 1900-2000 E) AD CLSD", start, end, true, true, true},
 		{"ICAO empty schedule", "A) EGLL B) 2611051900 C) 2611052300 D) E) AD CLSD", start, end, true, true, false},
 		{"ICAO estimate", "A) EGLL B) 2611051900 C) 2611052300 EST E) AD CLSD", start, end, true, false, true},
 		{"ICAO partial", "A) EGLL C) 2611052300 E) AD CLSD", "", end, true, false, true},
@@ -111,6 +111,111 @@ func TestDecodeNOTAMValidity(t *testing.T) {
 			}
 			checkTime("start", got.StartsAt, test.start)
 			checkTime("end", got.EndsAt, test.end)
+		})
+	}
+}
+
+func TestNextDailyNOTAMClosure(t *testing.T) {
+	const domestic = "!SNA 11/003 SNA AD AP CLSD DLY 0730-1415 2611030730-2611081415"
+	const overnight = "(A1234/26 NOTAMN\nA) EGLL B) 2611052330 C) 2611070030 D) DLY 2200-0200\nE) AD CLSD)"
+	for _, tc := range []struct{ name, raw, at, start, end string }{
+		{"before notice validity", domestic, "2026-11-01T12:00:00Z", "2026-11-03T07:30:00Z", "2026-11-03T14:15:00Z"},
+		{"within daily window", domestic, "2026-11-06T08:00:00Z", "2026-11-06T07:30:00Z", "2026-11-06T14:15:00Z"},
+		{"exact daily end", domestic, "2026-11-06T14:15:00Z", "2026-11-07T07:30:00Z", "2026-11-07T14:15:00Z"},
+		{"before daily start", domestic, "2026-11-07T05:15:00Z", "2026-11-07T07:30:00Z", "2026-11-07T14:15:00Z"},
+		{"exact validity end", domestic, "2026-11-08T14:15:00Z", "", ""},
+		{"clipped overnight start in UTC", overnight, "2026-11-05T19:00:00-05:00", "2026-11-05T23:30:00Z", "2026-11-06T02:00:00Z"},
+		{"clipped overnight end", overnight, "2026-11-06T23:00:00Z", "2026-11-06T22:00:00Z", "2026-11-07T00:30:00Z"},
+		{"after clipped end", overnight, "2026-11-07T01:00:00Z", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			summary, decoded := DecodeNOTAM(tc.raw)
+			if !decoded || !summary.HasDailyClosure() || !summary.FullAirportClosure || !summary.MatchesValidity(nil, nil) {
+				t.Fatalf("daily closure = %+v, %t", summary, decoded)
+			}
+			start, end, ok := summary.NextDailyClosure(instant(t, tc.at))
+			if tc.start == "" {
+				if ok || !start.IsZero() || !end.IsZero() {
+					t.Fatalf("unexpected occurrence %v–%v", start, end)
+				}
+				return
+			}
+			if !ok || start.Format(time.RFC3339) != tc.start || end.Format(time.RFC3339) != tc.end {
+				t.Fatalf("occurrence = %v–%v, %t, want %s–%s", start, end, ok, tc.start, tc.end)
+			}
+		})
+	}
+}
+
+func TestUnqualifiedDailyNOTAMClosureOnly(t *testing.T) {
+	const icao = "A) EGLL B) 2611051900 C) 2611072000 "
+	for _, raw := range []string{
+		"AD AP CLSD DLY 1900-2000",
+		"AD AP CLSD DLY 1900-2000 2611051900-2611072000EST",
+		"AD AP CLSD DLY 1860-2000 2611051900-2611072000",
+		"AD AP CLSD DLY 1900-2400 2611051900-2611072000",
+		"AD AP CLSD DLY 1900-1900 2611051900-2611072000",
+		"AD AP CLSD DLY 1900-2000 2611052100-2611061800",
+		"AD AP CLSD EXC PPR DLY 1900-2000 2611051900-2611072000",
+		"RWY 01 CLSD DLY 1900-2000 2611051900-2611072000",
+		icao + "D) MON-FRI 1900-2000 E) AD CLSD",
+		icao + "D) DLY 1900-2000 2100-2200 E) AD CLSD",
+		icao + "D) DLY 1900-2000 D) DLY 2000-2100 E) AD CLSD",
+		icao + "D) DLY 1900-2000 E) AD CLSD EXC PPR",
+		icao + "D) DLY 1900-2000 E) AD CLSD 2611051900-2611072000",
+		icao + "D) DLY 1900-2000 E) AD CLSD F) 1500FT G) 3000FT",
+	} {
+		if summary, ok := DecodeNOTAM(raw); !ok || summary.HasDailyClosure() || summary.FullAirportClosure {
+			t.Errorf("ambiguous notice %q = %+v, %t", raw, summary, ok)
+		}
+	}
+}
+
+func TestDailyNOTAMClosureBridgePreservesPublishedBounds(t *testing.T) {
+	const raw = "A) EGLL B) 2611051900 C) 2611072000 D) DLY 1900-2000 E) AD CLSD"
+	const reason = "Aerodrome closed. Published schedule daily 1900-2000."
+	start, end := instant(t, "2026-11-05T19:00:00Z"), instant(t, "2026-11-07T20:00:00Z")
+	for _, tc := range []struct {
+		name       string
+		supplied   *time.Time
+		wantEnd    time.Time
+		compatible bool
+	}{
+		{"raw dates only", nil, end, true},
+		{"matching end", &end, end, true},
+		{"conflicting end", new(end.Add(time.Hour)), end.Add(time.Hour), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := Advisory{ID: "daily-closure", Airport: "EGLL", Kind: "airport_closure", RawReason: raw,
+				ObservedAt: start.Add(-time.Hour), EndsAt: tc.supplied}
+			wire, err := json.Marshal(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			push, err := DecodeAdvisoryIngress(strings.NewReader(`{"version":1,"source":"eurocontrol_nm","advisory":` + string(wire) + `}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			gateway, err := NewAdvisoryGateway("https://fixture.invalid/advisories", "", Eurocontrol, &http.Client{Transport: testTransport(func(*http.Request) (*http.Response, error) {
+				return response(http.StatusOK, `{"version":1,"advisories":[`+string(wire)+`]}`)
+			})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			polled, err := gateway.Advisories(t.Context())
+			if err != nil || len(polled) != 1 {
+				t.Fatalf("poll = %+v, %v", polled, err)
+			}
+			for _, got := range []Advisory{push, polled[0]} {
+				summary, ok := DecodeNOTAM(got.RawReason)
+				if !ok || !summary.HasDailyClosure() || summary.MatchesValidity(got.StartsAt, got.EndsAt) != tc.compatible ||
+					got.Kind != "airport_closure" || got.Reason != reason || got.EndsAt == nil || !got.EndsAt.Equal(tc.wantEnd) {
+					t.Fatalf("daily closure = %+v", got)
+				}
+				if tc.compatible && (got.StartsAt == nil || !got.StartsAt.Equal(start)) {
+					t.Fatalf("published start was lost: %+v", got)
+				}
+			}
 		})
 	}
 }

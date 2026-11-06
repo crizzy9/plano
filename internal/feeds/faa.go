@@ -124,18 +124,27 @@ func parseFAANAS(body []byte) ([]Advisory, error) {
 		for _, event := range group.Closures {
 			row := event.advisory("airport_closure", "")
 			row.StartsAt, row.EndsAt = faaTime(event.Start, observed), faaTime(event.Reopen, observed)
-			if strings.HasPrefix(row.RawReason, "!") {
+			summary, decoded := DecodeNOTAM(row.RawReason)
+			if summary.HasDailyClosure() {
+				// Retain a disagreement so flight applicability can reject it.
+				if summary.MatchesValidity(row.StartsAt, row.EndsAt) {
+					row.StartsAt, row.EndsAt = summary.StartsAt, summary.EndsAt
+				}
+				row.Reason = summary.Text
+			} else if strings.HasPrefix(row.RawReason, "!") {
 				row.Kind = "airport_restriction"
 				if start, end := notamTimes(row.RawReason); start != nil {
 					row.StartsAt, row.EndsAt = start, end
 				}
 				row.Reason = explainClosure(row.RawReason)
-				if summary, ok := DecodeNOTAM(row.RawReason); ok {
+				if decoded {
 					row.Reason = summary.Text
 					if summary.FullAirportClosure {
 						row.Kind = "airport_closure"
 					}
 				}
+			} else if decoded && !summary.FullAirportClosure {
+				row.Kind, row.Reason = "airport_restriction", summary.Text
 			}
 			add(row, strings.TrimSpace(event.Start))
 		}

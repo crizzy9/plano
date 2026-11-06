@@ -744,8 +744,13 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 		}
 		defer s.apnsFlightAlerts.Delete(key)
 	}
+	window := job.message.AdvisoryWindow
+	if window != nil && !hasAdvisoryEvidence {
+		s.removeObsoletePush(ctx, logger, job)
+		return
+	}
 	if hasAdvisoryEvidence {
-		revised, err := outboxAdvisoryRevised(ctx, s.db, job.id, time.Now())
+		revised, err := outboxAdvisoryRevised(ctx, s.db, job.id, time.Now(), window != nil)
 		if err != nil {
 			if ctx.Err() == nil {
 				logger.Error("could not validate advisory push evidence", "job", job.id, "error", err)
@@ -761,14 +766,32 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 		// A revision or revocation can retire the job while evidence is read
 		// or while a previous same-family send releases its gate.
 		var leaseExpiry int64
-		if err := s.db.QueryRowContext(ctx, `SELECT o.expires`+leasedRow,
-			job.id, job.deviceID, job.lease).Scan(&leaseExpiry); err != nil {
+		var advisoryFlight []byte
+		if err := s.db.QueryRowContext(ctx, `SELECT o.expires,
+CASE WHEN ? THEN (SELECT snapshot FROM flights WHERE id=o.flight_id) END`+leasedRow,
+			window != nil, job.id, job.deviceID, job.lease).Scan(&leaseExpiry, &advisoryFlight); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
 				logger.Error("could not revalidate push lease", "job", job.id, "error", err)
 			}
 			return
 		}
 		expires = min(expires, leaseExpiry)
+		if window != nil {
+			// Advisory collapse IDs group notice revisions and do not join
+			// to the timeline event that supplied the original operation.
+			var current feeds.Flight
+			if err := json.Unmarshal(advisoryFlight, &current); err != nil {
+				logger.Error("could not validate closure push operation", "job", job.id, "error", err)
+				return
+			}
+			advisory := feeds.Advisory{Kind: "airport_closure", Airport: window.Airport, Direction: window.Direction}
+			target, _, ok := advisoryAlertOperation(current, advisory, time.Now())
+			if !ok || target.Before(window.StartsAt) || !target.Before(window.EndsAt) {
+				s.removeObsoletePush(ctx, logger, job)
+				return
+			}
+			expires = min(expires, window.EndsAt.UnixNano())
+		}
 	}
 	start := time.Now()
 	deadline := time.Unix(0, min(job.lease, expires, start.Add(10*time.Second).UnixNano()))
@@ -784,6 +807,7 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 		job.message.AlertKind = flightEventKind
 		job.message.AlertPhase = flightPhase
 	}
+	job.message.AdvisoryWindow = nil
 	attempt, cancel := context.WithDeadline(ctx, deadline)
 	err = sender.Send(attempt, job.target, job.message)
 	cancel()

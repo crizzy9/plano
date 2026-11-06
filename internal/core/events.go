@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
+	"github.com/crizzy9/plano/internal/push"
 )
 
 // Event is a user-visible change in a flight, separate from its latest snapshot.
@@ -17,6 +18,7 @@ type Event struct {
 	validUntil       *time.Time
 	collapseID       string
 	advisoryEvidence []forecastAdvisory
+	advisoryWindow   *push.AdvisoryWindow
 }
 
 func changes(before, after feeds.Flight, anchors estimateAlertAnchors) ([]Event, estimateAlertAnchors) {

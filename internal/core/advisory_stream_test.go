@@ -50,6 +50,43 @@ func TestAdvisoryEventChecksPublishedNOTAMWindow(t *testing.T) {
 	}
 }
 
+func TestDailyClosureAlertsFollowThePublishedOccurrence(t *testing.T) {
+	now := time.Date(2026, 11, 6, 1, 20, 0, 0, time.UTC)
+	ends := now.Add(25 * time.Minute)
+	flight := noticeFlight(now)
+	row := feeds.Advisory{ID: "closure", Kind: "airport_closure", Source: feeds.FAASWIM,
+		Airport: "KSFO", ObservedAt: now,
+		RawReason: "(A1234/26 NOTAMN\nA) KSFO B) 2611052200 C) 2611070145\nD) DLY 2200-0145\nE) AD CLSD)"}
+	first, ok := advisoryEvent(flight, row, now)
+	if !ok || first.validUntil == nil || !first.validUntil.Equal(ends) ||
+		first.advisoryWindow == nil || !first.advisoryWindow.EndsAt.Equal(ends) || first.advisoryWindow.Direction != "departure" ||
+		!strings.Contains(first.Body, "Nov 6 at 01:45 UTC") {
+		t.Fatalf("overnight event = %+v, %t", first, ok)
+	}
+	if len(first.advisoryEvidence) != 1 || first.advisoryEvidence[0] != advisoryEvidence(row) {
+		t.Fatalf("daily alert rewrote source evidence: %+v", first.advisoryEvidence)
+	}
+	flight.EstimatedDeparture = &ends
+	if _, ok := advisoryEvent(flight, row, now); ok {
+		t.Fatal("closure alert included the published reopening time")
+	}
+	flight.EstimatedDeparture = new(ends.Add(23 * time.Hour))
+	next, ok := advisoryEvent(flight, row, now)
+	if !ok || next.ID == first.ID || next.collapseID != first.collapseID ||
+		next.advisoryWindow == nil || !next.advisoryWindow.EndsAt.Equal(ends.Add(24*time.Hour)) {
+		t.Fatalf("following occurrence event = %+v, %t", next, ok)
+	}
+	legacy := row
+	legacy.Kind = "airport_restriction"
+	if _, ok := advisoryEvent(flight, legacy, now); ok {
+		t.Fatal("legacy daily restriction queued an alert before source refresh")
+	}
+	row.EndsAt = new(ends.Add(24*time.Hour + time.Minute))
+	if _, ok := advisoryEvent(flight, row, now); ok {
+		t.Fatal("conflicting normalized end queued a daily closure alert")
+	}
+}
+
 func TestEndedAdvisorySurvivesDelayedReplayAndSuppressesOldPoll(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "advisory.db"))

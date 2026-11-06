@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -192,6 +193,107 @@ func TestDispatcherKeepsCurrentAdvisoryRetries(t *testing.T) {
 			store.deliver(ctx, sender, slog.New(slog.DiscardHandler), retry[0])
 			if sends != 1 {
 				t.Fatalf("current warning sends = %d", sends)
+			}
+		})
+	}
+}
+
+func TestDispatcherRechecksDailyClosureOccurrenceOnRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		moveArrival time.Duration
+		landed      bool
+		evidence    string
+		wantSend    bool
+	}{
+		{name: "same occurrence", moveArrival: 4 * time.Minute, wantSend: true},
+		{name: "daily gap", moveArrival: 20 * time.Minute},
+		{name: "different occurrence", moveArrival: 24*time.Hour + 4*time.Minute},
+		{name: "wheels on before gate arrival", moveArrival: 4 * time.Minute, landed: true},
+		{name: "missing evidence", moveArrival: 4 * time.Minute, evidence: "missing"},
+		{name: "expired evidence", moveArrival: 4 * time.Minute, evidence: "expired"},
+		{name: "withdrawn evidence", moveArrival: 4 * time.Minute, evidence: "withdrawn"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, owner, id := dispatcherFixture(t)
+			ctx := t.Context()
+			flight, err := store.Flight(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			start := now.Truncate(time.Minute).Add(-10 * time.Minute)
+			end := start.Add(20 * time.Minute)
+			flight.ObservedAt, flight.ScheduledArrival = now, new(now.Add(2*time.Minute))
+			if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Track(ctx, owner, id, ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Register(ctx, owner, Device{Platform: "ios", Kind: "alert", Token: "fixture-device"}, now); err != nil {
+				t.Fatal(err)
+			}
+			const stamp = "0601021504"
+			advisory := feeds.Advisory{ID: "daily-closure", Source: feeds.FAASWIM, Airport: "SFO", Direction: "arrival",
+				Kind: "airport_closure", ObservedAt: now,
+				RawReason: fmt.Sprintf("!SFO SFO AD AP CLSD DLY %s-%s %s-%s", start.Format("1504"), end.Format("1504"),
+					start.AddDate(0, 0, -1).Format(stamp), end.AddDate(0, 0, 1).Format(stamp))}
+			publishDispatchAdvisory(t, store, advisory, now)
+			jobs, err := store.claim(ctx, now, 1)
+			if err != nil || len(jobs) != 1 {
+				t.Fatalf("initial closure jobs = %+v, error = %v", jobs, err)
+			}
+			window := jobs[0].message.AdvisoryWindow
+			if window == nil || window.Airport != "SFO" || window.Direction != "arrival" ||
+				!window.StartsAt.Equal(start) || !window.EndsAt.Equal(end) || !jobs[0].message.ExpiresAt.Equal(end) {
+				t.Fatalf("closure job window = %+v, expires = %v, want %s to %s", window, jobs[0].message.ExpiresAt, start, end)
+			}
+			if err := store.resolve(ctx, jobs[0], &push.DeliveryError{Retryable: true}, now); err != nil {
+				t.Fatal(err)
+			}
+			retry, err := store.claim(ctx, now.Add(time.Second), 1)
+			if err != nil || len(retry) != 1 || retry[0].id != jobs[0].id || retry[0].attempts != 1 {
+				t.Fatalf("retried closure jobs = %+v, error = %v", retry, err)
+			}
+			flight.ObservedAt, flight.EstimatedArrival = time.Now().UTC(), new(now.Add(tc.moveArrival))
+			if tc.landed {
+				flight.ActualLanding = new(now.Add(-time.Minute))
+			}
+			if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			switch tc.evidence {
+			case "missing":
+				if _, err := store.db.ExecContext(ctx, `DELETE FROM pushed_advisories WHERE source=? AND id=?`, advisory.Source, advisory.ID); err != nil {
+					t.Fatal(err)
+				}
+			case "expired":
+				if _, err := store.db.ExecContext(ctx, `UPDATE pushed_advisories SET expires_ns=? WHERE source=? AND id=?`, now.UnixNano(), advisory.Source, advisory.ID); err != nil {
+					t.Fatal(err)
+				}
+			case "withdrawn":
+				withdrawal := advisory
+				withdrawal.Kind, withdrawal.ObservedAt = "cancelled", flight.ObservedAt
+				publishDispatchAdvisory(t, store, withdrawal, flight.ObservedAt)
+			}
+			sent := false
+			sender := pushFunc(func(_ context.Context, _ push.Target, msg push.Message) error {
+				if msg.Title != "SFO · airport closure" || msg.AdvisoryWindow != nil || !msg.ExpiresAt.Equal(end) {
+					t.Fatalf("unexpected provider message: %+v", msg)
+				}
+				sent = true
+				return nil
+			})
+			store.deliver(ctx, sender, slog.New(slog.DiscardHandler), retry[0])
+			if sent != tc.wantSend {
+				t.Fatalf("closure alert sent = %t, want %t", sent, tc.wantSend)
+			}
+			if !sent {
+				var pending int
+				if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE id=?`, retry[0].id).Scan(&pending); err != nil || pending != 0 {
+					t.Fatalf("obsolete closure job rows = %d, error = %v", pending, err)
+				}
 			}
 		})
 	}

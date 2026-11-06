@@ -705,7 +705,8 @@ func saveEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event, no
 	if collapseID == "" {
 		collapseID = event.ID
 	}
-	msg := push.Message{Kind: push.Alert, FlightID: flightID, Title: event.Title, Body: truncate(event.Body, 180), Timestamp: event.At, ExpiresAt: expires, CollapseID: collapseID}
+	msg := push.Message{Kind: push.Alert, FlightID: flightID, Title: event.Title, Body: truncate(event.Body, 180),
+		Timestamp: event.At, ExpiresAt: expires, CollapseID: collapseID, AdvisoryWindow: event.advisoryWindow}
 	return enqueueWithAdvisories(ctx, tx, flightID, msg, event.advisoryEvidence, `SELECT d.id FROM devices d JOIN tracked t ON t.owner=d.owner WHERE t.flight_id=? AND d.kind='alert'`, flightID)
 }
 

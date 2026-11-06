@@ -23,9 +23,9 @@ CREATE TABLE IF NOT EXISTS pushed_advisory_predecessors (
   PRIMARY KEY(source,id,observed_ns), FOREIGN KEY(source,id) REFERENCES pushed_advisories(source,id) ON DELETE CASCADE
 );`
 
-func outboxAdvisoryRevised(ctx context.Context, db rowQueryer, jobID int64, now time.Time) (bool, error) {
+func outboxAdvisoryRevised(ctx context.Context, db rowQueryer, jobID int64, now time.Time, requireCurrent bool) (bool, error) {
 	return advisoryEvidenceRevised(ctx, db, `SELECT source,advisory_id,observed_ns,state_hash,COALESCE(airport,'')
-FROM outbox_advisory_evidence LEFT JOIN outbox_advisory_scopes USING(outbox_id,source,advisory_id) WHERE outbox_id=?`, jobID, now)
+FROM outbox_advisory_evidence LEFT JOIN outbox_advisory_scopes USING(outbox_id,source,advisory_id) WHERE outbox_id=?`, jobID, now, requireCurrent)
 }
 
 func linkOutboxAdvisories(ctx context.Context, tx *sql.Tx, jobs *sql.Rows, evidence []forecastAdvisory) error {

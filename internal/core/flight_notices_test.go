@@ -142,6 +142,32 @@ func TestFlightNoticesExpireAtPublishedNOTAMEnd(t *testing.T) {
 	}
 }
 
+func TestFlightNoticesExposeOnlyTheMatchingDailyClosure(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "notices.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 11, 6, 1, 20, 0, 0, time.UTC)
+	flight := noticeFlight(now)
+	start, end := now.Add(-3*time.Hour-20*time.Minute), now.Add(25*time.Minute)
+	row := feeds.Advisory{ID: "daily", Source: feeds.FAASWIM, Kind: "airport_closure", Airport: "KSFO",
+		ObservedAt: now, RawReason: "!SFO SFO AD AP CLSD DLY 2200-0145 2611052200-2611070145"}
+	if err := store.cachePolledFlightNotices(t.Context(), row.Source, []feeds.Advisory{row}, now); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := store.FlightNotices(t.Context(), flight, now)
+	if err != nil || len(notices) != 1 || notices[0].StartsAt == nil || !notices[0].StartsAt.Equal(start) ||
+		notices[0].EndsAt == nil || !notices[0].EndsAt.Equal(end) || !notices[0].ValidUntil.Equal(end) ||
+		!strings.Contains(notices[0].Summary, "daily 2200-0145") {
+		t.Fatalf("notices = %+v, %v, want actual closure window %s to %s", notices, err, start, end)
+	}
+	flight.EstimatedDeparture = &end
+	if notices, err := store.FlightNotices(t.Context(), flight, now); err != nil || len(notices) != 0 {
+		t.Fatalf("notice during schedule gap = %+v, %v", notices, err)
+	}
+}
+
 func TestFlightNoticesPreferSignedRevisionAndKeepEndedTombstone(t *testing.T) {
 	ctx := t.Context()
 	s, err := Open(filepath.Join(t.TempDir(), "notices.db"))

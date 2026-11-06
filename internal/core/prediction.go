@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	inboundForecastTTL  = 30 * time.Minute
-	inboundReasonPrefix = "Inbound flight "
+	inboundForecastTTL   = 30 * time.Minute
+	inboundReasonPrefix  = "Inbound flight "
+	closureForecastLimit = 24 * time.Hour
 )
 
 // Prediction preserves the official schedule and labels the inputs behind an estimate.
@@ -65,7 +66,7 @@ func PredictWithModel(model *predict.Model, flight feeds.Flight, rotation []feed
 	forecast.AdvisoryEvidence = inputs.advisories
 	departure := scheduled.Add(time.Duration(minutes * float64(time.Minute)))
 	if closure := departureClosureFloor(flight, advisories, now, departure); !closure.end.IsZero() {
-		if closure.end.Sub(scheduled) > 24*time.Hour {
+		if closure.end.Sub(scheduled) > closureForecastLimit {
 			return nil
 		}
 		departure = closure.end
@@ -173,6 +174,13 @@ func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now
 		airport, source        string
 		evidence               forecastAdvisory
 	}
+	if departure.Before(now) {
+		departure = now
+	}
+	horizon := flight.ScheduledDeparture.Add(closureForecastLimit)
+	if horizon.Before(departure) {
+		horizon = departure
+	}
 	var closures []closureWindow
 	for _, a := range advisories {
 		if a.Kind != "airport_closure" || a.Direction != "" && a.Direction != "departure" ||
@@ -197,6 +205,22 @@ func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now
 		if !freshUntil.After(now) || timed.EndsAt == nil {
 			continue
 		}
+		window := closureWindow{freshUntil: freshUntil, airport: a.Airport, source: a.Source, evidence: advisoryEvidence(a)}
+		if summary.HasDailyClosure() {
+			// Only expand occurrences that the closure chain can reach before
+			// the forecast limit, regardless of the full notice's duration.
+			for at := departure; !at.After(horizon); {
+				start, end, ok := summary.NextDailyClosure(at)
+				if !ok || start.After(horizon) {
+					break
+				}
+				window.start, window.end = start, end
+				window.freshUntil = earliestTime(freshUntil, end)
+				closures = append(closures, window)
+				at = end
+			}
+			continue
+		}
 		start := timed.ObservedAt
 		if timed.StartsAt != nil {
 			start = *timed.StartsAt
@@ -204,15 +228,13 @@ func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now
 		if !timed.EndsAt.After(start) {
 			continue
 		}
-		closures = append(closures, closureWindow{start: start, end: *timed.EndsAt, freshUntil: freshUntil,
-			airport: a.Airport, source: a.Source, evidence: advisoryEvidence(a)})
+		window.start, window.end = start, *timed.EndsAt
+		closures = append(closures, window)
 	}
 	slices.SortStableFunc(closures, func(a, b closureWindow) int { return a.start.Compare(b.start) })
-	if departure.Before(now) {
-		departure = now
-	}
 	var last closureWindow
 	adjustment := closureAdjustment{validUntil: now.Add(advisoryForecastTTL)}
+	applied := make(map[forecastAdvisory]bool)
 	for _, closure := range closures {
 		if closure.start.After(departure) {
 			break
@@ -220,7 +242,10 @@ func departureClosureFloor(flight feeds.Flight, advisories []feeds.Advisory, now
 		if closure.end.After(departure) {
 			departure, last = closure.end, closure
 			adjustment.validUntil = earliestTime(adjustment.validUntil, closure.freshUntil)
-			adjustment.advisories = append(adjustment.advisories, closure.evidence)
+			if !applied[closure.evidence] {
+				adjustment.advisories = append(adjustment.advisories, closure.evidence)
+				applied[closure.evidence] = true
+			}
 		}
 	}
 	if last.end.IsZero() {

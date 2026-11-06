@@ -10,15 +10,22 @@ import (
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
+	"github.com/crizzy9/plano/internal/push"
 )
 
 func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, bool) {
 	// Keep the original payload for dispatch-time revision checks, even when
 	// an older record needs its fixed NOTAM times supplied at this boundary.
 	original := a
+	decoded, recognized := feeds.DecodeNOTAM(a.RawReason)
 	var decodedAirport string
-	if decoded, ok := feeds.DecodeNOTAM(a.RawReason); ok {
+	if recognized {
 		if decoded.Scope == "cancellation" {
+			return Event{}, false
+		}
+		// Older snapshots classified daily closures as restrictions. Leave
+		// them as context until a source supplies a full closure revision.
+		if a.Kind == "airport_restriction" && decoded.HasDailyClosure() {
 			return Event{}, false
 		}
 		if a.Kind == "airport_closure" && decoded.HasValidity {
@@ -29,16 +36,10 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, 
 			decodedAirport = decoded.Airport
 		}
 	}
-	validUntil := advisoryForecastValidity(a, at)
-	if !validUntil.After(at) {
+	target, arrivalProgram, pending := advisoryAlertOperation(flight, a, at)
+	if !pending {
 		return Event{}, false
 	}
-	target := advisoryTime(flight, a)
-	if target == nil || target.Before(at.Add(-time.Hour)) {
-		return Event{}, false
-	}
-	arrivalProgram := a.Kind != "ground_stop" && a.Direction != "departure" &&
-		(a.Airport == flight.Destination || a.Airport == flight.DestinationICAO)
 	code, icao := flight.Origin, flight.OriginICAO
 	if arrivalProgram {
 		code, icao = flight.Destination, flight.DestinationICAO
@@ -46,24 +47,51 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time) (Event, 
 	if decodedAirport != "" && decodedAirport != code && decodedAirport != icao {
 		return Event{}, false
 	}
-	if arrivalProgram && (flight.ActualArrival != nil || finished(flight)) || !arrivalProgram && !flightBeforeDeparture(flight) {
+	a, active := advisoryOccurrence(a, decoded, target, at)
+	if !active || a.StartsAt != nil && a.StartsAt.After(target) || a.EndsAt != nil && !a.EndsAt.After(target) {
 		return Event{}, false
 	}
-	if target.Before(at) {
-		target = &at
-	}
-	if a.StartsAt != nil && a.StartsAt.After(*target) || a.EndsAt != nil && !a.EndsAt.After(*target) {
+	validUntil := advisoryForecastValidity(a, at)
+	if !validUntil.After(at) {
 		return Event{}, false
 	}
 	body := a.Reason
-	if body == "" {
-		body = flight.Number
-	}
 	family := hash(flight.ID + "\x00advisory\x00" + a.Source + "\x00" + a.ID)
 	evidence := advisoryEvidence(original)
-	return Event{ID: hash(family + "\x00" + evidence.StateHash), Kind: a.Kind,
+	revision := family + "\x00" + evidence.StateHash
+	var window *push.AdvisoryWindow
+	if a.Kind == "airport_closure" && decoded.HasDailyClosure() {
+		body = "Published closure window ends " + a.EndsAt.UTC().Format("Jan 2 at 15:04 UTC") + "."
+		direction := "departure"
+		if arrivalProgram {
+			direction = "arrival"
+		}
+		window = &push.AdvisoryWindow{Airport: a.Airport, Direction: direction, StartsAt: *a.StartsAt, EndsAt: *a.EndsAt}
+		revision += "\x00" + direction + "\x00" + a.StartsAt.UTC().Format(time.RFC3339)
+	} else if body == "" {
+		body = flight.Number
+	}
+	return Event{ID: hash(revision), Kind: a.Kind,
 		Title: fmt.Sprintf("%s · %s", a.Airport, strings.ReplaceAll(a.Kind, "_", " ")), Body: body, At: at,
-		validUntil: &validUntil, collapseID: family, advisoryEvidence: []forecastAdvisory{evidence}}, true
+		validUntil: &validUntil, collapseID: family, advisoryEvidence: []forecastAdvisory{evidence}, advisoryWindow: window}, true
+}
+
+func advisoryAlertOperation(flight feeds.Flight, a feeds.Advisory, at time.Time) (time.Time, bool, bool) {
+	target := advisoryTime(flight, a)
+	if target == nil || target.Before(at.Add(-time.Hour)) {
+		return time.Time{}, false, false
+	}
+	arrival := a.Kind != "ground_stop" && a.Direction != "departure" &&
+		(a.Airport == flight.Destination || a.Airport == flight.DestinationICAO)
+	closureOperationEnded := a.Kind == "airport_closure" && (flight.ActualLanding != nil || flight.ActualArrival != nil ||
+		flight.Status == "landed" || flight.Status == "diverted")
+	if closureOperationEnded || arrival && (flight.ActualArrival != nil || finished(flight)) || !arrival && !flightBeforeDeparture(flight) {
+		return time.Time{}, false, false
+	}
+	if target.Before(at) {
+		return at, arrival, true
+	}
+	return *target, arrival, true
 }
 
 // PublishAdvisory commits the normalized program and affected flight alert
