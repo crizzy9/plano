@@ -64,12 +64,16 @@ func (s Server) revokePickupLink(w http.ResponseWriter, r *http.Request, owner s
 }
 
 const pickupStyle = `
-:root{color-scheme:light dark;--page:#f4f7f3;--card:#fff;--ink:#142b24;--muted:#49625a;--line:#d9e4dd;--accent:#167653}
-@media(prefers-color-scheme:dark){:root{--page:#111b19;--card:#182724;--ink:#eef7f2;--muted:#b0c7bc;--line:#38524a;--accent:#7bd5ab}}
+:root{color-scheme:light dark;--page:#f4f7f3;--card:#fff;--ink:#142b24;--muted:#49625a;--line:#d9e4dd;--accent:#167653;--water:#e8f1ef;--land:#c6dbd0}
+@media(prefers-color-scheme:dark){:root{--page:#111b19;--card:#182724;--ink:#eef7f2;--muted:#b0c7bc;--line:#38524a;--accent:#7bd5ab;--water:#172a29;--land:#304a41}}
 *{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font:1rem/1.5 system-ui,sans-serif}
 main{max-width:40rem;margin:0 auto;padding:clamp(1.25rem,5vw,3rem)}header{margin-bottom:1.4rem}.brand{color:var(--accent);font-size:1.15rem;font-weight:750}h1{font-size:clamp(1.8rem,8vw,3.2rem);line-height:1.12;margin:.5rem 0}.muted{color:var(--muted)}
-section{background:var(--card);border:1px solid var(--line);border-radius:1rem;padding:1.35rem}h2{font-size:1rem;margin:0;color:var(--muted);font-weight:600}.arrival{font-weight:750;font-size:1.5rem;margin:.2rem 0}.status{font-weight:650;color:var(--accent);margin:0}
+section{background:var(--card);border:1px solid var(--line);border-radius:1rem;padding:1.35rem}h2{font-size:1rem;margin:0;color:var(--muted);font-weight:600}.arrival{font-weight:750;font-size:clamp(1.15rem,5.4vw,1.5rem);font-variant-numeric:tabular-nums;text-wrap:balance;margin:.2rem 0}.status{font-weight:650;color:var(--accent);margin:0}
 dl{margin:1rem 0 0;display:grid;grid-template-columns:repeat(auto-fit,minmax(7rem,1fr));gap:1rem}dt{font-size:.9rem;color:var(--muted)}dd{margin:0;font-weight:650}footer{margin-top:1rem;font-size:.9rem}
+.route-map{margin:1.4rem 0 0}.route-map h2{color:var(--ink);font-weight:700}.route-map p{font-size:.9rem;margin:.2rem 0 .7rem;font-variant-numeric:tabular-nums}
+.route-map svg{display:block;width:100%;height:auto;overflow:hidden;border:1px solid var(--line);border-radius:.85rem;background:var(--water)}
+.route-land{fill:var(--land)}.route-track{fill:none;stroke:var(--accent);stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}.route-fix{fill:var(--accent)}.route-latest{fill:var(--ink);stroke:var(--water);stroke-width:1.7}
+.map-credit{display:block;text-align:right;margin-top:.3rem;font-size:.75rem}
 `
 
 var pickupTemplate = template.Must(template.New("pickup").Parse(`<!doctype html>
@@ -78,7 +82,13 @@ var pickupTemplate = template.Must(template.New("pickup").Parse(`<!doctype html>
 <section aria-label="Arrival details"><p class="status">{{.Status}}</p>{{if .Notice}}<p>{{.Notice}}</p>{{end}}{{if .Arrival}}<h2>{{.ArrivalLabel}}</h2><p class="arrival">{{.Arrival}}</p>{{end}}
 {{if .Scheduled}}<p class="muted">Scheduled {{.Scheduled}}</p>{{end}}<dl>
 {{with .Flight.ArrivalTerminal}}<div><dt>Terminal</dt><dd>{{.}}</dd></div>{{end}}{{with .Flight.ArrivalGate}}<div><dt>Gate</dt><dd>{{.}}</dd></div>{{end}}{{with .Flight.Baggage}}<div><dt>Baggage carousel</dt><dd>{{.}}</dd></div>{{end}}
-</dl></section><footer class="muted">Observed {{.Flight.ObservedAt.UTC.Format "15:04 UTC on 02 Jan 2006"}}.{{if .Stale}} Status may be out of date.{{end}}{{if .Demo}} Synthetic demo flight.{{end}}</footer></main></body></html>`))
+</dl></section>{{with .Map}}<figure class="route-map" aria-labelledby="route-title"><figcaption><h2 id="route-title">{{if .Path}}Reported flight path{{else}}Reported flight position{{end}}</h2>
+<p class="muted">Latest recorded position at {{.ObservedAt.UTC.Format "15:04 UTC on 02 Jan 2006"}}.</p></figcaption>
+<svg viewBox="0 0 360 180" role="img" aria-label="Map of recorded flight positions with the latest position marked">
+<defs><path id="pickup-land" d="{{.Coastline}}"/></defs><g class="route-land" transform="{{.LandTransform}}">{{range .Worlds}}<use href="#pickup-land" x="{{.}}"/>{{end}}</g>
+{{if .Path}}<path class="route-track" d="{{.Path}}"/>{{end}}{{range .Dots}}<circle class="route-fix" cx="{{.X}}" cy="{{.Y}}" r="2.3"/>{{end}}
+<circle class="route-latest" cx="{{.Latest.X}}" cy="{{.Latest.Y}}" r="4.8"/></svg><small class="map-credit muted">{{if eq $.Flight.Source "plano_demo"}}Synthetic positions{{else}}Positions from FlightAware{{end}} · Map data from Natural Earth</small></figure>{{end}}
+<footer class="muted">Flight status observed {{.Flight.ObservedAt.UTC.Format "15:04 UTC on 02 Jan 2006"}}.{{if .Stale}} Status may be out of date.{{end}}{{if .Demo}} Synthetic demo flight.{{end}}</footer></main></body></html>`))
 
 func (s Server) shared(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
@@ -87,12 +97,13 @@ func (s Server) shared(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
-	flight, err := s.Store.Shared(r.Context(), token, now)
+	flight, positions, err := s.Store.SharedPickup(r.Context(), token, now)
 	if err != nil {
 		s.failure(w, err)
 		return
 	}
-	view := pickupView(flight, now, s.Demo)
+	view := pickupView(flight, now, s.Demo || flight.Source == "plano_demo")
+	view.Map = pickupMap(positions)
 	checksum := sha256.Sum256([]byte(pickupStyle))
 	w.Header().Set("Content-Security-Policy", fmt.Sprintf("default-src 'none'; style-src 'sha256-%s'; base-uri 'none'; frame-ancestors 'none'", base64.StdEncoding.EncodeToString(checksum[:])))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -105,6 +116,7 @@ type pickupPage struct {
 	Flight                                           feeds.Flight
 	Status, ArrivalLabel, Arrival, Scheduled, Notice string
 	Demo, Refresh, Stale                             bool
+	Map                                              *pickupTrackMap
 }
 
 func pickupView(f feeds.Flight, now time.Time, demo bool) pickupPage {

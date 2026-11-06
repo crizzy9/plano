@@ -5,7 +5,12 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"slices"
 	"time"
+
+	"github.com/crizzy9/plano/internal/feeds"
 )
 
 const pickupSchema = `
@@ -24,6 +29,55 @@ type PickupLink struct {
 	FlightID  string     `json:"flightId"`
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 	ExpiresAt time.Time  `json:"expiresAt"`
+}
+
+// SharedPickup resolves a pickup capability and its provider track in the
+// same database snapshot. Local receiver fixes are installation-only.
+func (s *Store) SharedPickup(ctx context.Context, token string, now time.Time) (feeds.Flight, []feeds.Position, error) {
+	var flight feeds.Flight
+	var snapshot, telemetry []byte
+	err := s.db.QueryRowContext(ctx, `SELECT f.snapshot,f.telemetry FROM shares s
+JOIN tracked t ON t.owner=s.owner AND t.flight_id=s.flight_id
+JOIN flights f ON f.id=s.flight_id
+WHERE s.token_hash=? AND s.expires>?`, hash(token), now.UnixNano()).Scan(&snapshot, &telemetry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return flight, nil, ErrNotFound
+	}
+	if err != nil {
+		return flight, nil, err
+	}
+	if err := json.Unmarshal(snapshot, &flight); err != nil {
+		return flight, nil, err
+	}
+	if flight.Status == "cancelled" || (flight.Source != "flightaware_aeroapi" && flight.Source != "plano_demo") {
+		return flight, nil, nil
+	}
+	var positions []feeds.Position
+	if err := json.Unmarshal(telemetry, &positions); err != nil {
+		return flight, nil, err
+	}
+	return flight, pickupTrack(flight, positions, now), nil
+}
+
+func pickupTrack(flight feeds.Flight, positions []feeds.Position, now time.Time) []feeds.Position {
+	start, end := now.Add(-25*time.Hour), now.Add(30*time.Second)
+	if flight.ActualTakeoff != nil && flight.ActualTakeoff.After(start) {
+		start = *flight.ActualTakeoff
+	}
+	if flight.ActualLanding != nil && flight.ActualLanding.Before(end) {
+		end = *flight.ActualLanding
+	}
+	positions = slices.DeleteFunc(positions, func(p feeds.Position) bool {
+		return p.Source != flight.Source || p.At.Before(start) || p.At.After(end) ||
+			p.Latitude < -90 || p.Latitude > 90 || p.Longitude < -180 || p.Longitude > 180
+	})
+	slices.SortStableFunc(positions, func(a, b feeds.Position) int { return a.At.Compare(b.At) })
+	positions = slices.CompactFunc(positions, func(a, b feeds.Position) bool { return a.At.Equal(b.At) })
+	// Preserve the observation cadence for gap detection before rendering.
+	for i, p := range positions {
+		positions[i] = feeds.Position{Latitude: p.Latitude, Longitude: p.Longitude, At: p.At.UTC()}
+	}
+	return positions
 }
 
 func (s *Store) CreatePickupLink(ctx context.Context, owner, flightID string, now, expires time.Time) (PickupLink, string, error) {

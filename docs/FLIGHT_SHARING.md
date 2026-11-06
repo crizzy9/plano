@@ -18,4 +18,6 @@ Alerts apply to new events on flights your friend has shared. A shared flight st
 
 On a tracked flight, tap **Share live link** to generate a 72-hour link. The pickup page distinguishes scheduled, estimated, and actual gate arrival. A diversion asks the viewer to check the pickup airport with the airline. It refreshes while the flight is active.
 
+When the server has recent cached provider positions, the page maps the reported path and timestamps the latest position. Gaps remain visible when reports are more than five minutes apart. The self-hosted server supplies the map and keeps local receiver reports, seat assignments, and bookings private. A page can still show arrival details while the track is unavailable. Operators should use pickup links within the distribution terms of their FlightAware agreement. [AeroAPI terms by tier](https://www.flightaware.com/commercial/aeroapi/)
+
 Anyone holding the link can open it without a Plano account. Use **Manage pickup links** to revoke one link. Untracking the flight removes its public links. A Friends grant is independent of any public pickup link.
