@@ -322,16 +322,17 @@ operator-managed reservation bridge with licensed access. Restrict enrollment
 on publicly reachable deployments and apply lookup limits at the bridge.
 [Reservation gateway contract](RESERVATION_GATEWAY.md)
 
-Set `PLANO_COLLECT_DELAY_SAMPLES=true` in live mode to collect one forecast
-snapshot per flight from 30 to 120 minutes before scheduled gate-out, with
-its eventual reported outcome. Confirm that your source license permits model
-training. AeroAPI capture starts when a provider flight ID is verified. A
-schedule entry and a direct search result for that same instance share the
-first captured forecast and its outcome. A later cancellation or invalid
-gate-out correction removes the outcome from exports. A valid correction keeps
-the original forecast features and schedule. Exports hash the flight ID and
-omit legacy schedule aliases whose capture identity cannot be verified. From
-the running Compose project:
+Set `PLANO_COLLECT_DELAY_SAMPLES=true` in live mode to collect the first forecast
+snapshot per flight in each of two lead windows. The standard window runs from
+30 minutes through two hours before scheduled gate-out. The early window starts
+more than two hours and up to 25 hours before gate-out. Confirm that your source
+license permits model training. AeroAPI capture starts when a provider flight
+ID is verified. A schedule entry and a direct search result for that same
+instance share the first captured forecast in each window. A later cancellation
+or invalid gate-out correction removes the outcome from exports. A valid
+correction keeps the original forecast features and schedule. Exports hash
+the flight ID and omit legacy schedule aliases whose capture identity cannot
+be verified. Export the standard cohort from the running Compose project.
 
 ```sh
 umask 077
@@ -344,8 +345,23 @@ The trainer reports holdout metrics on stderr and writes an artifact only if
 the default backtest gate passes. Mount a validated artifact read-only and
 set `PLANO_DELAY_MODEL_FILE` to its container path. [Delay model training](../cmd/plano-train/README.md)
 
+Export and fit the early cohort separately.
+
+```sh
+docker compose exec -T plano plano export-delay-samples --early > early-examples.jsonl
+docker compose exec -T plano plano-train -input - -output - \
+  < early-examples.jsonl > early-delay-model.json
+```
+
+Mount the validated early artifact read-only and set
+`PLANO_EARLY_DELAY_MODEL_FILE` to its container path. Plano uses it for forecasts
+made more than two hours before scheduled departure and uses the standard model
+at shorter lead times. The estimator falls back to its operational calculation
+when the selected model does not support the observed inputs.
+
 To measure a deployed model on separately collected later outcomes, use the
-path mounted inside the container and a later sample export.
+path mounted inside the container and a later sample export from the same lead
+window.
 
 ```sh
 docker compose exec -T plano plano-train \

@@ -4,6 +4,8 @@ Use historical flight snapshots from a source you are allowed to retain for trai
 
 Plano's live AeroAPI collector keys forecasts by the verified provider flight ID. A later result reached through a schedule alias updates the same outcome. Exports omit older schedule aliases that lack capture-time identity. Use a fresh export when comparing physical-flight counts with earlier datasets. [AeroAPI flight ID availability](https://support.flightaware.com/hc/en-us/articles/33161341318935-Why-Is-A-Frequently-Used-Endpoint-Returning-A-Null-Value)
 
+The default `plano export-delay-samples` command exports the standard cohort, collected 30 minutes to two hours before departure. Use `plano export-delay-samples --early` for observations more than two and up to 25 hours ahead. The same flight can appear once in each export with the same hashed identity. Train and evaluate each cohort separately and mount the early fit using `PLANO_EARLY_DELAY_MODEL_FILE`. [Collector and model settings](../../docs/SELF_HOSTING.md#airport-routing-imports-and-delay-models)
+
 Prepare a JSON Lines file with one object per line. This example shows the format. Its values are illustrative.
 
 ```json

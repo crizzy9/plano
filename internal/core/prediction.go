@@ -38,6 +38,13 @@ type forecastInputs struct {
 	advisories []forecastAdvisory
 }
 
+func (s *Store) delayModelFor(flight feeds.Flight, now time.Time) *predict.Model {
+	if s.earlyDelayModel != nil && flight.ScheduledDeparture != nil && flight.ScheduledDeparture.Sub(now) > earlyDelayBoundary {
+		return s.earlyDelayModel
+	}
+	return s.delayModel
+}
+
 // Predict uses independent operational constraints as lower bounds, avoiding double
 // counting when an airline's existing estimate already includes a disruption.
 func Predict(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, now time.Time) *Prediction {

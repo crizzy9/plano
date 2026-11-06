@@ -155,6 +155,14 @@ func (m *Model) Save(output io.Writer) error {
 
 func (m *Model) ID() string { return m.id }
 
+// MaxLeadMinutes reports the earliest forecast lead supported by the fit.
+func (m *Model) MaxLeadMinutes() float64 {
+	if m == nil || m.id == "" {
+		return 0
+	}
+	return m.artifact.Terms[featureCount-1].Max
+}
+
 // Contribution is a signed change from the historical training baseline.
 type Contribution struct {
 	Feature string  `json:"feature"`

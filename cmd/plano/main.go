@@ -59,8 +59,15 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) == 2 && os.Args[1] == "export-delay-samples" {
-		if err := core.ExportDelaySamples(context.Background(), env("PLANO_DB", "plano.db"), os.Stdout); err != nil {
+	if len(os.Args) > 1 && os.Args[1] == "export-delay-samples" {
+		export := core.ExportDelaySamples
+		if len(os.Args) == 3 && os.Args[2] == "--early" {
+			export = core.ExportEarlyDelaySamples
+		} else if len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: plano export-delay-samples [--early]")
+			os.Exit(2)
+		}
+		if err := export(context.Background(), env("PLANO_DB", "plano.db"), os.Stdout); err != nil {
 			logger.Error("delay sample export failed", "error", err)
 			os.Exit(1)
 		}
@@ -81,7 +88,7 @@ func main() {
 	}
 	checkOnly := len(os.Args) == 2 && os.Args[1] == "check-config"
 	if len(os.Args) > 1 && !checkOnly {
-		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples|forward-email|forward-advisory]")
+		fmt.Fprintln(os.Stderr, "usage: plano [check-config|healthcheck|backup <destination.db>|export-delay-samples [--early]|forward-email|forward-advisory]")
 		os.Exit(2)
 	}
 	if err := run(logger, checkOnly); err != nil {
@@ -328,16 +335,18 @@ func run(logger *slog.Logger, checkOnly bool) error {
 			return errors.New("PLANO_ADSB_REFRESH_INTERVAL must be between 3s and 60s")
 		}
 	}
-	var delayModel *predict.Model
-	if path := os.Getenv("PLANO_DELAY_MODEL_FILE"); path != "" && !demo {
-		file, err := os.Open(path)
+	var delayModel, earlyDelayModel *predict.Model
+	if !demo {
+		delayModel, err = loadDelayModel("PLANO_DELAY_MODEL_FILE")
 		if err != nil {
-			return errors.New("cannot open PLANO_DELAY_MODEL_FILE")
+			return err
 		}
-		delayModel, err = predict.Load(file)
-		_ = file.Close()
+		earlyDelayModel, err = loadDelayModel("PLANO_EARLY_DELAY_MODEL_FILE")
 		if err != nil {
-			return fmt.Errorf("load delay model: %w", err)
+			return err
+		}
+		if earlyDelayModel != nil && earlyDelayModel.MaxLeadMinutes() <= 120 {
+			return errors.New("PLANO_EARLY_DELAY_MODEL_FILE requires a model trained with lead times above 120 minutes")
 		}
 	}
 	var historicalRisk *historicalrisk.Model
@@ -364,7 +373,9 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		logger.Info("plano configuration valid", "demo", demo, "apns", sender.APNs != nil, "fcm", sender.FCM != nil)
 		return nil
 	}
-	store, err := core.OpenWithOptions(env("PLANO_DB", "plano.db"), core.StoreOptions{DelayModel: delayModel, CollectDelaySamples: collectSamples && !demo})
+	store, err := core.OpenWithOptions(env("PLANO_DB", "plano.db"), core.StoreOptions{
+		DelayModel: delayModel, EarlyDelayModel: earlyDelayModel, CollectDelaySamples: collectSamples && !demo,
+	})
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -418,6 +429,23 @@ func run(logger *slog.Logger, checkOnly bool) error {
 		defer cancel()
 		return server.Shutdown(shutdown)
 	}
+}
+
+func loadDelayModel(name string) (*predict.Model, error) {
+	path := os.Getenv(name)
+	if path == "" {
+		return nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open %s", name)
+	}
+	defer file.Close()
+	model, err := predict.Load(file)
+	if err != nil {
+		return nil, fmt.Errorf("load delay model: %s: %w", name, err)
+	}
+	return model, nil
 }
 
 func loadHistoricalRiskFile(path string) (*historicalrisk.Model, error) {

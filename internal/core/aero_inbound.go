@@ -74,7 +74,7 @@ func (s *Store) applyAeroInbound(ctx context.Context, providerID string, incomin
 		if err != nil {
 			return err
 		}
-		forecast := PredictWithModel(s.delayModel, flight, rotation, advisories, now)
+		forecast := PredictWithModel(s.delayModelFor(flight, now), flight, rotation, advisories, now)
 		capCachedAdvisoryValidity(forecast, deadlines)
 		event, cleared, err := delayForecastTransition(ctx, tx, flight, flight, t.rotation, t.prediction, forecast, now, true)
 		if err != nil {

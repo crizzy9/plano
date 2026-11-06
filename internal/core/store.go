@@ -28,6 +28,7 @@ var ErrNotFound = errors.New("record not found")
 type Store struct {
 	db                     *sql.DB
 	delayModel             *predict.Model
+	earlyDelayModel        *predict.Model
 	collectDelaySamples    bool
 	tfmsLegacyReplayCutoff int64
 	outboxWake             chan struct{}
@@ -58,6 +59,7 @@ type Device struct {
 
 type StoreOptions struct {
 	DelayModel          *predict.Model
+	EarlyDelayModel     *predict.Model
 	CollectDelaySamples bool
 }
 
@@ -222,7 +224,7 @@ CREATE INDEX IF NOT EXISTS bookings_by_locator ON bookings(owner, locator_hash);
 CREATE TABLE IF NOT EXISTS shares (
   token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, flight_id TEXT NOT NULL, expires INTEGER NOT NULL,
   FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
-);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema + delayProviderSamplesSchema + tfmsProgramCancellationSchema); err != nil {
+);` + radarSchema + pickupSchema + friendSchema + airportCacheSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisorySupersessionSchema + delayProviderSamplesSchema + delayEarlySamplesSchema + tfmsProgramCancellationSchema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -232,7 +234,7 @@ CREATE TABLE IF NOT EXISTS shares (
 		return nil, err
 	}
 	return &Store{
-		db: db, delayModel: options.DelayModel, collectDelaySamples: options.CollectDelaySamples,
+		db: db, delayModel: options.DelayModel, earlyDelayModel: options.EarlyDelayModel, collectDelaySamples: options.CollectDelaySamples,
 		tfmsLegacyReplayCutoff: tfmsLegacyReplayCutoff, outboxWake: make(chan struct{}, 1), refreshWake: make(chan struct{}, 1),
 	}, nil
 }
@@ -575,7 +577,7 @@ FROM flights LEFT JOIN flight_estimate_anchors anchors ON anchors.flight_id=flig
 				return err
 			}
 		}
-		predictionValue = PredictWithModel(s.delayModel, flight, inbound, advisories, decisionAt)
+		predictionValue = PredictWithModel(s.delayModelFor(flight, decisionAt), flight, inbound, advisories, decisionAt)
 		capCachedAdvisoryValidity(predictionValue, advisoryDeadlines)
 	}
 	sameSchedule := !providerChanged && prior.ScheduledDeparture != nil && flight.ScheduledDeparture != nil && prior.ScheduledDeparture.Equal(*flight.ScheduledDeparture)

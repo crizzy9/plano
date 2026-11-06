@@ -3,11 +3,15 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/crizzy9/plano/internal/predict"
 )
 
 func TestCheckConfigEnrollmentAndOfflineValidation(t *testing.T) {
@@ -155,9 +159,60 @@ func isolateStartupEnvironment(t *testing.T) {
 		"PLANO_FAA_NAS", "PLANO_SWIM_URL", "PLANO_EUROCONTROL_URL", "PLANO_ADSB_URL", "PLANO_FAA_REGISTRY_FILE",
 		"PLANO_APNS_TEAM_ID", "PLANO_APNS_KEY_ID", "PLANO_APNS_BUNDLE_ID", "PLANO_APNS_PRIVATE_KEY_FILE", "PLANO_APNS_SANDBOX",
 		"PLANO_FCM_PROJECT_ID", "PLANO_FCM_SERVICE_ACCOUNT_FILE", "PLANO_FCM_BANDWIDTH_CONSTRAINED",
-		"PLANO_REFRESH_INTERVAL", "PLANO_DELAY_MODEL_FILE", "PLANO_HISTORICAL_RISK_FILE", "PLANO_COLLECT_DELAY_SAMPLES",
+		"PLANO_REFRESH_INTERVAL", "PLANO_DELAY_MODEL_FILE", "PLANO_EARLY_DELAY_MODEL_FILE", "PLANO_HISTORICAL_RISK_FILE", "PLANO_COLLECT_DELAY_SAMPLES",
 	} {
 		t.Setenv(name, "")
+	}
+}
+
+func TestCheckConfigEarlyDelayModel(t *testing.T) {
+	for _, tc := range []struct {
+		name, demo, wantError string
+		lead                  time.Duration
+	}{
+		{name: "invalid artifact", demo: "false", wantError: "PLANO_EARLY_DELAY_MODEL_FILE"},
+		{name: "standard artifact", demo: "false", lead: 2 * time.Hour, wantError: "above 120 minutes"},
+		{name: "early artifact", demo: "false", lead: 3 * time.Hour},
+		{name: "demo skips invalid artifact", demo: "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateStartupEnvironment(t)
+			t.Setenv("PLANO_DEMO", tc.demo)
+			t.Setenv("PLANO_ALLOW_OPEN_ENROLLMENT", "false")
+			t.Setenv("PLANO_ENROLLMENT_CODE", "fixture-enrollment-code")
+			t.Setenv("PLANO_AEROAPI_KEY", "fixture-aeroapi-key")
+			t.Setenv("PLANO_ADDR", "127.0.0.1:0")
+			path := filepath.Join(t.TempDir(), "early-delay-model.json")
+			var data bytes.Buffer
+			if tc.lead == 0 {
+				data.WriteString(`{"schemaVersion":0}`)
+			} else {
+				examples := make([]predict.Example, 40)
+				for i := range examples {
+					scheduled := time.Date(2026, time.January, 1+i, 12, 0, 0, 0, time.UTC)
+					examples[i] = predict.Example{
+						FlightID: fmt.Sprintf("fixture-%d", i), ObservedAt: scheduled.Add(-tc.lead),
+						ScheduledDeparture: scheduled, DepartedAt: scheduled.Add(15 * time.Minute),
+						Features: predict.Features{AirlineDelayMinutes: 10},
+					}
+				}
+				model, _, err := predict.Fit(examples, predict.Options{HoldoutFraction: 0.2, Ridge: 0.1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := model.Save(&data); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(path, data.Bytes(), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PLANO_EARLY_DELAY_MODEL_FILE", path)
+			err := run(slog.New(slog.DiscardHandler), true)
+			if tc.wantError == "" && err != nil || tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
+				t.Fatalf("check-config error = %v, want diagnostic containing %q", err, tc.wantError)
+			}
+		})
 	}
 }
 

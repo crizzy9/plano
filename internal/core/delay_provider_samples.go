@@ -26,27 +26,31 @@ const providerDelayAliasesSQL = `WITH aliases(id) AS (
 func recordProviderDelaySample(ctx context.Context, tx *sql.Tx, provider string, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, decision time.Time, capture bool) error {
 	// A direct legacy ID proves which flight was sampled. A schedule alias's
 	// current mapping does not prove what the alias meant at capture time.
-	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO delay_provider_samples
+	var adopted bool
+	for _, tables := range delaySampleCohorts {
+		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO `+tables.provider+`
 (provider_id,observed_ns,scheduled_ns,features,departed_ns,label_observed_ns,outcome_observed_ns)
 SELECT s.flight_id,s.observed_ns,s.scheduled_ns,s.features,s.departed_ns,s.label_observed_ns,COALESCE(s.label_observed_ns,0)
-FROM delay_samples s JOIN flights f ON f.id=s.flight_id
+FROM `+tables.local+` s JOIN flights f ON f.id=s.flight_id
 LEFT JOIN aero_instance_keys k ON k.flight_id=s.flight_id
 WHERE s.flight_id=? AND substr(f.id,1,10)<>'scheduled_' AND (
  (json_extract(f.snapshot,'$.source')='flightaware_aeroapi' AND COALESCE(k.provider_id,f.id)=f.id)
  OR (json_extract(f.snapshot,'$.source')='flightaware_schedule' AND k.provider_id=f.id)
 )`, provider)
-	if err != nil {
-		return err
-	}
-	adopted, err := result.RowsAffected()
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		adopted = adopted || count != 0
 	}
 	var outcome providerDelayOutcome
 	if flight.Status == "cancelled" || flight.ActualDeparture != nil {
 		outcome.observe(flight.ObservedAt, flight.ActualDeparture, flight.Status == "cancelled")
 	}
-	if adopted != 0 || !outcome.observedAt.IsZero() {
+	if adopted || !outcome.observedAt.IsZero() {
 		// Reconcile saved explicit evidence even if it predates this schema or
 		// was stored while sample collection was off. A local alias can accept
 		// an observation older than one already accepted for another alias.
@@ -54,19 +58,21 @@ WHERE s.flight_id=? AND substr(f.id,1,10)<>'scheduled_' AND (
 			return err
 		}
 		if !outcome.observedAt.IsZero() {
-			if err := outcome.apply(ctx, tx, provider); err != nil {
-				return err
+			for _, tables := range delaySampleCohorts {
+				if err := outcome.apply(ctx, tx, provider, tables.provider); err != nil {
+					return err
+				}
 			}
 		}
 	}
 	if !capture || !outcome.observedAt.IsZero() {
 		return nil
 	}
-	raw, err := delaySampleFeatures(flight, rotation, advisories, decision)
+	tables, raw, err := delaySampleFeatures(flight, rotation, advisories, decision)
 	if err != nil || raw == nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, providerDelayAliasesSQL+`INSERT OR IGNORE INTO delay_provider_samples
+	_, err = tx.ExecContext(ctx, providerDelayAliasesSQL+`INSERT OR IGNORE INTO `+tables.provider+`
 (provider_id,observed_ns,scheduled_ns,features)
 SELECT @provider,@decision,@scheduled,@features
 WHERE NOT EXISTS (SELECT 1 FROM aliases a JOIN flights f ON f.id=a.id
@@ -134,7 +140,7 @@ ORDER BY f.observed_ns DESC`, sql.Named("provider", provider), sql.Named("since"
 	return rows.Err()
 }
 
-func (o providerDelayOutcome) apply(ctx context.Context, tx *sql.Tx, provider string) error {
+func (o providerDelayOutcome) apply(ctx context.Context, tx *sql.Tx, provider, table string) error {
 	var departed, earliestSchedule sql.NullInt64
 	if o.departure != nil {
 		departed = sql.NullInt64{Int64: o.departure.UnixNano(), Valid: true}
@@ -142,7 +148,7 @@ func (o providerDelayOutcome) apply(ctx context.Context, tx *sql.Tx, provider st
 	}
 	const eligible = `observed_ns < @departed AND scheduled_ns >= @earliest_schedule
 AND (@observed > outcome_observed_ns OR departed_ns IS @departed)`
-	_, err := tx.ExecContext(ctx, `UPDATE delay_provider_samples
+	_, err := tx.ExecContext(ctx, `UPDATE `+table+`
 SET departed_ns=CASE WHEN `+eligible+` THEN @departed END,
     label_observed_ns=CASE WHEN `+eligible+` THEN CASE
       WHEN departed_ns IS @departed AND label_observed_ns BETWEEN @departed AND @observed THEN label_observed_ns

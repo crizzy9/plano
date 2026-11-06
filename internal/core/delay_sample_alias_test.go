@@ -149,6 +149,9 @@ CREATE TABLE delay_samples(flight_id TEXT PRIMARY KEY,observed_ns INTEGER,schedu
 		}
 	}
 	var data bytes.Buffer
+	if err := ExportEarlyDelaySamples(ctx, path, &data); err != nil || data.Len() != 0 {
+		t.Fatalf("pre-upgrade backup early export = %q, %v", data.String(), err)
+	}
 	if err := ExportDelaySamples(ctx, path, &data); err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,33 @@ import (
 	"github.com/crizzy9/plano/internal/predict"
 )
 
-const maxDelaySampleLateness = 24 * time.Hour
+const (
+	maxDelaySampleLateness = 24 * time.Hour
+	earlyDelayBoundary     = 2 * time.Hour
+	earlyDelayMaxLead      = 25 * time.Hour
+)
+
+const delayEarlySamplesSchema = `
+CREATE TABLE IF NOT EXISTS delay_early_samples (
+  flight_id TEXT PRIMARY KEY REFERENCES flights(id), observed_ns INTEGER NOT NULL,
+  scheduled_ns INTEGER NOT NULL, features TEXT NOT NULL, departed_ns INTEGER, label_observed_ns INTEGER
+);
+CREATE TABLE IF NOT EXISTS delay_early_provider_samples (
+  provider_id TEXT PRIMARY KEY, observed_ns INTEGER NOT NULL, scheduled_ns INTEGER NOT NULL,
+  features TEXT NOT NULL, departed_ns INTEGER, label_observed_ns INTEGER,
+  outcome_observed_ns INTEGER NOT NULL DEFAULT 0
+);`
+
+// Table names are fixed here and are never taken from an export argument.
+type delaySampleTables struct {
+	local, provider string
+}
+
+var (
+	standardDelaySampleTables = delaySampleTables{local: "delay_samples", provider: "delay_provider_samples"}
+	earlyDelaySampleTables    = delaySampleTables{local: "delay_early_samples", provider: "delay_early_provider_samples"}
+	delaySampleCohorts        = [...]delaySampleTables{standardDelaySampleTables, earlyDelaySampleTables}
+)
 
 func recordDelaySample(ctx context.Context, tx *sql.Tx, flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, decision time.Time, capture bool) error {
 	if provider := flight.AeroProviderID(); provider != "" {
@@ -22,75 +48,104 @@ func recordDelaySample(ctx context.Context, tx *sql.Tx, flight feeds.Flight, rot
 	if flight.Source == "flightaware_schedule" || flight.Source == "flightaware_aeroapi" {
 		return nil
 	}
-	departed := flight.ActualDeparture
-	if flight.Status == "cancelled" || departed != nil && (departed.IsZero() || departed.After(flight.ObservedAt)) {
-		_, err := tx.ExecContext(ctx, `UPDATE delay_samples SET departed_ns=NULL,label_observed_ns=NULL
-WHERE flight_id=? AND (departed_ns IS NOT NULL OR label_observed_ns IS NOT NULL)`, flight.ID)
-		return err
-	}
-	if departed != nil {
-		// Check the corrected outcome against the forecast's original schedule.
-		// Repeated observations of a valid gate-out retain its first label time.
-		const eligible = `observed_ns < @departed AND scheduled_ns >= @earliest_schedule`
-		_, err := tx.ExecContext(ctx, `UPDATE delay_samples
-SET departed_ns=CASE WHEN `+eligible+` THEN @departed END,
-    label_observed_ns=CASE WHEN `+eligible+` THEN @label_observed END
-WHERE flight_id=@id AND (departed_ns IS NOT @departed OR label_observed_ns IS NULL
- OR label_observed_ns < @departed OR label_observed_ns > @label_observed OR NOT (`+eligible+`))`,
-			sql.Named("departed", departed.UnixNano()), sql.Named("earliest_schedule", departed.Add(-maxDelaySampleLateness).UnixNano()),
-			sql.Named("label_observed", flight.ObservedAt.UnixNano()), sql.Named("id", flight.ID))
-		return err
+	if flight.Status == "cancelled" || flight.ActualDeparture != nil {
+		for _, tables := range delaySampleCohorts {
+			if err := recordLocalDelayOutcome(ctx, tx, tables.local, flight); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	if !capture {
 		return nil
 	}
-	raw, err := delaySampleFeatures(flight, rotation, advisories, decision)
+	tables, raw, err := delaySampleFeatures(flight, rotation, advisories, decision)
 	if err != nil || raw == nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO delay_samples(flight_id,observed_ns,scheduled_ns,features) VALUES(?,?,?,?)`, flight.ID, decision.UnixNano(), flight.ScheduledDeparture.UnixNano(), string(raw))
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO `+tables.local+`(flight_id,observed_ns,scheduled_ns,features) VALUES(?,?,?,?)`,
+		flight.ID, decision.UnixNano(), flight.ScheduledDeparture.UnixNano(), string(raw))
 	return err
 }
 
-func delaySampleFeatures(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, decision time.Time) ([]byte, error) {
+func recordLocalDelayOutcome(ctx context.Context, tx *sql.Tx, table string, flight feeds.Flight) error {
+	departed := flight.ActualDeparture
+	if flight.Status == "cancelled" || departed.IsZero() || departed.After(flight.ObservedAt) {
+		_, err := tx.ExecContext(ctx, `UPDATE `+table+` SET departed_ns=NULL,label_observed_ns=NULL
+WHERE flight_id=? AND (departed_ns IS NOT NULL OR label_observed_ns IS NOT NULL)`, flight.ID)
+		return err
+	}
+	// Check the corrected outcome against the forecast's original schedule.
+	// Repeated observations of a valid gate-out retain its first label time.
+	const eligible = `observed_ns < @departed AND scheduled_ns >= @earliest_schedule`
+	_, err := tx.ExecContext(ctx, `UPDATE `+table+`
+SET departed_ns=CASE WHEN `+eligible+` THEN @departed END,
+    label_observed_ns=CASE WHEN `+eligible+` THEN @label_observed END
+WHERE flight_id=@id AND (departed_ns IS NOT @departed OR label_observed_ns IS NULL
+ OR label_observed_ns < @departed OR label_observed_ns > @label_observed OR NOT (`+eligible+`))`,
+		sql.Named("departed", departed.UnixNano()), sql.Named("earliest_schedule", departed.Add(-maxDelaySampleLateness).UnixNano()),
+		sql.Named("label_observed", flight.ObservedAt.UnixNano()), sql.Named("id", flight.ID))
+	return err
+}
+
+func delaySampleFeatures(flight feeds.Flight, rotation []feeds.Flight, advisories []feeds.Advisory, decision time.Time) (delaySampleTables, []byte, error) {
 	if flight.ScheduledDeparture == nil {
-		return nil, nil
+		return delaySampleTables{}, nil, nil
 	}
 	lead := flight.ScheduledDeparture.Sub(decision)
-	if lead < 30*time.Minute || lead > 2*time.Hour {
-		return nil, nil
+	if lead < 30*time.Minute || lead > earlyDelayMaxLead {
+		return delaySampleTables{}, nil, nil
+	}
+	tables := standardDelaySampleTables
+	if lead > earlyDelayBoundary {
+		tables = earlyDelaySampleTables
 	}
 	features, ok := ExtractDelayFeatures(flight, rotation, advisories, decision)
 	if !ok || max(features.AirlineDelayMinutes, features.InboundDelayMinutes, features.AirportDelayMinutes, features.GroundStopMinutes) > 1440 {
-		return nil, nil
+		return delaySampleTables{}, nil, nil
 	}
-	return json.Marshal(features)
+	raw, err := json.Marshal(features)
+	return tables, raw, err
 }
 
 // ExportDelaySamples opens the operator database read-only and streams training
 // inputs without passenger records, email, flight numbers, or booking codes.
 func ExportDelaySamples(ctx context.Context, path string, dst io.Writer) error {
+	return exportDelaySamples(ctx, path, dst, standardDelaySampleTables)
+}
+
+// ExportEarlyDelaySamples streams the separate cohort observed more than two
+// hours before scheduled departure.
+func ExportEarlyDelaySamples(ctx context.Context, path string, dst io.Writer) error {
+	return exportDelaySamples(ctx, path, dst, earlyDelaySampleTables)
+}
+
+func exportDelaySamples(ctx context.Context, path string, dst io.Writer, tables delaySampleTables) error {
 	db, err := openReadOnly(path)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	var hasProviderSamples bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='delay_provider_samples')`).Scan(&hasProviderSamples); err != nil {
+	var hasLocalSamples, hasProviderSamples bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?),
+EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?)`, tables.local, tables.provider).Scan(&hasLocalSamples, &hasProviderSamples); err != nil {
 		return err
+	}
+	if tables == earlyDelaySampleTables && !hasLocalSamples && !hasProviderSamples {
+		return nil
 	}
 	// A pre-upgrade backup can still export verifiable direct records. The
 	// mutable alias index cannot establish a legacy alias's capture identity.
 	candidates := `SELECT l.flight_id AS identity,l.observed_ns,l.scheduled_ns,l.features,l.departed_ns,l.label_observed_ns,0 AS outcome_observed_ns,
 CASE WHEN k.provider_id=l.flight_id OR json_extract(saved.snapshot,'$.source')='flightaware_aeroapi' THEN 1 ELSE 0 END AS provider
-FROM delay_samples l JOIN flights saved ON saved.id=l.flight_id
+FROM ` + tables.local + ` l JOIN flights saved ON saved.id=l.flight_id
 LEFT JOIN aero_instance_keys k ON k.flight_id=l.flight_id
 WHERE l.flight_id NOT GLOB 'scheduled_*' AND (k.provider_id IS NULL OR k.provider_id=l.flight_id)
 AND (COALESCE(json_extract(saved.snapshot,'$.source'),'')<>'flightaware_schedule' OR k.provider_id=l.flight_id)`
 	if hasProviderSamples {
 		// A withdrawn canonical label must also hide the old direct record.
-		candidates += ` AND NOT EXISTS(SELECT 1 FROM delay_provider_samples p WHERE p.provider_id=l.flight_id)
-UNION ALL SELECT provider_id,observed_ns,scheduled_ns,features,departed_ns,label_observed_ns,outcome_observed_ns,1 FROM delay_provider_samples`
+		candidates += ` AND NOT EXISTS(SELECT 1 FROM ` + tables.provider + ` p WHERE p.provider_id=l.flight_id)
+UNION ALL SELECT provider_id,observed_ns,scheduled_ns,features,departed_ns,label_observed_ns,outcome_observed_ns,1 FROM ` + tables.provider
 	}
 	rows, err := db.QueryContext(ctx, `WITH candidates AS (`+candidates+`), recent AS (
 SELECT * FROM candidates WHERE departed_ns>observed_ns AND label_observed_ns>=departed_ns
