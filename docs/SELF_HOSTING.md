@@ -304,11 +304,21 @@ app verifies the binding before displaying a notification or updating its
 widget. Switching servers or turning alerts off invalidates the old binding
 on the device, including while a remote revocation is pending.
 
+When Android hides private notification content, Plano supplies a lock-screen
+version with phase, progress, and countdown. Flight number, route, gate,
+terminal, and seat stay in the private notification. The phone's settings
+control lock-screen display and Live Update promotion. A progress update
+expires 20 minutes after its flight observation. Android 7 uses an inexact
+alarm for this deadline and can defer removal while idle. Untracking closes
+the live surface and blocks queued updates until a newer start.
+
 The Android widget defaults to phase, progress, and a countdown. In Plano
 Settings, choose **Show flight details on widget** to include the applicable
 gate, terminal, and seat from the next flight update. This setting applies to
 the device. Details can be visible on a lock screen that supports widgets.
 **Hide flight details on widget** removes the details from the widget cache.
+Between pushes, the widget asks Android to refresh at progress milestones
+while the observation is fresh. Android can defer these refreshes while idle.
 
 Tap a widget showing a current flight to open its details in Plano. The
 widget sends an opaque key scoped to the active alert session. Plano checks

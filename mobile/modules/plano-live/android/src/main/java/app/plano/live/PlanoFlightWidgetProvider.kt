@@ -22,8 +22,15 @@ class PlanoFlightWidgetProvider : AppWidgetProvider() {
   }
 
   override fun onReceive(context: Context, intent: Intent) {
-    if (intent.action == PlanoFlightWidget.REFRESH_ACTION) AndroidPushSession.refreshWidget(context)
-    else super.onReceive(context, intent)
+    when (intent.action) {
+      PlanoFlightWidget.REFRESH_ACTION -> AndroidPushSession.refreshWidget(context)
+      LEGACY_PROGRESS_EXPIRY_ACTION -> {
+        val flightId = intent.getStringExtra("flightId") ?: return
+        val binding = intent.getStringExtra("binding") ?: return
+        AndroidPushSession.expireProgress(context, flightId, binding, intent.getLongExtra("observedEpoch", 0))
+      }
+      else -> super.onReceive(context, intent)
+    }
   }
 
   override fun onDisabled(context: Context) {
@@ -167,7 +174,7 @@ internal object PlanoFlightWidget {
     val tapKey = binding?.let { selected?.tapKey(it) }
     openApp(context, tapKey)?.let { views.setOnClickPendingIntent(R.id.plano_widget_root, it) }
     manager.updateAppWidget(ids, views)
-    val nextUpdate = selected?.expiresAt?.let { expiry -> minOf(expiry, countdown ?: expiry) }
+    val nextUpdate = selected?.nextRefreshAt(now)
     scheduleRefresh(context, nextUpdate, now)
   }
 

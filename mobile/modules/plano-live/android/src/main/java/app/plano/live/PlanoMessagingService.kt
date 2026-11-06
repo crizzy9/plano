@@ -1,5 +1,6 @@
 package app.plano.live
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,12 +9,16 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import com.google.firebase.messaging.RemoteMessage
 import expo.modules.notifications.service.ExpoFirebaseMessagingService
 
 // The official NotificationCompat wire key also works when compiling with API 36,
 // whose framework stub does not yet expose the API 36.1 constant.
 private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
+internal const val LEGACY_PROGRESS_EXPIRY_ACTION = "app.plano.live.EXPIRE_FLIGHT_PROGRESS"
+private const val FLIGHT_ALERTS_CHANNEL = "flight-alerts"
+private const val FLIGHT_PROGRESS_CHANNEL = "flight-progress"
 private val notificationFlightId = Regex("[A-Za-z0-9_.-]{1,128}")
 
 internal fun validNotificationFlightId(id: String?) =
@@ -44,9 +49,11 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     if (!manager.areNotificationsEnabled()) return
     val title = data["title"] ?: return
     val event = data["eventId"] ?: messageId ?: return
-    manager.createNotificationChannel(NotificationChannel("flight-alerts", "Flight alerts", NotificationManager.IMPORTANCE_HIGH))
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      manager.createNotificationChannel(NotificationChannel(FLIGHT_ALERTS_CHANNEL, "Flight alerts", NotificationManager.IMPORTANCE_HIGH))
+    }
     val body = data["body"].orEmpty()
-    val notification = Notification.Builder(this, "flight-alerts")
+    val notification = notificationBuilder(FLIGHT_ALERTS_CHANNEL, highPriority = true)
       .setSmallIcon(R.drawable.plano_flight)
       .setContentTitle(title)
       .setContentText(body)
@@ -59,81 +66,136 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
   }
 
   private fun showProgress(data: Map<String, String>, binding: String, sentAt: Long) {
-    val flightId = data["flightId"] ?: return
+    val flightId = data["flightId"]?.takeIf(::validNotificationFlightId) ?: return
     val observedAt = data["observedEpoch"]?.toLongOrNull() ?: return
     val event = data["event"]
     if (event !in listOf("start", "update", "end")) return
-    val status = data["status"].orEmpty()
+    val status = data["status"]
     val ended = event == "end" || status in listOf("arrived", "cancelled")
-    if (!ended && WidgetFlightPhase.fromStatus(status) == null) return
-    if (!AndroidPushSession.advance(this, flightId, observedAt, sentAt)) return
+    val started = event == "start" && !ended
+    val progress = if (ended) null else {
+      val departure = data["departureEpoch"]?.toLongOrNull() ?: 0
+      val arrival = data["arrivalEpoch"]?.toLongOrNull() ?: 0
+      val state = WidgetFlightProgress.fromEpochs(status, observedAt, departure, arrival) ?: return
+      if (!state.isFresh(System.currentTimeMillis())) return
+      state
+    }
+    if (!AndroidPushSession.advance(this, flightId, observedAt, sentAt, started = started)) return
     val tag = liveNotificationTag(flightId)
-    val departure = data["departureEpoch"]?.toLongOrNull() ?: 0
-    val arrival = data["arrivalEpoch"]?.toLongOrNull() ?: 0
     // Keep the widget independent of notification permission. Its own privacy
     // setting controls which details it can keep from accepted flight updates.
     runCatching {
       PlanoFlightWidget.onFlight(
-        this, flightId, binding, event == "start", ended,
-        WidgetFlightProgress.fromEpochs(status, observedAt, departure, arrival),
+        this, flightId, binding, started, ended, progress,
         sentAt.takeIf { it > 0 } ?: epochMillis(observedAt),
         data,
       )
     }
-    if (ended) {
+    if (progress == null) {
       manager.cancel(tag, 0)
       return
     }
 
     if (!manager.areNotificationsEnabled()) return
-    manager.createNotificationChannel(NotificationChannel("flight-progress", "Live flight progress", NotificationManager.IMPORTANCE_LOW))
     val now = System.currentTimeMillis()
-    val percent = when {
-      status == "landed" -> 100
-      status in listOf("airborne", "diverted") && departure > 0 && arrival > departure ->
-        ((now / 1000.0 - departure) / (arrival - departure) * 100).toInt().coerceIn(0, 99)
-      else -> 0
+    if (!progress.isFresh(now)) return
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      manager.createNotificationChannel(NotificationChannel(
+        FLIGHT_PROGRESS_CHANNEL, getString(R.string.plano_live_progress_channel), NotificationManager.IMPORTANCE_LOW,
+      ))
     }
-    val label = when (status) {
-      "boarding" -> "Boarding"
-      "taxi_out" -> "Taxiing"
-      "airborne" -> "In flight"
-      "diverted" -> "Diverted"
-      "landed" -> "Landed"
-      else -> "Scheduled"
-    }
-    val details = listOfNotNull(
-      label,
-      data["departureGate"]?.takeIf { it.isNotBlank() }?.let { "Dep gate $it" },
-      data["arrivalGate"]?.takeIf { it.isNotBlank() }?.let { "Arr gate $it" },
-      data["departureTerminal"]?.takeIf { it.isNotBlank() }?.let { "Dep terminal $it" },
-      data["arrivalTerminal"]?.takeIf { it.isNotBlank() }?.let { "Arr terminal $it" },
-      data["seat"]?.takeIf { it.isNotBlank() }?.let { "Seat $it" },
+    val phase = progress.phase
+    val label = getString(when (phase) {
+      WidgetFlightPhase.SCHEDULED -> R.string.plano_widget_scheduled
+      WidgetFlightPhase.BOARDING -> R.string.plano_widget_boarding
+      WidgetFlightPhase.TAXI_OUT -> R.string.plano_widget_taxiing
+      WidgetFlightPhase.AIRBORNE -> R.string.plano_widget_airborne
+      WidgetFlightPhase.DIVERTED -> R.string.plano_widget_diverted
+      WidgetFlightPhase.LANDED -> R.string.plano_widget_landed
+    })
+    val details = WidgetFlightDetails.fromFlight(phase, data)
+    val location = listOfNotNull(
+      details?.gate?.let { getString(R.string.plano_widget_gate, it) },
+      details?.terminal?.let { getString(R.string.plano_widget_terminal, it) },
     ).joinToString(" · ")
-    val route = "${data["origin"].orEmpty()} to ${data["destination"].orEmpty()}"
-    val countdown = (if (status in listOf("airborne", "diverted")) arrival else departure) * 1000
-    val builder = Notification.Builder(this, "flight-progress")
-      .setSmallIcon(R.drawable.plano_flight)
-      .setContentTitle(data["flightNumber"]?.let { "$it · $route" } ?: route)
-      .setContentText(details)
+    val locationLabel = if (phase.departureDetails) R.string.plano_widget_departure_details else R.string.plano_widget_arrival_details
+    val summary = listOfNotNull(
+      label,
+      location.takeIf { it.isNotEmpty() }?.let { getString(locationLabel, it) },
+      details?.seat?.let { getString(R.string.plano_widget_seat, it) },
+    ).joinToString(" · ")
+    val origin = data["origin"]?.takeIf { it.isNotBlank() }
+    val destination = data["destination"]?.takeIf { it.isNotBlank() }
+    val route = if (origin != null && destination != null) getString(R.string.plano_live_route, origin, destination) else null
+    val genericTitle = getString(R.string.plano_live_progress_title)
+    val title = listOfNotNull(data["flightNumber"]?.takeIf { it.isNotBlank() }, route)
+      .joinToString(" · ").ifBlank { genericTitle }
+    val publicVersion = progressBuilder(progress, now)
+      .setContentTitle(genericTitle)
+      .setContentText(label)
+      .setVisibility(Notification.VISIBILITY_PUBLIC)
+      .build()
+    val builder = progressBuilder(progress, now)
+      .setContentTitle(title)
+      .setContentText(summary)
       .setVisibility(Notification.VISIBILITY_PRIVATE)
-      .setOngoing(true)
-      .setOnlyAlertOnce(true)
-      .setTimeoutAfter(20 * 60 * 1000L)
+      .setPublicVersion(publicVersion)
       .setContentIntent(openApp(flightId))
-      .setShowWhen(countdown > now && status != "landed")
-
-    if (countdown > now && status != "landed") {
-      builder.setWhen(countdown).setUsesChronometer(true).setChronometerCountDown(true)
-    }
     if (Build.VERSION.SDK_INT >= 36) {
-      builder.setStyle(Notification.ProgressStyle().setProgress(percent)
-        .setProgressSegments(listOf(Notification.ProgressStyle.Segment(100).setColor(0xff57bfa1.toInt()))))
-        .addExtras(Bundle().apply { putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true) })
-    } else {
-      builder.setProgress(100, percent, false)
+      builder.addExtras(Bundle().apply { putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true) })
     }
     manager.notify(tag, 0, builder.build())
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+      scheduleLegacyExpiry(flightId, binding, observedAt, progress.expiresAt)
+    }
+  }
+
+  private fun progressBuilder(progress: WidgetFlightProgress, now: Long): Notification.Builder {
+    val countdown = progress.countdownTarget(now)
+    val builder = notificationBuilder(FLIGHT_PROGRESS_CHANNEL, highPriority = false)
+      .setSmallIcon(R.drawable.plano_flight)
+      .setOngoing(true)
+      .setOnlyAlertOnce(true)
+      .setShowWhen(countdown != null)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      builder.setTimeoutAfter(progress.expiresAt - now)
+    }
+    if (countdown != null) {
+      builder.setWhen(countdown).setUsesChronometer(true).setChronometerCountDown(true)
+    }
+    progress.percent(now)?.let { percent ->
+      if (Build.VERSION.SDK_INT >= 36) {
+        builder.setStyle(Notification.ProgressStyle().setProgress(percent)
+          .setProgressSegments(listOf(Notification.ProgressStyle.Segment(100).setColor(0xff57bfa1.toInt()))))
+      } else {
+        builder.setProgress(100, percent, false)
+      }
+    }
+    return builder
+  }
+
+  @Suppress("DEPRECATION")
+  private fun notificationBuilder(channel: String, highPriority: Boolean): Notification.Builder {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) return Notification.Builder(this, channel)
+    return Notification.Builder(this).apply {
+      setPriority(if (highPriority) Notification.PRIORITY_HIGH else Notification.PRIORITY_LOW)
+      if (highPriority) setDefaults(Notification.DEFAULT_SOUND)
+    }
+  }
+
+  private fun scheduleLegacyExpiry(flightId: String, binding: String, observedEpoch: Long, expiresAt: Long) {
+    val alarm = getSystemService(AlarmManager::class.java) ?: return
+    val intent = Intent(this, PlanoFlightWidgetProvider::class.java)
+      .setAction(LEGACY_PROGRESS_EXPIRY_ACTION)
+      .setData(Uri.parse("plano://live-progress-expiry/${hashPushIdentity(flightId)}"))
+      .putExtra("flightId", flightId)
+      .putExtra("binding", binding)
+      .putExtra("observedEpoch", observedEpoch)
+    val pending = PendingIntent.getBroadcast(
+      this, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    ) ?: return
+    val delay = (expiresAt - System.currentTimeMillis()).coerceAtLeast(0L)
+    alarm.set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + delay, pending)
   }
 
   private fun openApp(flightId: String?, inboundId: String? = null): PendingIntent? {

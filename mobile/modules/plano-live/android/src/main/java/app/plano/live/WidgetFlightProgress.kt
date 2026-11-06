@@ -3,6 +3,7 @@ package app.plano.live
 internal const val WIDGET_FRESH_MILLIS = 20 * 60 * 1000L
 private const val CLOCK_SKEW_MILLIS = 5 * 60 * 1000L
 private const val MAX_COUNTDOWN_MILLIS = 48 * 60 * 60 * 1000L
+private const val MIN_PROGRESS_REFRESH_MILLIS = 60_000L
 
 internal enum class WidgetFlightPhase(val priority: Int, val arrivalCountdown: Boolean = false) {
   SCHEDULED(0),
@@ -79,6 +80,17 @@ internal data class WidgetFlightProgress(
     if (phase == WidgetFlightPhase.LANDED) return null
     val target = if (phase.arrivalCountdown) arrivalAt else departureAt
     return target.takeIf { it > now && it - now <= MAX_COUNTDOWN_MILLIS }
+  }
+
+  fun nextRefreshAt(now: Long): Long {
+    val deadline = minOf(expiresAt, countdownTarget(now) ?: expiresAt)
+    val percent = percent(now)
+    if (!phase.arrivalCountdown || percent == null || percent >= 99) return deadline
+    val duration = arrivalAt - departureAt
+    val next = percent + 1
+    // Calculate the next whole-percent step without multiplying the epoch-sized duration.
+    val step = duration / 100 * next + (duration % 100 * next + 99) / 100
+    return minOf(deadline, maxOf(now + MIN_PROGRESS_REFRESH_MILLIS, departureAt + step))
   }
 
   companion object {

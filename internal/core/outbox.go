@@ -284,6 +284,11 @@ SELECT d.id,t.flight_id FROM tracked t JOIN devices d ON d.owner=t.owner WHERE t
 	return nil
 }
 
+const (
+	liveFreshness         = 10 * time.Minute
+	liveHeartbeatInterval = time.Minute
+)
+
 func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time) push.Message {
 	state := &push.LiveState{FlightID: flight.ID, FlightNumber: flight.Number, Status: flight.Status, Origin: flight.Origin, Destination: flight.Destination, DepartureGate: flight.DepartureGate, ArrivalGate: flight.ArrivalGate, DepartureTerminal: flight.DepartureTerminal, ArrivalTerminal: flight.ArrivalTerminal, Seat: seat, ObservedEpoch: flight.ObservedAt.Unix()}
 	if dep := effectiveDeparture(flight); dep != nil {
@@ -292,7 +297,7 @@ func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time
 	if arr := effectiveArrival(flight); arr != nil {
 		state.ArrivalEpoch = arr.Unix()
 	}
-	msg := push.Message{Kind: kind, FlightID: flight.ID, Title: flight.Number + " · " + flight.Origin + " to " + flight.Destination, Body: "Track this flight with Plano.", State: state, Timestamp: now, StaleAt: now.Add(10 * time.Minute), ExpiresAt: now.Add(10 * time.Minute), CollapseID: hash(flight.ID)}
+	msg := push.Message{Kind: kind, FlightID: flight.ID, Title: flight.Number + " · " + flight.Origin + " to " + flight.Destination, Body: "Track this flight with Plano.", State: state, Timestamp: now, StaleAt: now.Add(liveFreshness), ExpiresAt: now.Add(liveFreshness), CollapseID: hash(flight.ID)}
 	if kind == push.LiveEnd {
 		msg.DismissAt = now.Add(20 * time.Minute)
 	}
@@ -300,25 +305,31 @@ func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time
 }
 
 func enqueueLive(ctx context.Context, tx *sql.Tx, prior, flight feeds.Flight) error {
-	departure := effectiveDeparture(flight)
-	if departure == nil {
-		return nil
-	}
 	now := flight.ObservedAt
 	end := finished(flight)
-	withinWindow := !departure.After(now.Add(time.Hour)) && (flight.ActualDeparture != nil || departure.After(now.Add(-2*time.Hour)))
-	if !withinWindow && !end {
-		return nil
+	if flightBeforeDeparture(flight) {
+		departure := effectiveDeparture(flight)
+		if departure == nil || departure.After(now.Add(time.Hour)) || !departure.After(now.Add(-2*time.Hour)) {
+			return nil
+		}
 	}
 	type audience struct {
 		id                          int64
 		platform, kind, seat        string
 		started, requestUpdateToken bool
+		recentState                 []byte
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.platform,d.kind,t.seat,l.device_id IS NOT NULL, q.device_id IS NOT NULL FROM devices d JOIN tracked t ON t.owner=d.owner
+	// Live pushes expire at a fixed offset from enqueue time. Unlike due (retry
+	// time) and the APNs wire timestamp, expiry preserves that offset.
+	recentExpiry := now.Add(liveFreshness - liveHeartbeatInterval).UnixNano()
+	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.platform,d.kind,t.seat,l.device_id IS NOT NULL, q.device_id IS NOT NULL,
+(SELECT json_extract(o.message,'$.State') FROM outbox o
+WHERE o.device_id=d.id AND o.flight_id=t.flight_id AND o.expires>? AND json_extract(o.message,'$.Kind') IN ('start','update')
+ORDER BY o.id DESC LIMIT 1)
+FROM devices d JOIN tracked t ON t.owner=d.owner
 LEFT JOIN live_started l ON l.device_id=d.id AND l.flight_id=t.flight_id
 LEFT JOIN live_token_requests q ON q.device_id=d.id
-WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='live_start' AND NOT EXISTS (SELECT 1 FROM devices u WHERE u.owner=d.owner AND u.kind='live_update' AND u.flight_id=t.flight_id)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, flight.ID)
+WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='live_start' AND NOT EXISTS (SELECT 1 FROM devices u WHERE u.owner=d.owner AND u.kind='live_update' AND u.flight_id=t.flight_id)) OR (d.kind='live_update' AND d.flight_id=t.flight_id))`, recentExpiry, flight.ID)
 	if err != nil {
 		return err
 	}
@@ -326,7 +337,7 @@ WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='l
 	var recipients []audience
 	for rows.Next() {
 		var a audience
-		if err := rows.Scan(&a.id, &a.platform, &a.kind, &a.seat, &a.started, &a.requestUpdateToken); err != nil {
+		if err := rows.Scan(&a.id, &a.platform, &a.kind, &a.seat, &a.started, &a.requestUpdateToken, &a.recentState); err != nil {
 			return err
 		}
 		recipients = append(recipients, a)
@@ -352,15 +363,18 @@ WHERE t.flight_id=? AND ((d.platform='android' AND d.kind='alert') OR (d.kind='l
 			kind = push.LiveEnd
 		case a.platform == "android" && !a.started:
 			kind = push.LiveStart
-		case prior.ID != "" && now.Sub(prior.ObservedAt) < time.Minute:
-			before := liveMessage(prior, kind, a.seat, now)
-			after := liveMessage(flight, kind, a.seat, now)
-			before.State.ObservedEpoch = after.State.ObservedEpoch
-			if *before.State == *after.State {
+		}
+		msg := liveMessage(flight, kind, a.seat, now)
+		if kind == push.LiveUpdate && len(a.recentState) > 0 {
+			var recent push.LiveState
+			if err := json.Unmarshal(a.recentState, &recent); err != nil {
+				return err
+			}
+			recent.ObservedEpoch = msg.State.ObservedEpoch
+			if recent == *msg.State {
 				continue
 			}
 		}
-		msg := liveMessage(flight, kind, a.seat, now)
 		msg.RequestUpdateToken = a.requestUpdateToken && kind == push.LiveStart
 		if err := queueDevice(ctx, tx, a.id, flight.ID, msg); err != nil {
 			return err
