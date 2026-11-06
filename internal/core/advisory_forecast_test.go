@@ -128,6 +128,51 @@ func TestStoredClosureEvidenceChecksPublishedWindow(t *testing.T) {
 	}
 }
 
+func TestStoredForecastEvidenceHonorsScopedSupersession(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "forecast.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Date(2026, 11, 5, 18, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, source, airport string
+		effective             time.Time
+		legacy, cached, want  bool
+	}{
+		{name: "matching", source: feeds.FAASWIM, airport: "KSFO", effective: now, want: true},
+		{name: "future", source: feeds.FAASWIM, airport: "KSFO", effective: now.Add(time.Second)},
+		{name: "older than evidence", source: feeds.FAASWIM, airport: "KSFO", effective: now.Add(-time.Second)},
+		{name: "other airport", source: feeds.FAASWIM, airport: "KJFK", effective: now},
+		{name: "other source", source: feeds.Eurocontrol, airport: "KSFO", effective: now},
+		{name: "legacy with matching row", source: feeds.FAASWIM, airport: "KSFO", effective: now, legacy: true, cached: true, want: true},
+		{name: "legacy without scope", source: feeds.FAASWIM, airport: "KSFO", effective: now, legacy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			row := feeds.Advisory{ID: tc.name, Kind: "airport_closure", Airport: "KSFO", Source: feeds.FAASWIM, ObservedAt: now}
+			if tc.cached {
+				if err := s.PublishAdvisory(ctx, row, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO advisory_supersessions(source,airport,predecessor_id,observed_ns,successor_id)
+VALUES(?,?,?,?,'replacement')`, tc.source, tc.airport, row.ID, tc.effective.UnixNano()); err != nil {
+				t.Fatal(err)
+			}
+			evidence := advisoryEvidence(row)
+			if tc.legacy {
+				evidence.Airport = ""
+			}
+			forecast := &Prediction{AdvisoryEvidence: []forecastAdvisory{evidence}}
+			got, err := forecastAdvisoryRevised(ctx, s.db, forecast, now)
+			if err != nil || got != tc.want {
+				t.Fatalf("supersession = %t, %v, want %t", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestLearnedReasonNamesAnObservedSignal(t *testing.T) {
 	contributions := []predict.Contribution{{Feature: "weather", Minutes: 10}, {Feature: "ground_stop", Minutes: 8}, {Feature: "airline_delay", Minutes: 4}}
 	if reason := learnedReason(predict.Features{AirlineDelayMinutes: 4}, contributions); !strings.Contains(reason, "airline's estimate") {

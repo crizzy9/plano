@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 	"unicode"
@@ -44,10 +45,15 @@ func (s *Store) cachePolledFlightNotices(ctx context.Context, source string, adv
 		Expires  int64          `json:"expires"`
 	}
 	entries := make([]entry, 0, min(len(advisories), maxPolledNotices))
+	var linked bool
 	for _, a := range advisories {
 		if a.Source != source || a.ID == "" || a.ObservedAt.IsZero() {
 			continue
 		}
+		if a.SupersedesID != "" && a.ObservedAt.After(polledAt.Add(advisorySupersessionLead)) {
+			return fmt.Errorf("%w: advisory replacement observation is too far ahead", feeds.ErrInvalidQuery)
+		}
+		linked = linked || a.SupersedesID != ""
 		expires := a.ObservedAt.Add(maxNoticeAge)
 		if pollExpiry := polledAt.Add(polledNoticeMaxAge); pollExpiry.Before(expires) {
 			expires = pollExpiry
@@ -83,6 +89,14 @@ ON CONFLICT(source,id) DO UPDATE SET airport=excluded.airport,observed_ns=exclud
 WHERE excluded.observed_ns>=polled_flight_notices.observed_ns`, source, snapshot); err != nil {
 		return err
 	}
+	if linked {
+		if err := storeAdvisorySupersessions(ctx, tx, `SELECT source,airport,json_extract(data,'$.supersedesId'),observed_ns,id FROM polled_flight_notices
+WHERE source=? AND airport<>'' AND observed_ns BETWEEN ? AND ?
+AND json_extract(data,'$.supersedesId') NOT IN ('',id)`, source,
+			polledAt.Add(-advisorySupersessionRetention).UnixNano(), polledAt.Add(advisorySupersessionLead).UnixNano()); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -111,10 +125,12 @@ SELECT source,id,observed_ns,expires_ns,data FROM (
     AND a.expires_ns>?
     AND NOT EXISTS (SELECT 1 FROM polled_flight_notices p WHERE p.source=a.source AND p.id=a.id
                     AND p.observed_ns>a.observed_ns AND p.observed_ns<=?)
-) ORDER BY observed_ns DESC,source,id`,
+) AS c WHERE NOT EXISTS (SELECT 1 FROM advisory_supersessions r WHERE r.source=c.source
+  AND r.airport=json_extract(c.data,'$.airport') AND r.predecessor_id=c.id AND r.observed_ns BETWEEN c.observed_ns AND ?)
+ORDER BY observed_ns DESC,source,id`,
 		t, t, t,
 		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t,
-		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t)
+		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t, t)
 	if err != nil {
 		return nil, err
 	}

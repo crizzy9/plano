@@ -20,6 +20,8 @@ type NOTAMSummary struct {
 	FixedValidity      bool // Both bounds are unambiguous and the end is definitive.
 }
 
+const notamCancellationText = "This NOTAM cancels an earlier notice."
+
 // MatchesValidity reports whether a definitive published window agrees with
 // every supplied structured bound. Either structured bound may be absent.
 func (s NOTAMSummary) MatchesValidity(start, end *time.Time) bool {
@@ -30,7 +32,8 @@ var (
 	// FAA Order 7930.2U sections 3-3, 4-2, 5-1, and 8-1 document the
 	// domestic contractions, movement area qualifiers, and ICAO fields.
 	notamDomesticHeader = regexp.MustCompile(`^![A-Za-z0-9]{2,7} (?:[0-9]{1,2}/[0-9]{3,4} )?([A-Za-z0-9]{2,7}) (.+)$`)
-	notamICAOHeader     = regexp.MustCompile(`^\(?[A-Z][0-9]{4}/[0-9]{2}\s+NOTAM([NRC])(?:\s+[A-Z][0-9]{4}/[0-9]{2})?$`)
+	notamICAOHeader     = regexp.MustCompile(`^\(?([A-Z][0-9]{4}/[0-9]{2})\s*NOTAM([NRC])((?s:.*))$`)
+	notamICAOReference  = regexp.MustCompile(`^\s+([A-Z][0-9]{4}/[0-9]{2})$`)
 	notamICAOLocation   = regexp.MustCompile(`^[A-Z]{4}$`)
 	notamField          = regexp.MustCompile(`(?:^|[\t\r\n ])([QABCDEFG])\)`)
 	notamToken          = regexp.MustCompile(`[A-Za-z0-9]+(?:/[A-Za-z0-9]+)?`)
@@ -74,8 +77,8 @@ func DecodeNOTAM(raw string) (NOTAMSummary, bool) {
 		return NOTAMSummary{}, false
 	}
 	parts := notamText(raw)
-	if parts.cancelled {
-		return NOTAMSummary{Scope: "cancellation", Text: "This NOTAM cancels an earlier notice."}, true
+	if parts.action == 'C' && parts.headerValid {
+		return NOTAMSummary{Scope: "cancellation", Text: notamCancellationText, Airport: parts.icaoLocation()}, true
 	}
 	body, airport := advisoryPlainText(parts.body), parts.airport
 	domesticHeader := notamDomesticHeader.FindStringSubmatchIndex(body)
@@ -110,7 +113,7 @@ func DecodeNOTAM(raw string) (NOTAMSummary, bool) {
 			summary.HasValidity = true
 			// ICAO dates belong in B and C. A second window in E can contradict
 			// those dates or qualify the apparent closure in the free text.
-			if !parts.invalidOrder && validity == nil && domesticHeader == nil && notamICAOLocation.MatchString(airport) {
+			if validity == nil && domesticHeader == nil && parts.icaoLocation() != "" {
 				summary.setValidity(parts.start, parts.end)
 			}
 		} else if validity != nil {
@@ -122,29 +125,36 @@ func DecodeNOTAM(raw string) (NOTAMSummary, bool) {
 }
 
 type notamParts struct {
-	body, schedule, airport, start, end              string
-	structured, hasSchedule, cancelled, invalidOrder bool
+	body, schedule, airport, start, end     string
+	action                                  byte
+	structured, headerValid, referenceValid bool
+	hasAirport, hasSchedule, invalidOrder   bool
+}
+
+func (parts notamParts) icaoLocation() string {
+	if parts.invalidOrder || !notamICAOLocation.MatchString(parts.airport) {
+		return ""
+	}
+	return parts.airport
 }
 
 func notamText(raw string) notamParts {
 	fields := notamField.FindAllStringSubmatchIndex(raw, -1)
 	if len(fields) == 0 {
-		if header := notamICAOHeader.FindStringSubmatch(strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(raw)), ")")); header != nil && header[1] == "C" {
-			return notamParts{cancelled: true}
-		}
-		return notamParts{body: raw}
+		prefix := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(raw), ")"))
+		action, headerValid, referenceValid := parseNOTAMHeader(prefix)
+		return notamParts{body: raw, action: action, headerValid: headerValid, referenceValid: referenceValid}
 	}
-	prefix := strings.ToUpper(strings.TrimSpace(raw[:fields[0][0]]))
-	if prefix != "" {
-		header := notamICAOHeader.FindStringSubmatch(prefix)
-		if header == nil {
-			return notamParts{body: raw}
-		}
-		if header[1] == "C" {
-			return notamParts{cancelled: true}
-		}
-	}
+	prefix := strings.TrimSpace(raw[:fields[0][0]])
 	parts := notamParts{structured: prefix != "" || len(fields) > 1 || raw[fields[0][2]] != 'E'}
+	if prefix != "" {
+		parts.action, parts.headerValid, parts.referenceValid = parseNOTAMHeader(prefix)
+		if !parts.headerValid {
+			parts.body = raw
+			parts.structured = false
+			return parts
+		}
+	}
 	lastField := -1
 	for i, match := range fields {
 		field := raw[match[2]]
@@ -161,6 +171,7 @@ func notamText(raw string) notamParts {
 		}
 		switch field {
 		case 'A':
+			parts.hasAirport = true
 			parts.airport = strings.ToUpper(value)
 		case 'B':
 			parts.start = value
@@ -174,6 +185,33 @@ func notamText(raw string) notamParts {
 		}
 	}
 	return parts
+}
+
+func parseNOTAMHeader(prefix string) (action byte, headerValid, referenceValid bool) {
+	header := notamICAOHeader.FindStringSubmatch(strings.ToUpper(prefix))
+	if header == nil {
+		return 0, false, false
+	}
+	reference := notamICAOReference.FindStringSubmatch(header[3])
+	return header[2][0], header[3] == "" || reference != nil,
+		reference != nil && header[1][0] == reference[1][0] && header[1] != reference[1]
+}
+
+func normalizeLinkedNOTAM(row *Advisory) bool {
+	parts := notamText(row.RawReason)
+	if parts.action != 'C' && parts.action != 'R' {
+		return true
+	}
+	if !parts.referenceValid || parts.hasAirport && parts.icaoLocation() != row.Airport {
+		return false
+	}
+	if parts.action == 'C' {
+		row.Kind = "notam_cancellation"
+		if strings.TrimSpace(row.Reason) == "" {
+			row.Reason = notamCancellationText
+		}
+	}
+	return true
 }
 
 func (summary *NOTAMSummary) setValidity(start, end string) {

@@ -70,6 +70,75 @@ func TestDispatcherDropsSupersededAdvisoryAlerts(t *testing.T) {
 	}
 }
 
+func TestDispatcherChecksDistinctAdvisorySupersessionAfterClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name, source, airport string
+		polled, superseded    bool
+	}{
+		{name: "signed cancellation", source: feeds.FAASWIM, airport: "KJFK", superseded: true},
+		{name: "polled cancellation", source: feeds.FAASWIM, airport: "KJFK", polled: true, superseded: true},
+		{name: "different airport", source: feeds.FAASWIM, airport: "KSFO"},
+		{name: "different source", source: feeds.Eurocontrol, airport: "KJFK"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, owner, flight := dispatcherFixture(t)
+			ctx, now := t.Context(), time.Now().UTC()
+			for _, platform := range []string{"ios", "android"} {
+				if err := store.Register(ctx, owner, Device{Platform: platform, Kind: "alert", Token: platform + "-fixture-device"}, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			advisory := dispatchAdvisoryFixture(now)
+			advisory.ID, advisory.Kind, advisory.Airport = "KJFK/A0101/26", "airport_closure", "KJFK"
+			if err := store.cachePolledFlightNotices(ctx, advisory.Source, []feeds.Advisory{advisory}, now); err != nil {
+				t.Fatal(err)
+			}
+			enqueueDispatchAdvisory(t, store, owner, flight, advisory, now)
+			jobs, err := store.claim(ctx, now, 2)
+			if err != nil || len(jobs) != 2 {
+				t.Fatalf("claims = %d, error = %v", len(jobs), err)
+			}
+			cancellation := feeds.Advisory{ID: "KJFK/A0102/26", Source: tc.source, Airport: tc.airport,
+				Kind: "notam_cancellation", SupersedesID: advisory.ID, ObservedAt: now}
+			if tc.polled {
+				if err := store.cachePolledFlightNotices(ctx, tc.source, []feeds.Advisory{cancellation}, now); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				publishDispatchAdvisory(t, store, cancellation, now)
+			}
+			// Leave the leased evidence as the only record of the old airport.
+			if err := store.cachePolledFlightNotices(ctx, advisory.Source, nil, now); err != nil {
+				t.Fatal(err)
+			}
+			sends := make(map[string]int)
+			sender := pushFunc(func(_ context.Context, target push.Target, msg push.Message) error {
+				if msg.Title != "Advisory warning" {
+					t.Fatalf("unexpected %s message: %s", target.Platform, msg.Title)
+				}
+				sends[target.Platform]++
+				return nil
+			})
+			for _, job := range jobs {
+				store.deliver(ctx, sender, slog.New(slog.DiscardHandler), job)
+			}
+			want := 1
+			if tc.superseded {
+				want = 0
+			}
+			if sends["ios"] != want || sends["android"] != want {
+				t.Fatalf("dispatch sends = %v, want %d per platform", sends, want)
+			}
+			if tc.superseded {
+				var scopes int
+				if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox_advisory_scopes`).Scan(&scopes); err != nil || scopes != 0 {
+					t.Fatalf("superseded job scopes = %d, error = %v", scopes, err)
+				}
+			}
+		})
+	}
+}
+
 func TestDispatcherKeepsCurrentAdvisoryRetries(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

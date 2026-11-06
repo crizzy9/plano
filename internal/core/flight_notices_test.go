@@ -288,6 +288,9 @@ func TestFlightNoticeRefreshRetainsLastSuccessOnSourceFailure(t *testing.T) {
 	checkRefresh(1)
 	feed.rows, feed.err = nil, errors.New("feed offline")
 	checkRefresh(1)
-	feed.err = nil
+	feed.rows, feed.err = []feeds.Advisory{{ID: "invalid-replacement", Airport: "SFO", Source: "faa_nas",
+		Kind: "notam_cancellation", SupersedesID: "departures", ObservedAt: now.Add(time.Minute)}}, nil
+	checkRefresh(1)
+	feed.rows = nil
 	checkRefresh(0)
 }

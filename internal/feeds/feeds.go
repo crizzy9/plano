@@ -76,6 +76,7 @@ type Position struct {
 
 type Advisory struct {
 	ID           string     `json:"id"`
+	SupersedesID string     `json:"supersedesId,omitempty"`
 	Airport      string     `json:"airport,omitempty"`
 	Kind         string     `json:"kind"`
 	Reason       string     `json:"reason"`

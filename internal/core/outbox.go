@@ -730,6 +730,13 @@ SELECT 1 FROM pushed_advisories a WHERE a.source=pushed_advisory_predecessors.so
 AND a.observed_ns<=?)`, now.UnixNano()); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM advisory_supersessions AS r WHERE observed_ns<? OR
+EXISTS (SELECT 1 FROM advisory_supersessions newer WHERE newer.source=r.source AND newer.airport=r.airport
+AND newer.predecessor_id=r.predecessor_id AND newer.successor_id=r.successor_id
+AND newer.observed_ns>r.observed_ns AND newer.observed_ns<=?)`,
+		now.Add(-advisorySupersessionRetention).UnixNano(), now.UnixNano()); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM live_wire_clocks WHERE wire_epoch<=?`, now.Add(-7*24*time.Hour).Unix()); err != nil {
 		return err
 	}

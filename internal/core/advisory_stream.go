@@ -124,7 +124,23 @@ AND (? OR NOT EXISTS(SELECT 1 FROM pushed_advisory_predecessors WHERE source=? A
 			return err
 		}
 	}
+	if n+retained != 0 && a.SupersedesID != "" && a.Airport != "" && a.SupersedesID != a.ID &&
+		!a.ObservedAt.Before(now.Add(-advisorySupersessionRetention)) && !a.ObservedAt.After(now.Add(advisorySupersessionLead)) {
+		if err := storeAdvisorySupersessions(ctx, tx, `SELECT ?,?,?,?,?`, a.Source, a.Airport,
+			a.SupersedesID, a.ObservedAt.UnixNano(), a.ID); err != nil {
+			return err
+		}
+	}
 	if n+retained == 0 || future || !expires.After(now) || a.Airport == "" {
+		return tx.Commit()
+	}
+	var superseded bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM advisory_supersessions
+WHERE source=? AND airport=? AND predecessor_id=? AND observed_ns BETWEEN ? AND ?)`,
+		a.Source, a.Airport, a.ID, a.ObservedAt.UnixNano(), now.UnixNano()).Scan(&superseded); err != nil {
+		return err
+	}
+	if superseded {
 		return tx.Commit()
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT f.snapshot FROM flights f WHERE EXISTS(SELECT 1 FROM tracked t WHERE t.flight_id=f.id)

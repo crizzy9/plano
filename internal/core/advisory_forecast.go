@@ -14,12 +14,14 @@ const advisoryForecastTTL = 30 * time.Minute
 type forecastAdvisory struct {
 	Source     string `json:"source"`
 	ID         string `json:"id"`
+	Airport    string `json:"airport,omitempty"`
 	ObservedNS int64  `json:"observedNs"`
 	StateHash  string `json:"stateHash,omitempty"`
 }
 
 func advisoryEvidence(advisory feeds.Advisory) forecastAdvisory {
-	return forecastAdvisory{Source: advisory.Source, ID: advisory.ID, ObservedNS: advisory.ObservedAt.UnixNano(), StateHash: advisoryStateHash(advisory)}
+	return forecastAdvisory{Source: advisory.Source, ID: advisory.ID, Airport: advisory.Airport,
+		ObservedNS: advisory.ObservedAt.UnixNano(), StateHash: advisoryStateHash(advisory)}
 }
 
 func advisoryStateHash(advisory feeds.Advisory) string {
@@ -86,30 +88,40 @@ func forecastAdvisoryRevised(ctx context.Context, db rowQueryer, forecast *Predi
 		return false, err
 	}
 	return advisoryEvidenceRevised(ctx, db, `SELECT json_extract(value,'$.source'), json_extract(value,'$.id'),
- json_extract(value,'$.observedNs'), COALESCE(json_extract(value,'$.stateHash'),'')
+ json_extract(value,'$.observedNs'), COALESCE(json_extract(value,'$.stateHash'),''), COALESCE(json_extract(value,'$.airport'),'')
 FROM json_each(?) WHERE json_extract(value,'$.source')<>'' AND json_extract(value,'$.id')<>''`, string(evidence), now)
 }
 
 func advisoryEvidenceRevised(ctx context.Context, db rowQueryer, evidenceSQL string, evidence any, now time.Time) (bool, error) {
+	var superseded bool
 	var raw []byte
-	err := db.QueryRowContext(ctx, `WITH evidence(source,id,observed_ns,state_hash) AS (`+evidenceSQL+`),
-candidates AS (
- SELECT e.source,e.id,e.state_hash,a.data,a.observed_ns,1 AS signed FROM evidence e JOIN pushed_advisories a USING(source,id)
+	t := now.UnixNano()
+	err := db.QueryRowContext(ctx, `WITH evidence(source,id,observed_ns,state_hash,airport) AS (`+evidenceSQL+`),
+candidates(source,id,evidence_ns,state_hash,airport,data,observed_ns,signed) AS (
+ SELECT e.source,e.id,e.observed_ns,e.state_hash,e.airport,a.data,a.observed_ns,1 FROM evidence e JOIN pushed_advisories a USING(source,id)
  WHERE a.observed_ns>=e.observed_ns AND a.observed_ns<=? AND (e.state_hash<>'' OR a.observed_ns>e.observed_ns)
  UNION ALL
- SELECT e.source,e.id,e.state_hash,q.data,q.observed_ns,1 AS signed
+ SELECT e.source,e.id,e.observed_ns,e.state_hash,e.airport,q.data,q.observed_ns,1
  FROM evidence e JOIN pushed_advisory_predecessors q USING(source,id) JOIN pushed_advisories p USING(source,id)
  WHERE p.observed_ns>? AND q.observed_ns>=e.observed_ns AND q.observed_ns<=? AND (e.state_hash<>'' OR q.observed_ns>e.observed_ns)
  UNION ALL
- SELECT e.source,e.id,e.state_hash,a.data,a.observed_ns,0 AS signed FROM evidence e JOIN polled_flight_notices a USING(source,id)
+ SELECT e.source,e.id,e.observed_ns,e.state_hash,e.airport,a.data,a.observed_ns,0 FROM evidence e JOIN polled_flight_notices a USING(source,id)
  WHERE a.observed_ns>=e.observed_ns AND a.observed_ns<=? AND (e.state_hash<>'' OR a.observed_ns>e.observed_ns)
 ), latest AS (
- SELECT *, ROW_NUMBER() OVER(PARTITION BY source,id,state_hash ORDER BY observed_ns DESC,signed DESC) AS revision_rank FROM candidates
+ SELECT *, ROW_NUMBER() OVER(PARTITION BY source,id,evidence_ns,state_hash,airport ORDER BY observed_ns DESC,signed DESC) AS revision_rank
+ FROM candidates
+), scoped AS (
+ SELECT source,id,observed_ns,airport FROM evidence WHERE airport<>''
+ UNION ALL
+ SELECT source,id,evidence_ns,json_extract(data,'$.airport') FROM latest WHERE revision_rank=1 AND airport='' AND state_hash<>''
 )
-SELECT json_group_array(json_object('stateHash',state_hash,'advisory',json(data))) FROM latest WHERE revision_rank=1`,
-		evidence, now.UnixNano(), now.UnixNano(), now.UnixNano(), now.UnixNano()).Scan(&raw)
-	if err != nil {
-		return false, err
+SELECT EXISTS(SELECT 1 FROM scoped e JOIN advisory_supersessions s
+ ON s.source=e.source AND s.airport=e.airport AND s.predecessor_id=e.id
+ AND s.observed_ns BETWEEN e.observed_ns AND ?),
+ (SELECT json_group_array(json_object('stateHash',state_hash,'advisory',json(data))) FROM latest WHERE revision_rank=1)`,
+		evidence, t, t, t, t, t).Scan(&superseded, &raw)
+	if err != nil || superseded {
+		return superseded, err
 	}
 	var revisions []struct {
 		StateHash string         `json:"stateHash"`

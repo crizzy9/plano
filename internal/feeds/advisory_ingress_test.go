@@ -2,10 +2,75 @@ package feeds
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestBridgeAdvisorySupersedesID(t *testing.T) {
+	const id = `"id":"EGTT:A1234/26"`
+	const airport = `"airport":"EGLL"`
+	const base = id + `,` + airport + `,"kind":"ground_delay","observedAt":"2026-11-05T18:00:00Z"`
+	const link = `,"supersedesId":"  EGTT:A1233/26  "`
+	const cancellation = `,"rawReason":"(A1234/26 NOTAMC A1233/26\nA) EGLL\nB) 2611051800\nE) CANCELLED)"`
+	const replacement = `,"rawReason":"(A1234/26 NOTAMR A1233/26\nA) EGLL\nB) 2611051800\nC) 2611052000\nE) OBST TOWER)"`
+	for _, tc := range []struct {
+		name, fields, wantLink, wantKind string
+	}{
+		{"operator link without raw", base + link, "EGTT:A1233/26", "ground_delay"},
+		{"replacement", base + link + replacement, "EGTT:A1233/26", "ground_delay"},
+		{"compact replacement", base + link + strings.Replace(replacement, "/26 NOTAMR", "/26NOTAMR", 1), "EGTT:A1233/26", "ground_delay"},
+		{"cancellation", base + link + cancellation, "EGTT:A1233/26", "notam_cancellation"},
+		{"header-only cancellation", base + link + `,"rawReason":"(A1234/26NOTAMC A1233/26)"`, "EGTT:A1233/26", "notam_cancellation"},
+		{"unlinked cancellation", base + cancellation, "", "ground_delay"},
+		{"unsafe link", base + `,"supersedesId":"EGTT:A12\n33/26"`, "", ""},
+		{"blank link", base + `,"supersedesId":"  "`, "", ""},
+		{"self link", base + `,"supersedesId":" EGTT:A1234/26 "`, "", ""},
+		{"unsafe linked ID", strings.Replace(base, id, `"id":"unsafe ID"`, 1) + link, "", ""},
+		{"area-only link", strings.Replace(base, airport, `"area":"EGTT"`, 1) + link, "", ""},
+		{"cancellation airport mismatch", strings.Replace(base, airport, `"airport":"EGKK"`, 1) + link + cancellation, "", ""},
+		{"replacement airport mismatch", strings.Replace(base, airport, `"airport":"EGKK"`, 1) + link + replacement, "", ""},
+		{"compact replacement airport mismatch", strings.Replace(base, airport, `"airport":"EGKK"`, 1) + link + strings.Replace(replacement, "/26 NOTAMR", "/26NOTAMR", 1), "", ""},
+		{"invalid Item A", base + link + strings.Replace(cancellation, `A) EGLL`, `A) E123`, 1), "", ""},
+		{"empty Item A", base + link + strings.Replace(cancellation, `A) EGLL`, `A)`, 1), "", ""},
+		{"duplicate Item A", base + link + strings.Replace(cancellation, `A) EGLL`, `A) EGLL\nA) EGLL`, 1), "", ""},
+		{"multiple Item A locations", base + link + strings.Replace(cancellation, `A) EGLL`, `A) EGLL EGKK`, 1), "", ""},
+		{"out-of-order Item A", base + link + strings.Replace(cancellation, `A) EGLL\nB) 2611051800`, `B) 2611051800\nA) EGLL`, 1), "", ""},
+		{"missing reference", base + link + strings.Replace(cancellation, `NOTAMC A1233/26`, `NOTAMC`, 1), "", ""},
+		{"malformed reference", base + link + strings.Replace(cancellation, `NOTAMC A1233/26`, `NOTAMC ABC`, 1), "", ""},
+		{"extra reference", base + link + strings.Replace(cancellation, `NOTAMC A1233/26`, `NOTAMC A1233/26 A1232/26`, 1), "", ""},
+		{"different-series reference", base + link + strings.Replace(cancellation, `NOTAMC A1233/26`, `NOTAMC B1233/26`, 1), "", ""},
+		{"same-serial reference", base + link + strings.Replace(cancellation, `NOTAMC A1233/26`, `NOTAMC A1234/26`, 1), "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := `{` + tc.fields + `}`
+			pushed, pushErr := DecodeAdvisoryIngress(strings.NewReader(`{"version":1,"source":"eurocontrol_nm","advisory":` + row + `}`))
+			client := &http.Client{Transport: testTransport(func(*http.Request) (*http.Response, error) {
+				return response(http.StatusOK, `{"version":1,"advisories":[`+row+`]}`)
+			})}
+			gateway, err := NewAdvisoryGateway("https://fixture.invalid/advisories", "", Eurocontrol, client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			polled, pollErr := gateway.Advisories(t.Context())
+			if tc.wantKind == "" {
+				if !errors.Is(pushErr, ErrInvalidQuery) || !errors.Is(pollErr, ErrUnavailable) {
+					t.Fatalf("expected push and poll to reject the link, got %v and %v", pushErr, pollErr)
+				}
+				return
+			}
+			if pushErr != nil || pollErr != nil || len(polled) != 1 {
+				t.Fatalf("push error = %v, poll rows = %d, poll error = %v", pushErr, len(polled), pollErr)
+			}
+			for _, got := range []Advisory{pushed, polled[0]} {
+				if got.Source != Eurocontrol || got.Airport != "EGLL" || got.SupersedesID != tc.wantLink || got.Kind != tc.wantKind {
+					t.Errorf("advisory = %+v, want link %q and kind %q", got, tc.wantLink, tc.wantKind)
+				}
+			}
+		})
+	}
+}
 
 func TestDecodeAdvisoryIngressNormalizesDisplayAndPreservesRaw(t *testing.T) {
 	input := `{

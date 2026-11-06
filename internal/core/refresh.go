@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
@@ -54,6 +56,12 @@ func (r Refresher) refresh(ctx context.Context) error {
 			id := named.AdvisorySourceID()
 			if err := r.Store.cachePolledFlightNotices(ctx, id, result, time.Now()); err != nil && ctx.Err() == nil {
 				r.Logger.Warn("could not cache flight notices", "source", id, "error", err)
+				if errors.Is(err, feeds.ErrInvalidQuery) {
+					continue
+				}
+				if slices.ContainsFunc(result, func(a feeds.Advisory) bool { return a.SupersedesID != "" }) {
+					return err
+				}
 			}
 		}
 		if advisories == nil {
@@ -67,6 +75,10 @@ func (r Refresher) refresh(ctx context.Context) error {
 		return err
 	}
 	advisories = mergeAdvisories(advisories, pushed, advisoryNow)
+	advisories, err = r.Store.filterSupersededAdvisories(ctx, advisories, advisoryNow)
+	if err != nil {
+		return err
+	}
 	for _, prior := range active {
 		if ctx.Err() != nil {
 			return ctx.Err()

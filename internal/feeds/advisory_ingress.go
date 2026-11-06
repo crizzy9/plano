@@ -68,6 +68,13 @@ func normalizeBridgeAdvisory(row *Advisory, source string) bool {
 		row.StartsAt != nil && row.EndsAt != nil && !row.EndsAt.After(*row.StartsAt) {
 		return false
 	}
+	if row.SupersedesID != "" {
+		row.SupersedesID = strings.TrimSpace(row.SupersedesID)
+		if row.Airport == "" || row.SupersedesID == row.ID || !bridgeAdvisoryID.MatchString(row.ID) ||
+			!bridgeAdvisoryID.MatchString(row.SupersedesID) || !normalizeLinkedNOTAM(row) {
+			return false
+		}
+	}
 	row.Source = source
 	return true
 }
