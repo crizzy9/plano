@@ -478,8 +478,12 @@ push session.
 Unchanged live progress uses normal-priority refreshes that FCM discards if
 it cannot deliver them immediately. A quiet flight's progress can expire if
 the phone remains in Doze. Live starts, ends, and changes keep high priority
-and their delivery window. Android checks observation order when delayed live
-updates arrive.
+and their delivery window. Android uses the original observation time to
+order delayed live updates, including updates from the same second. Older
+queued messages still use their whole-second time and FCM send time. When a
+precise observation and an older-format observation share a second, Android
+prefers the precise one. A received end update also prevents the widget
+from showing cached progress for that flight after an app restart.
 [FCM message lifespan](https://firebase.google.com/docs/cloud-messaging/customize-messages/setting-message-lifespan) · [FCM Android priorities](https://firebase.google.com/docs/cloud-messaging/android-message-priority)
 
 When Android hides private notification content, Plano supplies a lock-screen

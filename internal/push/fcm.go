@@ -314,6 +314,9 @@ func (f *FCM) request(m Message, deviceToken string, now time.Time) (fcmRequest,
 		data["departureEpoch"] = strconv.FormatInt(state.DepartureEpoch, 10)
 		data["arrivalEpoch"] = strconv.FormatInt(state.ArrivalEpoch, 10)
 		data["observedEpoch"] = strconv.FormatInt(state.ObservedEpoch, 10)
+		if m.LiveObservedNs != 0 {
+			data["liveObservedNs"] = strconv.FormatInt(m.LiveObservedNs, 10)
+		}
 		for key, value := range map[string]string{
 			"flightNumber":      state.FlightNumber,
 			"departureGate":     state.DepartureGate,

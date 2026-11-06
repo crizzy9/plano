@@ -84,6 +84,8 @@ type Message struct {
 	DismissAt           time.Time
 	RequestUpdateToken  bool // Enable for iOS 18 or later push-to-start registrations.
 
+	// LiveObservedNs preserves the source observation for Android delivery ordering.
+	LiveObservedNs int64 `json:",omitempty"`
 	// AndroidLiveHeartbeat marks a routine refresh for immediate delivery only.
 	AndroidLiveHeartbeat bool   `json:",omitempty"`
 	binding              string // Opaque session binding from the destination device registration.
@@ -152,6 +154,10 @@ func (m Message) prepare(now time.Time) (Message, error) {
 		m.State = &state
 	default:
 		return m, errors.New("unsupported push kind")
+	}
+	if m.LiveObservedNs != 0 && (m.Kind == Alert || m.LiveObservedNs < int64(time.Second) ||
+		m.LiveObservedNs/int64(time.Second) != m.State.ObservedEpoch) {
+		return m, errors.New("invalid live push observation time")
 	}
 	if strings.TrimSpace(m.FlightID) == "" {
 		return m, errors.New("push requires a flight ID")

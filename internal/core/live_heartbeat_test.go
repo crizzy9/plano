@@ -37,7 +37,7 @@ func TestLiveHeartbeatWithFiveSecondObservations(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = store.Close() })
-			now := time.Now().UTC().Truncate(time.Second)
+			now := time.Now().UTC().Truncate(time.Second).Add(123456789 * time.Nanosecond)
 			departure, arrival := now.Add(-6*time.Hour), now.Add(2*time.Hour)
 			flight := feeds.Flight{ID: "long-haul", Number: "UA123", Origin: "SFO", Destination: "LHR",
 				Status: "airborne", ScheduledDeparture: &departure, EstimatedArrival: &arrival, ObservedAt: now.Add(-time.Second)}
@@ -71,7 +71,8 @@ func TestLiveHeartbeatWithFiveSecondObservations(t *testing.T) {
 					if job.message.Kind != want[i] || job.target.Platform != platform {
 						t.Fatalf("at %v: got %s on %s, want %s on %s", offset, job.message.Kind, job.target.Platform, want[i], platform)
 					}
-					if offset > 0 && job.message.State.ObservedEpoch != flight.ObservedAt.Unix() {
+					if offset > 0 && (job.message.State.ObservedEpoch != flight.ObservedAt.Unix() ||
+						job.message.LiveObservedNs != flight.ObservedAt.UnixNano()) {
 						t.Fatalf("at %v: job used an older observation", offset)
 					}
 					if heartbeat := platform == "android" && offset == time.Minute; job.message.AndroidLiveHeartbeat != heartbeat {
@@ -109,11 +110,12 @@ func TestLiveHeartbeatWithFiveSecondObservations(t *testing.T) {
 
 func TestAndroidLiveHeartbeatPreservesPendingChange(t *testing.T) {
 	ctx := t.Context()
-	store, err := Open(filepath.Join(t.TempDir(), "heartbeat-retry.db"))
+	path := filepath.Join(t.TempDir(), "heartbeat-retry.db")
+	store, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	t.Cleanup(func() { _ = store.Close() })
 	now := time.Now().UTC().Truncate(time.Second)
 	flight := feeds.Flight{ID: "heartbeat-retry", Number: "UA123", Origin: "SFO", Destination: "LHR",
 		Status: "airborne", ObservedAt: now}
@@ -133,11 +135,12 @@ func TestAndroidLiveHeartbeatPreservesPendingChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	observe(now.Add(time.Second))
-	if jobs := liveJobsAt(t, store, flight.ObservedAt); len(jobs) != 1 || jobs[0].message.Kind != push.LiveStart {
+	if jobs := liveJobsAt(t, store, flight.ObservedAt); len(jobs) != 1 || jobs[0].message.Kind != push.LiveStart ||
+		jobs[0].message.LiveObservedNs != flight.ObservedAt.UnixNano() {
 		t.Fatalf("expected a delivered start, got %v", jobs)
 	}
 	flight.ArrivalGate = "B12"
-	changedAt := now.Add(5 * time.Second)
+	changedAt := flight.ObservedAt.Add(200 * time.Millisecond)
 	observe(changedAt)
 	jobs, err := store.claim(ctx, changedAt, 16)
 	if err != nil {
@@ -157,12 +160,21 @@ func TestAndroidLiveHeartbeatPreservesPendingChange(t *testing.T) {
 	if changeID == 0 {
 		t.Fatal("expected a meaningful Android change to retry")
 	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = reopened
 	observe(changedAt.Add(time.Minute))
 	if jobs := liveJobsAt(t, store, flight.ObservedAt); len(jobs) != 0 {
 		t.Fatalf("a heartbeat displaced the pending change: %v", jobs)
 	}
 	if jobs := liveJobsAt(t, store, changedAt.Add(2*time.Minute)); len(jobs) != 1 || jobs[0].id != changeID ||
-		jobs[0].message.AndroidLiveHeartbeat || jobs[0].message.State.ArrivalGate != "B12" {
+		jobs[0].message.AndroidLiveHeartbeat || jobs[0].message.State.ArrivalGate != "B12" ||
+		jobs[0].message.State.ObservedEpoch != changedAt.Unix() || jobs[0].message.LiveObservedNs != changedAt.UnixNano() {
 		t.Fatalf("expected to retry the original change, got %v", jobs)
 	}
 }

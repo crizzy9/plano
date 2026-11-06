@@ -38,7 +38,9 @@ class PlanoFlightWidgetProvider : AppWidgetProvider() {
       LEGACY_PROGRESS_EXPIRY_ACTION -> {
         val flightId = intent.getStringExtra("flightId") ?: return
         val binding = intent.getStringExtra("binding") ?: return
-        AndroidPushSession.expireProgress(context, flightId, binding, intent.getLongExtra("observedEpoch", 0))
+        if (intent.getLongExtra("expiryElapsed", 0) > SystemClock.elapsedRealtime()) return
+        val observation = LiveObservation(intent.getLongExtra("observedEpoch", 0), intent.getLongExtra("observedNs", 0))
+        AndroidPushSession.expireProgress(context, flightId, binding, observation)
       }
       else -> super.onReceive(context, intent)
     }
@@ -75,32 +77,37 @@ internal object PlanoFlightWidget {
     started: Boolean,
     ended: Boolean,
     progress: WidgetFlightProgress?,
+    observation: LiveObservation,
     sentAt: Long,
     data: Map<String, String>,
-    stoppedKeys: Set<String>,
+    hiddenKeys: Set<String>,
   ): Boolean {
     val now = System.currentTimeMillis()
-    val cache = read(context, now, binding, stoppedKeys)
+    val cache = read(context, now, binding, hiddenKeys)
     val key = hashPushIdentity(flightId)
 
     if (ended) {
       cache.removeFlight(key)
-    } else {
-      if (progress == null || !progress.isFresh(now)) return false
-      if (!acceptsLiveAfterStop(cache.stopped[key] ?: 0, started, progress.observedAt / 1000, sentAt)) return false
-      cache.stopped.remove(key)
-      val details = if (cache.detailsEnabled) WidgetFlightDetails.fromFlight(progress.phase, data) else null
-      cache.flights[key] = progress.copy(details = details, flightId = flightId.takeIf(::validNotificationFlightId))
+      try {
+        write(context, cache, binding)
+      } finally {
+        render(context, cache, now, binding)
+      }
+      return true
     }
+    if (progress == null || !progress.isFresh(now)) return false
+    if (!acceptsLiveAfterStop(cache.stopped[key] ?: 0, started, observation, sentAt)) return false
+    cache.stopped.remove(key)
+    val details = if (cache.detailsEnabled) WidgetFlightDetails.fromFlight(progress.phase, data) else null
+    cache.flights[key] = progress.copy(details = details, flightId = flightId.takeIf(::validNotificationFlightId))
     write(context, cache, binding)
     render(context, cache, now, binding)
     return true
   }
 
   @Synchronized
-  fun stop(context: Context, flightId: String, binding: String, stoppedKeys: Set<String>) {
-    val now = System.currentTimeMillis()
-    val cache = read(context, now, binding, stoppedKeys)
+  fun stop(context: Context, flightId: String, binding: String, hiddenKeys: Set<String>, now: Long) {
+    val cache = read(context, now, binding, hiddenKeys)
     val key = hashPushIdentity(flightId)
     cache.removeFlight(key)
     cache.stopped[key] = now
@@ -126,18 +133,18 @@ internal object PlanoFlightWidget {
   fun detailsEnabled(context: Context): Boolean = read(context, System.currentTimeMillis(), null).detailsEnabled
 
   @Synchronized
-  fun isPinned(context: Context, binding: String, flightId: String, stoppedKeys: Set<String>): Boolean {
-    val cache = read(context, System.currentTimeMillis(), binding, stoppedKeys)
+  fun isPinned(context: Context, binding: String, flightId: String, hiddenKeys: Set<String>): Boolean {
+    val cache = read(context, System.currentTimeMillis(), binding, hiddenKeys)
     return cache.pinnedFlightKey == hashPushIdentity(flightId)
   }
 
   @Synchronized
-  fun setPinned(context: Context, binding: String, flightId: String, pinned: Boolean, stoppedKeys: Set<String>): Boolean {
+  fun setPinned(context: Context, binding: String, flightId: String, pinned: Boolean, hiddenKeys: Set<String>): Boolean {
     if (!validNotificationFlightId(flightId)) return false
     val now = System.currentTimeMillis()
-    val cache = read(context, now, binding, stoppedKeys)
+    val cache = read(context, now, binding, hiddenKeys)
     val key = hashPushIdentity(flightId)
-    if (pinned && (key in stoppedKeys || key in cache.stopped)) return false
+    if (pinned && (key in hiddenKeys || key in cache.stopped)) return false
     if (!pinned && cache.pinnedFlightKey != null && cache.pinnedFlightKey != key) return false
 
     val nextKey = key.takeIf { pinned }
@@ -155,9 +162,9 @@ internal object PlanoFlightWidget {
   }
 
   @Synchronized
-  fun setDetailsEnabled(context: Context, enabled: Boolean, binding: String?, stoppedKeys: Set<String>) {
+  fun setDetailsEnabled(context: Context, enabled: Boolean, binding: String?, hiddenKeys: Set<String>) {
     val now = System.currentTimeMillis()
-    val cache = read(context, now, binding, stoppedKeys).copy(detailsEnabled = enabled)
+    val cache = read(context, now, binding, hiddenKeys).copy(detailsEnabled = enabled)
     try {
       write(context, cache, binding, verify = true)
       detailsBlocked = false
@@ -171,18 +178,18 @@ internal object PlanoFlightWidget {
   }
 
   @Synchronized
-  fun refresh(context: Context, binding: String?, stoppedKeys: Set<String>) {
+  fun refresh(context: Context, binding: String?, hiddenKeys: Set<String>) {
     val now = System.currentTimeMillis()
-    val cache = read(context, now, binding, stoppedKeys)
+    val cache = read(context, now, binding, hiddenKeys)
     if (cache.needsRewrite) runCatching { write(context, cache, binding) }
     render(context, cache, now, binding)
   }
 
   @Synchronized
-  fun resolveTap(context: Context, binding: String, key: String, stoppedKeys: Set<String>): String? {
+  fun resolveTap(context: Context, binding: String, key: String, hiddenKeys: Set<String>): String? {
     if (!hashKeyPattern.matches(key)) return null
     val now = System.currentTimeMillis()
-    val cache = read(context, now, binding, stoppedKeys)
+    val cache = read(context, now, binding, hiddenKeys)
     val selected = selectWidgetFlight(cache.flights, now, cache.pinnedFlightKey) ?: return null
     return selected.flightId?.takeIf { selected.tapKey(binding) == key }
   }
@@ -284,12 +291,12 @@ internal object PlanoFlightWidget {
   // The cache is app-private and excluded from Android backup/restore.
   private fun cacheFile(context: Context) = AtomicFile(File(context.noBackupFilesDir, "plano-flight-widget.json"))
 
-  private fun read(context: Context, now: Long, binding: String?, stoppedKeys: Set<String> = emptySet()): Cache = runCatching {
+  private fun read(context: Context, now: Long, binding: String?, hiddenKeys: Set<String> = emptySet()): Cache = runCatching {
     val data = JSONObject(cacheFile(context).readFully().toString(Charsets.UTF_8))
     val cache = Cache(detailsEnabled = !detailsBlocked && data.opt("detailsEnabled") == true)
     if (binding == null || data.optString("bindingKey") != hashPushIdentity(binding)) return cache
     cache.pinnedFlightKey = data.optString("pinnedFlightKey").takeIf(hashKeyPattern::matches)
-    if (cache.pinnedFlightKey?.let { it in stoppedKeys } == true) {
+    if (cache.pinnedFlightKey?.let { it in hiddenKeys } == true) {
       cache.pinnedFlightKey = null
       cache.needsRewrite = true
     }
@@ -298,7 +305,7 @@ internal object PlanoFlightWidget {
       val entry = flights.getJSONObject(index)
       val key = entry.getString("key")
       // Honor the session fence even when an older widget cache could not be rewritten.
-      if (key in stoppedKeys) {
+      if (key in hiddenKeys) {
         cache.needsRewrite = true
         continue
       }

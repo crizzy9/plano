@@ -346,6 +346,10 @@ func liveMessage(flight feeds.Flight, kind push.Kind, seat string, now time.Time
 		staleAt = observed.Add(liveFreshness)
 	}
 	msg := push.Message{Kind: kind, FlightID: flight.ID, Title: flight.Number + " · " + flight.Origin + " to " + flight.Destination, Body: "Track this flight with Plano.", State: state, Timestamp: now, StaleAt: staleAt, ExpiresAt: now.Add(liveFreshness), CollapseID: hash(flight.ID)}
+	if observedNs := flight.ObservedAt.UnixNano(); state.ObservedEpoch > 0 && observedNs > 0 &&
+		time.Unix(0, observedNs).Equal(flight.ObservedAt) {
+		msg.LiveObservedNs = observedNs
+	}
 	if kind == push.LiveEnd {
 		msg.DismissAt = now.Add(20 * time.Minute)
 	}

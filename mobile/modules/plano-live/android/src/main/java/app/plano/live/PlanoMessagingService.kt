@@ -77,7 +77,7 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
 
   private fun showProgress(data: Map<String, String>, binding: String, sentAt: Long) {
     val flightId = data["flightId"]?.takeIf(::validNotificationFlightId) ?: return
-    val observedAt = data["observedEpoch"]?.toLongOrNull() ?: return
+    val observation = parseLiveObservation(data) ?: return
     val event = data["event"]
     if (event !in listOf("start", "update", "end")) return
     val status = data["status"]
@@ -86,20 +86,19 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     val progress = if (ended) null else {
       val departure = data["departureEpoch"]?.toLongOrNull() ?: 0
       val arrival = data["arrivalEpoch"]?.toLongOrNull() ?: 0
-      val state = WidgetFlightProgress.fromEpochs(status, observedAt, departure, arrival) ?: return
+      val state = WidgetFlightProgress.fromEpochs(status, observation.seconds, departure, arrival) ?: return
       if (!state.isFresh(System.currentTimeMillis())) return
       state
     }
-    val accepted = AndroidPushSession.advance(this, flightId, observedAt, sentAt, started, ended) ?: return
+    val accepted = AndroidPushSession.advance(this, flightId, observation, sentAt, started, ended) ?: return
     val tag = liveNotificationTag(flightId)
     // Keep the widget independent of notification permission. Its own privacy
     // setting controls which details it can keep from accepted flight updates.
     val widgetAccepted = runCatching {
       PlanoFlightWidget.onFlight(
-        this, flightId, binding, started, ended, progress,
-        sentAt.takeIf { it > 0 } ?: epochMillis(observedAt),
+        this, flightId, binding, started, ended, progress, observation, sentAt,
         data,
-        accepted.stoppedKeys,
+        accepted.hiddenWidgetKeys,
       )
     }.getOrNull()
     if (progress == null) {
@@ -165,7 +164,7 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     }
     manager.notify(tag, 0, builder.build())
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-      scheduleLegacyExpiry(flightId, binding, observedAt, progress.expiresAt)
+      scheduleLegacyExpiry(flightId, binding, observation, progress.expiresAt)
     }
   }
 
@@ -206,19 +205,22 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     }
   }
 
-  private fun scheduleLegacyExpiry(flightId: String, binding: String, observedEpoch: Long, expiresAt: Long) {
+  private fun scheduleLegacyExpiry(flightId: String, binding: String, observation: LiveObservation, expiresAt: Long) {
     val alarm = getSystemService(AlarmManager::class.java) ?: return
+    val delay = (expiresAt - System.currentTimeMillis()).coerceAtLeast(0L)
+    val expiryElapsed = SystemClock.elapsedRealtime() + delay
     val intent = Intent(this, PlanoFlightWidgetProvider::class.java)
       .setAction(LEGACY_PROGRESS_EXPIRY_ACTION)
       .setData(Uri.parse("plano://live-progress-expiry/${hashPushIdentity(flightId)}"))
       .putExtra("flightId", flightId)
       .putExtra("binding", binding)
-      .putExtra("observedEpoch", observedEpoch)
+      .putExtra("observedEpoch", observation.seconds)
+      .putExtra("observedNs", observation.nanos)
+      .putExtra("expiryElapsed", expiryElapsed)
     val pending = PendingIntent.getBroadcast(
       this, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     ) ?: return
-    val delay = (expiresAt - System.currentTimeMillis()).coerceAtLeast(0L)
-    alarm.set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + delay, pending)
+    alarm.set(AlarmManager.ELAPSED_REALTIME, expiryElapsed, pending)
   }
 
   private fun progressAction(action: String, flightId: String, binding: String, instance: String): PendingIntent? {

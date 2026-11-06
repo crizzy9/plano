@@ -62,11 +62,33 @@ fun main() {
 
   val stoppedAt = now + 3_000L
   val newer = stoppedAt + 1_000L
-  check(!acceptsLiveAfterStop(stoppedAt, false, newer / 1000, newer))
-  check(!acceptsLiveAfterStop(stoppedAt, true, now / 1000, newer))
-  check(!acceptsLiveAfterStop(stoppedAt, true, stoppedAt / 1000, stoppedAt))
-  check(acceptsLiveAfterStop(stoppedAt, true, newer / 1000, newer))
-  check(acceptsLiveAfterStop(stoppedAt, true, newer / 1000, 0))
+  check(!acceptsLiveAfterStop(stoppedAt, false, LiveObservation(newer / 1000), newer))
+  check(!acceptsLiveAfterStop(stoppedAt, true, LiveObservation(now / 1000), newer))
+  check(!acceptsLiveAfterStop(stoppedAt, true, LiveObservation(stoppedAt / 1000), stoppedAt))
+  check(acceptsLiveAfterStop(stoppedAt, true, LiveObservation(newer / 1000), newer))
+  check(acceptsLiveAfterStop(stoppedAt, true, LiveObservation(newer / 1000), 0))
+
+  val seconds = now / 1000
+  val legacyData = mapOf("observedEpoch" to seconds.toString())
+  val legacy = checkNotNull(parseLiveObservation(legacyData))
+  val early = LiveObservation(seconds, seconds * 1_000_000_000L + 100_000_000)
+  val late = LiveObservation(seconds, seconds * 1_000_000_000L + 900_000_000)
+  check(parseLiveObservation(legacyData + ("liveObservedNs" to late.nanos.toString())) == late)
+  for (invalid in listOf("", "-1", "0", "9223372036854775808", ((seconds + 1) * 1_000_000_000L).toString())) {
+    check(parseLiveObservation(legacyData + ("liveObservedNs" to invalid)) == null)
+  }
+  // The late terminal observation wins even when the early update was sent last.
+  check(late.isNewerThan(early, now + 1_000, now + 2_000))
+  check(!early.isNewerThan(late, now + 2_000, now + 1_000))
+  check(late.isNewerThan(early, 0, now + 2_000))
+  check(late.isNewerThan(late, now + 2_000, now + 1_000))
+  check(!late.isNewerThan(late, now + 1_000, now + 1_000))
+  check(!legacy.isNewerThan(late, now + 3_000, now + 1_000))
+  check(late.isNewerThan(legacy, now + 1_000, now + 3_000))
+  check(legacy.isNewerThan(legacy, now + 3_000, now + 1_000))
+  check(LiveObservation(seconds + 1).isNewerThan(late, 0, now + 2_000))
+  check(!acceptsLiveAfterStop(now + 500, true, early, now + 2_000))
+  check(acceptsLiveAfterStop(now + 500, true, late, 0))
 
   val original = checkNotNull(nextLiveProgressNotification(null, started = true, ended = false) { "first" })
   check(!original.dismiss("stale").dismissed)
@@ -76,5 +98,5 @@ fun main() {
   check(nextLiveProgressNotification(dismissed, started = false, ended = true) { error("end created a notice") } == null)
   val restarted = checkNotNull(nextLiveProgressNotification(dismissed, started = true, ended = false) { "second" })
   check(!restarted.dismiss("first").dismissed)
-  println("Flight progress deadline, selection, stop, and notification dismissal fixtures passed")
+  println("Flight progress ordering, deadline, selection, stop, and notification dismissal fixtures passed")
 }

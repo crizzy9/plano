@@ -112,6 +112,8 @@ func TestAPNsWireRequests(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	collapsed := fixtureAlert(now)
 	collapsed.APNsCollapseID = strings.Repeat("a", 64)
+	update := fixtureActivity(LiveUpdate, now)
+	update.LiveObservedNs = now.Add(850 * time.Millisecond).UnixNano()
 	for _, test := range []struct {
 		name, topic, pushType, priority, collapse string
 		message                                   Message
@@ -123,7 +125,7 @@ func TestAPNsWireRequests(t *testing.T) {
 		{"connection alert", "com.example.plano", "alert", "10", "event-fixture", fixtureConnectionAlert(now), 0, ""},
 		{"legacy start", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 0, ""},
 		{"bound start requests update token", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 1, binding},
-		{"update", "com.example.plano.push-type.liveactivity", "liveactivity", "5", "flight-update", fixtureActivity(LiveUpdate, now), 0, binding},
+		{"update", "com.example.plano.push-type.liveactivity", "liveactivity", "5", "flight-update", update, 0, binding},
 		{"end", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveEnd, now), 0, binding},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -162,6 +164,9 @@ func TestAPNsWireRequests(t *testing.T) {
 				body, err := io.ReadAll(r.Body)
 				if err != nil || len(body) > maxPayloadBytes {
 					t.Fatalf("reading APNs body: bytes=%d, error=%v", len(body), err)
+				}
+				if strings.Contains(string(body), "liveObservedNs") || strings.Contains(string(body), "LiveObservedNs") {
+					t.Errorf("APNs request contained Android live ordering metadata: %s", body)
 				}
 				var wire struct {
 					APS struct {
@@ -294,9 +299,12 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 	update := fixtureActivity(LiveUpdate, now)
 	update.Title = "UA7 to JFK"
 	update.Body = "Track this flight with Plano."
+	update.LiveObservedNs = now.UnixNano()
 	heartbeat := update
 	heartbeat.AndroidLiveHeartbeat = true
-	messages := []Message{ordered, fixtureActivity(LiveStart, now), heartbeat, update, fixtureActivity(LiveEnd, now), fixtureConnectionAlert(now)}
+	end := fixtureActivity(LiveEnd, now)
+	end.LiveObservedNs = now.UnixNano()
+	messages := []Message{ordered, fixtureActivity(LiveStart, now), heartbeat, update, end, fixtureConnectionAlert(now)}
 	var exchanges, sends int
 	client.client = &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		body, err := io.ReadAll(r.Body)
@@ -355,6 +363,11 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 			inboundID, hasInboundID := got.Data["connectionInboundId"]
 			if inboundID != message.ConnectionInboundID || hasInboundID != (message.ConnectionInboundID != "") {
 				t.Errorf("invalid FCM connection route: %s", body)
+			}
+			liveObserved, hasLiveObserved := got.Data["liveObservedNs"]
+			if hasLiveObserved != (message.LiveObservedNs != 0) ||
+				hasLiveObserved && liveObserved != strconv.FormatInt(message.LiveObservedNs, 10) {
+				t.Errorf("invalid FCM live ordering metadata: %s", body)
 			}
 			ttl, err := time.ParseDuration(got.Android.TTL)
 			if err != nil || ttl < 0 || ttl > 90*time.Second || (ttl == 0) != message.AndroidLiveHeartbeat {
@@ -482,6 +495,29 @@ func TestAlertOrderingValidatesKindAndTimes(t *testing.T) {
 	prepared, err := message.prepare(now)
 	if err != nil || !prepared.Timestamp.Equal(now) || !prepared.ExpiresAt.Equal(now.Add(15*time.Minute)) {
 		t.Errorf("invalid alert window defaults: %+v, %v", prepared, err)
+	}
+}
+
+func TestLiveObservationTimeValidation(t *testing.T) {
+	now := time.Unix(1800000000, 123456789)
+	for _, test := range []struct {
+		name      string
+		message   Message
+		nanos     int64
+		wantError bool
+	}{
+		{"legacy live", fixtureActivity(LiveStart, now), 0, false},
+		{"matching timestamp", fixtureActivity(LiveUpdate, now), now.UnixNano(), false},
+		{"different second", fixtureActivity(LiveEnd, now), now.Add(-time.Second).UnixNano(), true},
+		{"negative", fixtureActivity(LiveUpdate, now), -1, true},
+		{"alert", fixtureAlert(now), now.UnixNano(), true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.message.LiveObservedNs = test.nanos
+			if _, err := test.message.prepare(now); (err != nil) != test.wantError {
+				t.Fatalf("prepare returned %v, wantError=%v", err, test.wantError)
+			}
+		})
 	}
 }
 
