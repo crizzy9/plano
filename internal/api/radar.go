@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/crizzy9/plano/internal/core"
 	"github.com/crizzy9/plano/internal/feeds"
 )
 
@@ -18,6 +19,11 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 	if (provider != "" || query.Get("providerAfter") != "" || query.Get("providerRevision") != "" || query.Get("receiverRevision") != "") && provider != "1" {
 		return errInvalid
 	}
+	swim := query.Get("swim")
+	if swim != "" && (swim != "1" || provider != "1") || swim == "" && (query.Has("swimAfter") || query.Has("swimRevision")) {
+		return errInvalid
+	}
+	withSWIM := swim == "1" && !s.Demo && len(s.SWIMPositionKey) >= 32
 	after, err := parseRadarCursor(query.Get("after"))
 	if err != nil {
 		return err
@@ -34,6 +40,14 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 	if err != nil {
 		return err
 	}
+	swimAfter, err := parseRadarCursor(query.Get("swimAfter"))
+	if err != nil {
+		return err
+	}
+	swimRevision, err := parseReceiverRevision(query.Get("swimRevision"))
+	if err != nil {
+		return err
+	}
 	const pageSize = 256
 	result := make(map[string]any)
 	var positions []feeds.Position
@@ -43,7 +57,12 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 			// A replacement can fill the client's entire visible history.
 			providerLimit = 512
 		}
-		page, err := s.Store.RadarPage(r.Context(), owner, id, after, receiverRevision, providerAfter, providerRevision, pageSize, providerLimit)
+		var page core.RadarPage
+		if withSWIM {
+			page, err = s.Store.RadarPageWithSWIM(r.Context(), owner, id, after, receiverRevision, providerAfter, providerRevision, pageSize, providerLimit, swimAfter, swimRevision)
+		} else {
+			page, err = s.Store.RadarPage(r.Context(), owner, id, after, receiverRevision, providerAfter, providerRevision, pageSize, providerLimit)
+		}
 		if err != nil {
 			return err
 		}
@@ -57,6 +76,15 @@ func (s Server) radar(w http.ResponseWriter, r *http.Request, owner string) erro
 		}
 		if len(page.ProviderPositions) > 0 {
 			result["providerCursor"] = page.ProviderPositions[len(page.ProviderPositions)-1].At.UTC().Format(time.RFC3339Nano)
+		}
+		if withSWIM {
+			result["swimPositions"] = page.SWIMPositions
+			if page.SWIMRevision != nil {
+				result["swimRevision"] = strconv.FormatInt(*page.SWIMRevision, 10)
+			}
+			if len(page.SWIMPositions) > 0 {
+				result["swimCursor"] = page.SWIMPositions[len(page.SWIMPositions)-1].At.UTC().Format(time.RFC3339Nano)
+			}
 		}
 	} else {
 		positions, err = s.Store.RadarPositions(r.Context(), owner, id, after, pageSize)

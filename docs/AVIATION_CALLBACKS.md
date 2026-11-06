@@ -61,6 +61,61 @@ on retries. A `204` acknowledges receipt, including an older or duplicate
 snapshot or one with no eligible flight. Each accepted request returns the
 same empty response.
 
+## FAA SWIM radar positions
+
+An authorized FAA SWIM subscriber can relay permitted airborne position
+reports to Plano. SFDPS publishes en route flight data to authorized
+consumers. Your bridge translates the upstream reports and maps each flight
+to its exact AeroAPI instance ID. Apply the feed agreement and aircraft
+privacy filters before setting `displayAllowed` to `true`. Set it only for
+fixes permitted for every enrolled installation that tracks the flight.
+Forward reported airborne fixes with their original observation times.
+[FAA SFDPS](https://www.faa.gov/air_traffic/technology/swim/sfdps), [FAA LADD](https://www.faa.gov/pilots/ladd)
+
+In live mode, mount a dedicated random signing key of at least 32 bytes and
+set `PLANO_SWIM_POSITION_KEY_FILE` to its container path. Use a different
+key from the other aviation callbacks and advisory gateway tokens. The
+relay takes one normalized JSON report from standard input.
+
+```sh
+export PLANO_SWIM_POSITION_RELAY_URL=https://plano.example.net/v1/webhooks/swim-position
+export PLANO_SWIM_POSITION_KEY_FILE=/run/secrets/plano-swim-position-key
+plano forward-swim-position < positions.json
+```
+
+```json
+{
+  "version": 1,
+  "displayAllowed": true,
+  "providerFlightId": "UAL88-example",
+  "originICAO": "KSFO",
+  "destinationICAO": "KEWR",
+  "scheduledDeparture": "2026-11-06T13:30:00Z",
+  "actualTakeoff": "2026-11-06T13:48:05Z",
+  "positions": [
+    {"at": "2026-11-06T14:06:15.250Z", "latitude": 39.08, "longitude": -119.02, "altitudeFeet": 32000}
+  ]
+}
+```
+
+Send up to 32 fixes in increasing observation time in a body of up to
+16 KiB. Each fix requires `at`, `latitude` and `longitude`. Optional numeric
+fields are `altitudeFeet`, `groundSpeedKnots`, `verticalRateFpm` and `heading`
+in degrees. Times use RFC 3339. Fixes must be at or after actual takeoff
+and within the preceding five minutes. Keep the original times on retries.
+For direct delivery to `POST /v1/webhooks/swim-position`, use the same
+`X-Plano-Timestamp` and `X-Plano-Signature` format as [signed flight snapshots](#signed-flight-snapshots).
+
+Plano checks the provider instance, ICAO route, scheduled departure and
+actual takeoff against one current tracked airborne leg. A valid request
+receives `204`, including when the flight is ineligible or all fixes have
+already been seen. Each source has its own radar cursor. SWIM fixes are
+available to authenticated installations tracking that flight while the
+integration is enabled and appear with the FAA SWIM source label. An aircraft
+or flight identity change clears the earlier SWIM track. Plano retains up to
+2,048 SWIM fixes per flight for seven days in private radar storage separate
+from flight status, notifications, offline detail, Friends and public pickup links.
+
 ## FAA SWIM and EUROCONTROL bridges
 
 Set `PLANO_ADVISORY_INGRESS_KEY_FILE` to a different mounted random secret of at least 32 bytes. Authorized operator bridges can send normalized observations to `POST /v1/webhooks/advisory` as `application/json`.

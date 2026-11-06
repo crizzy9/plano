@@ -35,6 +35,7 @@ type Server struct {
 	AeroCallbackKey      []byte
 	AdvisoryIngressKey   []byte
 	FlightObservationKey []byte
+	SWIMPositionKey      []byte
 }
 
 type ownerHandler func(http.ResponseWriter, *http.Request, string) error
@@ -127,6 +128,9 @@ func (s Server) Handler() http.Handler {
 	}
 	if !s.Demo && len(s.FlightObservationKey) != 0 {
 		mux.HandleFunc("POST /v1/webhooks/flight-observation", s.flightObservationCallback)
+	}
+	if !s.Demo && len(s.SWIMPositionKey) >= 32 {
+		mux.HandleFunc("POST /v1/webhooks/swim-position", s.swimPositionCallback)
 	}
 	s.registerFriendRoutes(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

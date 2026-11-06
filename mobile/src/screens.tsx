@@ -222,6 +222,9 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
   const flight = value?.detail.flight ?? (error && (result?.savedAt || initialSavedAt) ? undefined : initial);
   const aircraft = flight?.aircraftModel || flight?.aircraftType;
   const detail = value?.detail;
+  const radarTracked = value?.tracked === true && !savedAt;
+  const radarKey = flight && [api.server, id, flight.originICAO ?? flight.origin, flight.destinationICAO ?? flight.destination,
+    flight.scheduledDeparture, flight.tailNumber, flight.actualTakeoff, detail?.receiverRevision, radarTracked].join('|');
   const rotationSnapshot = detail?.rotationSnapshot === true;
   const weather = detail?.weather?.filter((report) => Date.parse(report.validUntil) > Date.now()) ?? [];
   const notices = value?.tracked && detail?.flight.id === id ? detail.notices : undefined;
@@ -384,8 +387,7 @@ export function FlightDetailScreen({ api, route, navigation }: APIProps<'Flight'
             <AircraftRotation flight={flight} legs={detail.inbound ?? []} open={savedAt ? undefined : (leg) =>
               navigation.push('Flight', { id: leg.id, number: leg.number, initial: leg, rotationOf: value?.tracked ? flight.id : undefined })} />
           )}
-          <FlightRadar key={`${api.server}:${id}:${flight.tailNumber ?? ''}:${flight.actualTakeoff ?? ''}:${detail?.receiverRevision ?? ''}:${!!value?.tracked}`}
-            api={api} flight={flight} tracked={value?.tracked === true && !savedAt} history={detail?.telemetry}
+          <FlightRadar key={radarKey} api={api} flight={flight} tracked={radarTracked} history={detail?.telemetry}
             detailRevision={detail?.receiverRevision} refreshFlight={refresh} />
           {detail && (!rotationSnapshot || !!detail.events?.length) && (
             <View style={layout.section}>
@@ -553,10 +555,12 @@ function AirportNotices({ flight, notices }: { flight: Flight; notices: FlightNo
 }
 
 const radarInterval = 8_000;
+const radarPageInterval = 1_000;
 const radarMaxPoints = 512;
 const radarPageSize = 256;
 
 const radarSources: Record<string, string> = {
+  faa_swim: 'FAA SWIM',
   flightaware_aeroapi: 'FlightAware',
   operator_readsb: 'Local ADS-B receiver',
   plano_demo: 'Demo data',
@@ -645,9 +649,12 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
 }) {
   const id = flight.id;
   const inFlight = tracked && (flight.status === 'airborne' || flight.status === 'diverted') && !flight.actualLanding && !flight.actualArrival;
+  const canReadRadar = inFlight || tracked && !!flight.actualTakeoff;
   const receiverCursor = useRef<{ after?: string; revision?: string }>({});
+  const swimCursor = useRef<{ after?: string; revision?: string }>({});
   const providerRevision = useRef<string>(undefined);
   const [receiver, setReceiver] = useState<{ revision?: string; positions: Position[] }>({ positions: [] });
+  const [swimPositions, setSWIMPositions] = useState<Position[]>([]);
   const [provider, setProvider] = useState<{ revision: string; positions: Position[] }>();
   const [stream, setStream] = useState<'ready' | 'unavailable' | 'interrupted'>();
   const [checkedAt, setCheckedAt] = useState(0);
@@ -657,13 +664,13 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
     if (provider && radarAfter(provider.revision, flight.observedAt)) {
       // A newer provider snapshot can correct or remove an earlier fix.
       const localHistory = history?.filter((point) => point.source === 'operator_readsb');
-      return mergeRadarPositions(provider.positions, localHistory, receiver.positions);
+      return mergeRadarPositions(swimPositions, provider.positions, localHistory, receiver.positions);
     }
-    return mergeRadarPositions(history, receiver.positions);
-  }, [provider, flight.observedAt, history, receiver.positions, replacingAircraft]);
+    return mergeRadarPositions(swimPositions, history, receiver.positions);
+  }, [provider, flight.observedAt, history, receiver.positions, swimPositions, replacingAircraft]);
 
   useFocusEffect(useCallback(() => {
-    if (!inFlight) return;
+    if (!canReadRadar) return;
     let focused = true;
     let foreground = AppState.currentState == null || AppState.currentState === 'active';
     let inProgress = false;
@@ -677,12 +684,15 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
         const knownRevision = providerRevision.current;
         const revision = knownRevision && radarAfter(knownRevision, flight.observedAt) ? knownRevision : flight.observedAt;
         const knownReceiver = receiverCursor.current;
-        const result = await api.radar(id, knownReceiver.after, revision, knownReceiver.revision);
+        const knownSWIM = swimCursor.current;
+        const result = await api.radar(id, knownReceiver.after, revision, knownReceiver.revision, knownSWIM);
         if (!focused || !foreground) return;
         setCheckedAt(Date.now());
         if (!result) {
           supported = false;
           setStream('unavailable');
+          swimCursor.current = {};
+          setSWIMPositions([]);
           return;
         }
         setStream('ready');
@@ -695,7 +705,7 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
         const replaceReceiver = nextReceiverRevision !== undefined && nextReceiverRevision !== knownReceiver.revision;
         if (replaceReceiver || result.positions.length) {
           const nextCursor = result.positions.length ? result.cursor ?? mergeRadarPositions(result.positions).at(-1)?.at : undefined;
-          if (!replaceReceiver && result.positions.length === radarPageSize && nextCursor && nextCursor !== knownReceiver.after) delay = 1_000;
+          if (!replaceReceiver && result.positions.length === radarPageSize && nextCursor && nextCursor !== knownReceiver.after) delay = radarPageInterval;
           const receiverRevision = nextReceiverRevision ?? knownReceiver.revision;
           receiverCursor.current = { after: replaceReceiver ? nextCursor : nextCursor ?? knownReceiver.after, revision: receiverRevision };
           setReceiver((previous) => ({
@@ -703,6 +713,15 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
             positions: mergeRadarPositions(replaceReceiver ? undefined : previous.positions, result.positions),
           }));
           if (replaceReceiver && detailRevision !== receiverRevision) refreshFlight();
+        }
+        const nextSWIMRevision = result.swimRevision;
+        const replaceSWIM = nextSWIMRevision !== knownSWIM.revision;
+        const swimPage = nextSWIMRevision === undefined ? [] : result.swimPositions ?? [];
+        if (replaceSWIM || swimPage.length) {
+          const after = swimPage.length ? result.swimCursor ?? mergeRadarPositions(swimPage).at(-1)?.at : undefined;
+          if (!replaceSWIM && swimPage.length === radarPageSize && after && after !== knownSWIM.after) delay = radarPageInterval;
+          swimCursor.current = { after: replaceSWIM ? after : after ?? knownSWIM.after, revision: nextSWIMRevision };
+          setSWIMPositions((previous) => mergeRadarPositions(replaceSWIM ? undefined : previous, swimPage));
         }
       } catch {
         delay *= 3;
@@ -712,7 +731,7 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
         }
       } finally {
         inProgress = false;
-        if (focused && foreground && supported) timer = setTimeout(() => { void load(); }, delay);
+        if (focused && foreground && supported && (inFlight || delay === radarPageInterval)) timer = setTimeout(() => { void load(); }, delay);
       }
     }
     const subscription = AppState.addEventListener('change', (state) => {
@@ -726,7 +745,7 @@ function FlightRadar({ api, flight, tracked, history, detailRevision, refreshFli
       clearTimeout(timer);
       subscription.remove();
     };
-  }, [api, id, inFlight, flight.observedAt, detailRevision, refreshFlight]));
+  }, [api, id, inFlight, canReadRadar, flight.observedAt, detailRevision, refreshFlight]));
 
   const latest = points.at(-1);
   if (!inFlight && !latest) return null;

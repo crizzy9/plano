@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -14,27 +15,27 @@ import (
 
 const flightObservationKeyFile = "PLANO_FLIGHT_OBSERVATION_KEY_FILE"
 
-func readFlightObservationKey() ([]byte, error) {
-	path := os.Getenv(flightObservationKeyFile)
+func readWebhookKeyFile(variable string) ([]byte, error) {
+	path := os.Getenv(variable)
 	if path == "" {
 		return nil, nil
 	}
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
-		return nil, errors.New("PLANO_FLIGHT_OBSERVATION_KEY_FILE must name a readable key file")
+		return nil, fmt.Errorf("%s must name a readable key file", variable)
 	}
-	key, err := secret("", flightObservationKeyFile)
+	key, err := secret("", variable)
 	if err != nil {
 		return nil, err
 	}
 	if len(key) < 32 {
-		return nil, errors.New("PLANO_FLIGHT_OBSERVATION_KEY_FILE requires at least 32 bytes")
+		return nil, fmt.Errorf("%s requires at least 32 bytes", variable)
 	}
 	return key, nil
 }
 
 func forwardFlightObservationFromEnv(ctx context.Context, input io.Reader) (int, error) {
-	key, err := readFlightObservationKey()
+	key, err := readWebhookKeyFile(flightObservationKeyFile)
 	if err != nil {
 		return relayConfigError, err
 	}

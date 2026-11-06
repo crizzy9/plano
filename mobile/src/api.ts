@@ -72,6 +72,9 @@ export interface RadarBatch {
   providerPositions?: Position[];
   providerCursor?: string;
   providerRevision?: string;
+  swimPositions?: Position[];
+  swimCursor?: string;
+  swimRevision?: string;
 }
 
 export interface Prediction {
@@ -853,11 +856,14 @@ export function createAPI(server: string, options: { access?: 'background' | 'ex
       }
       throw failures[0];
     },
-    async radar(id: string, after?: string, providerRevision?: string, receiverRevision?: string) {
-      const query = new URLSearchParams({ provider: '1' });
+    async radar(id: string, after?: string, providerRevision?: string, receiverRevision?: string,
+      swim?: { after?: string; revision?: string }) {
+      const query = new URLSearchParams({ provider: '1', swim: '1' });
       if (after) query.set('after', after);
       if (receiverRevision !== undefined) query.set('receiverRevision', receiverRevision);
       if (providerRevision) query.set('providerRevision', providerRevision);
+      if (swim?.after) query.set('swimAfter', swim.after);
+      if (swim?.revision !== undefined) query.set('swimRevision', swim.revision);
       try {
         return await authenticated<RadarBatch>(`${flightPath(id)}/radar?${query}`);
       } catch (error) {

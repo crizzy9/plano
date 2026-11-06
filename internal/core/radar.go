@@ -24,17 +24,18 @@ CREATE TABLE IF NOT EXISTS radar_receiver_revisions (
   flight_id TEXT PRIMARY KEY REFERENCES flights(id) ON DELETE CASCADE,
   revision_ns INTEGER NOT NULL, last_tail TEXT NOT NULL
 );
-` + rotationRadarSchema
+` + rotationRadarSchema + swimRadarSchema
 
 const radarFlightStatus = `json_extract(snapshot,'$.status') IN ('airborne','diverted')
 AND json_extract(snapshot,'$.actualTakeoff') IS NOT NULL
 AND json_extract(snapshot,'$.actualLanding') IS NULL
 AND json_extract(snapshot,'$.actualArrival') IS NULL`
 
-const radarFlightCandidates = `FROM flights WHERE ` + radarFlightStatus + `
-AND observed_ns>=?
+const radarFlightFreshness = `AND observed_ns>=?
 AND (COALESCE(json_extract(snapshot,'$.estimatedArrival'),json_extract(snapshot,'$.scheduledArrival')) IS NULL
- OR julianday(COALESCE(json_extract(snapshot,'$.estimatedArrival'),json_extract(snapshot,'$.scheduledArrival')))>=julianday(?))
+ OR julianday(COALESCE(json_extract(snapshot,'$.estimatedArrival'),json_extract(snapshot,'$.scheduledArrival')))>=julianday(?))`
+
+const radarFlightCandidates = `FROM flights WHERE ` + radarFlightStatus + ` ` + radarFlightFreshness + `
 AND EXISTS (SELECT 1 FROM tracked WHERE flight_id=flights.id)`
 
 type radarSample struct {
@@ -55,6 +56,8 @@ type RadarPage struct {
 	ReceiverRevision  *int64
 	ProviderPositions []feeds.Position
 	ProviderRevision  *time.Time
+	SWIMPositions     []feeds.Position
+	SWIMRevision      *int64
 }
 
 func resetRadarReceiver(ctx context.Context, tx *sql.Tx, flight feeds.Flight, lastTail string) error {
@@ -236,6 +239,10 @@ AND COALESCE(json_extract(f.snapshot,'$.tailNumber'),'')<>''`
 		query += ` AND f.observed_ns=?`
 		args = append(args, *observedNS)
 	}
+	return readRadarFixPage(ctx, db, query, args, after, limit)
+}
+
+func readRadarFixPage(ctx context.Context, db radarRowsQueryer, query string, args []any, after *time.Time, limit int) ([]feeds.Position, error) {
 	if after == nil {
 		query += ` ORDER BY p.at_ns DESC LIMIT ?`
 	} else {
@@ -332,6 +339,16 @@ WHERE f.id=?`, knownNS, owner, id).Scan(&revision, &telemetry)
 // RadarPage reads both feeds from one snapshot so a receiver reset cannot
 // pair fixes from the previous aircraft with a newer provider revision.
 func (s *Store) RadarPage(ctx context.Context, owner, id string, receiverAfter *time.Time, receiverKnown *int64, providerAfter, providerKnown *time.Time, receiverLimit, providerLimit int) (RadarPage, error) {
+	return s.radarPage(ctx, owner, id, receiverAfter, receiverKnown, providerAfter, providerKnown, receiverLimit, providerLimit, nil)
+}
+
+// RadarPageWithSWIM reads the private SWIM stream alongside the existing
+// feeds, with a separate cursor and generation in the same snapshot.
+func (s *Store) RadarPageWithSWIM(ctx context.Context, owner, id string, receiverAfter *time.Time, receiverKnown *int64, providerAfter, providerKnown *time.Time, receiverLimit, providerLimit int, swimAfter *time.Time, swimKnown *int64) (RadarPage, error) {
+	return s.radarPage(ctx, owner, id, receiverAfter, receiverKnown, providerAfter, providerKnown, receiverLimit, providerLimit, &swimRadarCursor{after: swimAfter, known: swimKnown})
+}
+
+func (s *Store) radarPage(ctx context.Context, owner, id string, receiverAfter *time.Time, receiverKnown *int64, providerAfter, providerKnown *time.Time, receiverLimit, providerLimit int, swim *swimRadarCursor) (RadarPage, error) {
 	if receiverLimit < 1 || receiverLimit > 2000 || providerLimit < 1 || providerLimit > 2000 {
 		return RadarPage{}, errors.New("invalid radar page size")
 	}
@@ -351,7 +368,11 @@ LEFT JOIN radar_receiver_revisions r ON r.flight_id=f.id WHERE f.id=?`, owner, i
 		return RadarPage{}, err
 	}
 	if !revision.Valid {
-		return RadarPage{Positions: []feeds.Position{}, ProviderPositions: []feeds.Position{}}, nil
+		page := RadarPage{Positions: []feeds.Position{}, ProviderPositions: []feeds.Position{}}
+		if swim != nil {
+			page.SWIMPositions = []feeds.Position{}
+		}
+		return page, nil
 	}
 	page := RadarPage{ReceiverRevision: &revision.Int64}
 	if receiverKnown != nil && *receiverKnown != revision.Int64 {
@@ -364,6 +385,12 @@ LEFT JOIN radar_receiver_revisions r ON r.flight_id=f.id WHERE f.id=?`, owner, i
 	page.ProviderPositions, page.ProviderRevision, err = readRadarProviderPositions(ctx, tx, owner, id, providerAfter, providerKnown, providerLimit)
 	if err != nil {
 		return RadarPage{}, err
+	}
+	if swim != nil {
+		page.SWIMPositions, page.SWIMRevision, err = readSWIMRadarPositions(ctx, tx, id, *swim, receiverLimit)
+		if err != nil {
+			return RadarPage{}, err
+		}
 	}
 	return page, tx.Commit()
 }

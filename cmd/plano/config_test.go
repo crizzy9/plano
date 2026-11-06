@@ -206,12 +206,33 @@ func TestCheckConfigFlightObservationKey(t *testing.T) {
 	}
 }
 
+func TestCheckConfigSWIMPositionKey(t *testing.T) {
+	isolateStartupEnvironment(t)
+	t.Setenv("PLANO_DEMO", "false")
+	t.Setenv("PLANO_ALLOW_OPEN_ENROLLMENT", "false")
+	t.Setenv("PLANO_ENROLLMENT_CODE", "fixture-enrollment-code")
+	t.Setenv("PLANO_AEROAPI_KEY", "fixture-api-key")
+	t.Setenv("PLANO_ADDR", "127.0.0.1:0")
+	path := filepath.Join(t.TempDir(), "swim-key")
+	if err := os.WriteFile(path, []byte(strings.Repeat("fixture-swim", 4)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(swimPositionKeyFile, path)
+	if err := run(slog.New(slog.DiscardHandler), true); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(flightObservationKeyFile, path)
+	if err := run(slog.New(slog.DiscardHandler), true); err == nil || !strings.Contains(err.Error(), swimPositionKeyFile+" must use a distinct key") {
+		t.Fatalf("shared aviation callback key, got %v", err)
+	}
+}
+
 func isolateStartupEnvironment(t *testing.T) {
 	t.Helper()
 	// Preflight must only see fixture settings, including on an operator host.
 	for _, name := range []string{
 		"PLANO_PUBLIC_URL", "PLANO_REQUIRE_ENROLLMENT", "PLANO_ENROLLMENT_CODE_FILE", "PLANO_BOOKING_KEY_FILE", "PLANO_AIRPORT_TRANSFERS_FILE",
-		"PLANO_AEROALERTS_KEY_FILE", "PLANO_ADVISORY_INGRESS_KEY_FILE", flightObservationKeyFile, "PLANO_AEROAPI_KEY_FILE",
+		"PLANO_AEROALERTS_KEY_FILE", "PLANO_ADVISORY_INGRESS_KEY_FILE", flightObservationKeyFile, swimPositionKeyFile, "PLANO_AEROAPI_KEY_FILE",
 		"PLANO_METAR", "PLANO_AERO_SUBSCRIPTIONS", "PLANO_AERO_SUBSCRIPTIONS_INBOUND", "PLANO_AERO_SUBSCRIPTIONS_MAX", "PLANO_AERO_SUBSCRIPTIONS_INTERVAL",
 		"PLANO_TRIPIT_SYNC_KEY_FILE", "PLANO_RESERVATION_GATEWAY_URL",
 		"PLANO_FAA_NAS", "PLANO_SWIM_URL", "PLANO_EUROCONTROL_URL", "PLANO_ADSB_URL", "PLANO_FAA_REGISTRY_FILE",

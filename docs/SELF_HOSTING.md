@@ -150,6 +150,7 @@ published port if both projects run on the same host.
 | --- | --- |
 | FlightAware AeroAPI | Set `PLANO_AEROAPI_KEY_FILE` to a mounted key file, or supply `PLANO_AEROAPI_KEY` through the service environment. |
 | Signed flight snapshots | Set `PLANO_FLIGHT_OBSERVATION_KEY_FILE` to a mounted key file if your authorized bridge supplies complete flight snapshots. [Ingress and relay setup](AVIATION_CALLBACKS.md#signed-flight-snapshots) |
+| FAA SWIM radar | Set `PLANO_SWIM_POSITION_KEY_FILE` to a dedicated mounted key file if your authorized bridge supplies permitted airborne positions. [Radar relay setup](AVIATION_CALLBACKS.md#faa-swim-radar-positions) |
 | FAA NAS Status | Public aviation advisories are enabled in live mode by default. Set `PLANO_FAA_NAS=false` to disable this feed. |
 | NOAA Aviation Weather Center | Set `PLANO_METAR=true` in live mode to show recent adverse airport observations in the delay outlook. No account key is needed. |
 | FAA SWIM | Set `PLANO_SWIM_URL` to your advisory bridge. If it requires authentication, set either `PLANO_SWIM_TOKEN_FILE` or `PLANO_SWIM_TOKEN`. |
@@ -189,6 +190,10 @@ CTOT assignments with `plano forward-atfm-slot`. It uses the same advisory
 key and requires a verified flight instance match. The relay accepts normalized
 JSON, supported FAA TFMData FlightControl XML, and EUROCONTROL ADEXP slot
 messages. [Takeoff slot relay](AVIATION_CALLBACKS.md#flight-specific-takeoff-slots)
+
+An authorized FAA SWIM bridge can also send normalized airborne positions
+with `plano forward-swim-position`. The relay uses its own signing key and
+delivers fixes to private radar for verified tracked legs. [Radar relay](AVIATION_CALLBACKS.md#faa-swim-radar-positions)
 
 Keep credential files outside the checkout. Compose reads the `*_FILE`
 values as paths **inside** the container. For each credential with both
