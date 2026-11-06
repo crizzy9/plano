@@ -56,10 +56,12 @@ for that pair. The import still reports those flights as duplicates.
 [Flighty CSV example](https://github.com/SSARCandy/flighty-web-viewer) · [Observed midnight placeholder](https://github.com/vlvovch/flight-ledger/blob/main/docs/importers.md#flighty)
 
 When a completed tracked flight matches the route, flight number, and
-scheduled-departure instant, Passport shows the tracked record. The imported
-copy becomes visible and removable if you untrack that flight. If a scheduled
-departure instant cannot be resolved, both entries can appear and you can
-remove the imported copy in Passport.
+scheduled-departure instant, Passport shows the tracked record. A unique
+matching Flighty entry can fill missing compatible gate times and aircraft
+registration in your Passport and keep the route eligible for bundled
+airport coordinates. The imported copy becomes visible and removable if
+you untrack that flight. If a scheduled departure instant cannot be resolved,
+both entries can appear and you can remove the imported copy in Passport.
 
 Plano maps imported routes using cached or bundled airport coordinates. The
 bundled catalog includes 8,154 unambiguous IATA and ICAO codes for airports

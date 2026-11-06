@@ -197,11 +197,13 @@ func TestPassportArchiveIsolationPagingAndTrackedOverlap(t *testing.T) {
 	owner, other := friendInstallation(t, s), friendInstallation(t, s)
 	departure := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
 	arrival := departure.Add(3 * time.Hour)
+	gateOut, scheduledArrival := departure.Add(5*time.Minute), arrival.Add(-10*time.Minute)
 	observed := arrival.Add(time.Hour)
 	tracked := feeds.Flight{
 		ID: "UAL123-completed", Source: "flightaware_aeroapi", Number: "UA123", ICAONumber: "UAL123", Status: "arrived",
 		Origin: "JFK", OriginICAO: "KJFK", Destination: "ORD", DestinationICAO: "KORD",
-		ObservedAt: observed, ScheduledDeparture: &departure, ActualArrival: &arrival,
+		ObservedAt: observed, ScheduledDeparture: &departure,
+		ActualTakeoff: new(gateOut.Add(time.Minute)), ActualLanding: new(arrival.Add(-time.Minute)),
 	}
 	if err := s.Observe(ctx, tracked, nil, nil, nil); err != nil {
 		t.Fatal(err)
@@ -214,10 +216,11 @@ func TestPassportArchiveIsolationPagingAndTrackedOverlap(t *testing.T) {
 	overlap := feeds.Flight{
 		ID: "archive-" + strings.Repeat("a", 64), Source: "flighty_csv", Number: tracked.ICAONumber, Status: "arrived",
 		Origin: "KJFK", Destination: "ORD", ObservedAt: observed, ScheduledDeparture: &local,
-		HistoryDate: "2026-06-10",
+		HistoryDate: "2026-06-10", ActualDeparture: &gateOut, ActualArrival: &arrival, ScheduledArrival: &scheduledArrival, TailNumber: "N123AA",
 	}
 	dateOnly := overlap
 	dateOnly.ID, dateOnly.HistoryDate, dateOnly.ScheduledDeparture = "archive-"+strings.Repeat("b", 64), "2026-06-11", nil
+	dateOnly.ActualDeparture, dateOnly.ActualArrival, dateOnly.ScheduledArrival = nil, nil, nil
 	flights := []feeds.Flight{overlap, dateOnly}
 	if added, duplicates, err := s.ImportPassportArchive(ctx, owner, flights); err != nil || added != 2 || duplicates != 0 {
 		t.Fatalf("first import added %d, duplicates %d, error %v", added, duplicates, err)
@@ -238,8 +241,23 @@ func TestPassportArchiveIsolationPagingAndTrackedOverlap(t *testing.T) {
 	if err != nil || len(first) != 1 || cursor == nil || cursor.ID != "a."+dateOnly.ID || first[0].Flight.ScheduledDeparture != nil || first[0].Flight.ActualArrival != nil {
 		t.Fatalf("first page = %+v, cursor %+v, error %v", first, cursor, err)
 	}
-	if second, cursor, err := s.CompletedFlightPage(ctx, owner, cursor, 1); err != nil || len(second) != 1 || cursor != nil || second[0].Flight.ID != tracked.ID {
+	second, cursor, err := s.CompletedFlightPage(ctx, owner, cursor, 1)
+	if err != nil || len(second) != 1 || cursor != nil || second[0].Flight.ID != tracked.ID {
 		t.Fatalf("second page = %+v, cursor %+v, error %v", second, cursor, err)
+	}
+	got := second[0].Flight
+	if got.Source != tracked.Source || got.HistoryDate != overlap.HistoryDate || got.TailNumber != overlap.TailNumber ||
+		got.ActualDeparture == nil || !got.ActualDeparture.Equal(gateOut) || got.ActualArrival == nil || !got.ActualArrival.Equal(arrival) ||
+		got.ScheduledArrival == nil || !got.ScheduledArrival.Equal(scheduledArrival) {
+		t.Fatalf("tracked Passport row lost private archive measurements: %+v", got)
+	}
+	var arrivalCursor float64
+	if err := s.db.QueryRowContext(ctx, "SELECT julianday(?)", arrival.Format(time.RFC3339)).Scan(&arrivalCursor); err != nil ||
+		second[0].Cursor.ID != "p."+tracked.ID || second[0].Cursor.Arrival != arrivalCursor {
+		t.Fatalf("recovered gate-in and cursor disagree: %+v, %v", second[0].Cursor, err)
+	}
+	if shared, err := s.Flight(ctx, tracked.ID); err != nil || shared.ActualArrival != nil || shared.TailNumber != "" || shared.HistoryDate != "" {
+		t.Fatalf("private archive reached the shared flight cache: %+v, %v", shared, err)
 	}
 	if _, err := s.Flight(ctx, dateOnly.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("archive reached the shared flight cache: %v", err)
@@ -258,6 +276,93 @@ func TestPassportArchiveIsolationPagingAndTrackedOverlap(t *testing.T) {
 	}
 	if history, err := s.CompletedFlights(ctx, owner); err != nil || len(history) != 1 || history[0].ID != overlap.ID {
 		t.Fatalf("owner archive after untracking = %+v, error %v", history, err)
+	}
+}
+
+func TestPassportArchiveMeasurementsRequireCompatibleUnambiguousMatch(t *testing.T) {
+	for _, name := range []string{
+		"compatible provider alias wins", "incompatible provider alias ignored",
+		"conflicting gate-in", "archive gate-out after wheels-off",
+		"multiple archives", "multiple tracked instances",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			s, err := Open(filepath.Join(t.TempDir(), "archive.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			owner := friendInstallation(t, s)
+			departure := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+			gateOut, takeoff, arrival := departure.Add(5*time.Minute), departure.Add(10*time.Minute), departure.Add(3*time.Hour)
+			tracked := feeds.Flight{
+				ID: "UAL123-completed", Source: "flightaware_aeroapi", Number: "UA123", Status: "arrived",
+				Origin: "JFK", Destination: "ORD", ObservedAt: arrival.Add(time.Hour), ScheduledDeparture: &departure, ActualTakeoff: &takeoff,
+			}
+			archive := tracked
+			archive.ID, archive.Source, archive.HistoryDate = "archive-"+strings.Repeat("a", 64), "flighty_csv", "2026-06-10"
+			archive.ActualDeparture, archive.ActualArrival, archive.TailNumber = &gateOut, &arrival, "N123AA"
+			observe := func(flight feeds.Flight) {
+				t.Helper()
+				if err := s.Observe(ctx, flight, nil, nil, nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.Track(ctx, owner, flight.ID, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wantGateOut, wantGateIn := (*time.Time)(nil), (*time.Time)(nil)
+			switch name {
+			case "compatible provider alias wins", "incompatible provider alias ignored":
+				older := tracked
+				older.ID, older.Source, older.ObservedAt = "older-alias", "flightaware_schedule", tracked.ObservedAt.Add(-time.Minute)
+				if name == "compatible provider alias wins" {
+					older.ActualDeparture = new(gateOut.Add(-time.Minute))
+					wantGateOut = older.ActualDeparture
+				} else {
+					older.ActualDeparture = new(takeoff.Add(time.Minute))
+					wantGateOut, wantGateIn = &gateOut, &arrival
+				}
+				observe(older)
+				if _, err := s.db.ExecContext(ctx, "INSERT INTO aero_instance_keys VALUES(?,?)", tracked.ID, older.ID); err != nil {
+					t.Fatal(err)
+				}
+			case "conflicting gate-in":
+				tracked.ActualArrival = new(arrival.Add(time.Minute))
+				wantGateIn = tracked.ActualArrival
+			case "archive gate-out after wheels-off":
+				archive.ActualDeparture = new(takeoff.Add(time.Minute))
+			}
+			observe(tracked)
+			archives := []feeds.Flight{archive}
+			if name == "multiple archives" {
+				another := archive
+				another.ID = "archive-" + strings.Repeat("b", 64)
+				archives = append(archives, another)
+			}
+			wantCount := 1
+			if name == "multiple tracked instances" {
+				another := tracked
+				another.ID = "UAL123-other"
+				observe(another)
+				wantCount = 2
+			}
+			if _, _, err := s.ImportPassportArchive(ctx, owner, archives); err != nil {
+				t.Fatal(err)
+			}
+			history, err := s.CompletedFlights(ctx, owner)
+			if err != nil || len(history) != wantCount {
+				t.Fatalf("overlap suppression changed: %+v, %v", history, err)
+			}
+			for _, got := range history {
+				if !sameOptionalInstant(got.ActualDeparture, wantGateOut) || !sameOptionalInstant(got.ActualArrival, wantGateIn) {
+					t.Fatalf("unexpected recovered gate times: %+v", got)
+				}
+				if (name == "multiple archives" || name == "multiple tracked instances") && (got.HistoryDate != "" || got.TailNumber != "") {
+					t.Fatalf("ambiguous archive supplied private measurements: %+v", got)
+				}
+			}
+		})
 	}
 }
 

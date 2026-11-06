@@ -8,9 +8,72 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/crizzy9/plano/internal/feeds"
 )
+
+func TestPassportExactOverlapRetainsPrivateArchiveMeasurements(t *testing.T) {
+	store := openPassportStore(t, filepath.Join(t.TempDir(), "passport-overlap.db"))
+	token, owner := passportInstallation(t, store)
+	otherToken, other := passportInstallation(t, store)
+	handler := (Server{Store: store}).Handler()
+	const archive = `Date,Airline,Flight,From,To,Gate Departure (Scheduled),Gate Departure (Actual),Gate Arrival (Scheduled),Gate Arrival (Actual),Tail Number
+2024-06-02,UA,123,SFO,EWR,2024-06-02T10:00,2024-06-02T10:10,2024-06-02T18:20,2024-06-02T18:40,N123AA
+`
+	request := httptest.NewRequest(http.MethodPost, "/v1/passport/import", strings.NewReader(archive))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "text/csv")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"added":1`) {
+		t.Fatalf("import status %d: %s", response.Code, response.Body)
+	}
+	scheduled := time.Date(2024, 6, 2, 17, 0, 0, 0, time.UTC)
+	flight := feeds.Flight{ID: "UAL123-passport-overlap", Number: "UA123", ICAONumber: "UAL123", Source: "flightaware_aeroapi",
+		Origin: "SFO", OriginICAO: "KSFO", Destination: "EWR", DestinationICAO: "KEWR",
+		Status: "arrived", ScheduledDeparture: &scheduled, ObservedAt: scheduled.Add(8 * time.Hour)}
+	addPassportFlight(t, store, owner, flight)
+	if err := store.Track(t.Context(), other, flight.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	read := func(path, credential string) passportPagedResponse {
+		t.Helper()
+		body := importTestRequest(t, handler, http.MethodGet, path, credential, "", http.StatusOK)
+		var got passportPagedResponse
+		if err := json.Unmarshal([]byte(body), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	for _, path := range []string{"/v1/passport", "/v1/passport?limit=1"} {
+		got := read(path, token)
+		if len(got.Flights) != 1 || got.Flights[0].ID != flight.ID || got.Flights[0].Source != flight.Source || got.NextCursor != "" ||
+			got.Stats.Flights != 1 || got.Stats.Hours != 5.5 || got.Stats.DelayMinutes != 20 || got.Stats.Aircraft != 1 ||
+			got.Stats.Miles < 2000 || len(got.Segments) != 1 || got.Coverage.MissingCoordinatesFlights != 0 ||
+			got.Coverage.MissingDurationFlights != 0 || got.Coverage.MissingDelayFlights != 0 {
+			t.Fatalf("%s lost measurements or tracked identity: %+v", path, got)
+		}
+		if strings.Contains(path, "?") && got.Flights[0].HistoryKey != "p."+flight.ID {
+			t.Fatalf("tracked history key = %q", got.Flights[0].HistoryKey)
+		}
+	}
+	otherHistory := read("/v1/passport?limit=1", otherToken)
+	if len(otherHistory.Flights) != 1 || otherHistory.Stats.Hours != 0 || otherHistory.Stats.DelayMinutes != 0 || otherHistory.Stats.Aircraft != 0 ||
+		otherHistory.Flights[0].HistoryDate != "" ||
+		otherHistory.Flights[0].ActualDeparture != nil || otherHistory.Flights[0].ActualArrival != nil {
+		t.Fatalf("other installation received private archive facts: %+v", otherHistory)
+	}
+	if saved, err := store.Flight(t.Context(), flight.ID); err != nil || saved.ActualDeparture != nil || saved.ActualArrival != nil ||
+		saved.TailNumber != "" || saved.HistoryDate != "" {
+		t.Fatalf("archive facts reached the shared flight cache: %+v, %v", saved, err)
+	}
+	importTestRequest(t, handler, http.MethodDelete, "/v1/tracked/"+flight.ID, token, "", http.StatusNoContent)
+	restored := read("/v1/passport?limit=1", token)
+	if len(restored.Flights) != 1 || restored.Flights[0].Source != "flighty_csv" || restored.Stats.Hours != 5.5 || restored.Stats.DelayMinutes != 20 {
+		t.Fatalf("archive row did not return after untracking: %+v", restored)
+	}
+}
 
 func TestPassportArchiveImportIsPrivateAndMapsWithoutProvider(t *testing.T) {
 	store := openPassportStore(t, filepath.Join(t.TempDir(), "passport.db"))
