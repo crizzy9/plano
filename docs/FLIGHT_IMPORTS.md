@@ -94,7 +94,7 @@ The parser recognizes plain text, HTML text, forwarded messages, and calendar pa
 
 Enable TripIt's calendar feed and detailed itinerary items, then copy its private calendar URL into the TripIt field in Plano. Keep the URL private. A one-time import reads the feed over HTTPS and adds recognized flights in pages of eight, starting with upcoming trips. Choose **Import next TripIt flights** to continue through your history. A one-time import uses the URL only for the request. [TripIt calendar feed setup](https://help.tripit.com/en/support/solutions/articles/103000063280-calendar-feed-setup-and-sync) · [TripIt detailed items](https://help.tripit.com/en/support/solutions/articles/103000063363-plans-not-appearing-in-calendar)
 
-If your server enables **Automatic TripIt sync**, you can save the same feed for recurring imports. The server encrypts the URL and checks for new upcoming flights. The sync status reports the last check and the next scheduled check. Choose **Stop TripIt sync** to remove the stored feed and stop future imports. Flights already imported remain in your list. [Self-host configuration](SELF_HOSTING.md#airport-routing-imports-and-delay-models)
+If your server enables **Automatic TripIt sync**, you can save the same feed for recurring imports. The server encrypts the URL and checks for new upcoming flights. When a flight search times out, the next check can continue with later entries. The sync status reports the last check and the next scheduled check. Choose **Stop TripIt sync** to remove the stored feed and stop future imports. Flights already imported remain in your list. [Self-host configuration](SELF_HOSTING.md#airport-routing-imports-and-delay-models)
 
 ## Review possible connections
 
@@ -106,4 +106,4 @@ Set `PLANO_BOOKING_KEY_FILE` to a mounted private file containing a stable rando
 
 ## Look up a reservation through a partner
 
-Open **Partner booking lookup** and enter the carrier code, six-character confirmation code, and traveler last name. With a configured bridge, the server sends those details to the operator's licensed reservation partner. Review matched flights and select the ones you want to track. Plano does not save the submitted reservation credentials. [Reservation gateway contract](RESERVATION_GATEWAY.md)
+Open **Partner booking lookup** and enter the carrier code, six-character confirmation code, and traveler last name. With a configured bridge, the server sends those details to the operator's licensed reservation partner. Route and departure-time details from the partner help Plano distinguish flights that share a number and date. Review matched flights and select the ones you want to track. Plano does not save the submitted reservation credentials. [Reservation gateway contract](RESERVATION_GATEWAY.md)

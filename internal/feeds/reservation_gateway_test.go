@@ -53,7 +53,9 @@ func TestReservationGatewayUsesFixedAuthorizedPOST(t *testing.T) {
 		  "version": 1, "authorized": true, "legs": [
 		    {"number":"UA7","date":"2026-11-05"},
 		    {"number":"UA7","date":"2026-11-05"},
-		    {"number":"UAL8A","date":"2026-11-06"}
+		    {"number":"UAL8A","date":"2026-11-06","origin":"JFK","destination":"KLAX","departure":"2026-11-07T02:45:00.000Z"},
+		    {"number":"UAL8A","date":"2026-11-06","origin":"JFK","destination":"KLAX","departure":"2026-11-06T21:45:00-05:00"},
+		    {"number":"UAL8A","date":"2026-11-06","origin":"KLAX","destination":"HNL","departure":"2026-11-06T23:15:00-08:00"}
 		  ]
 		}`)
 	})}
@@ -65,7 +67,12 @@ func TestReservationGatewayUsesFixedAuthorizedPOST(t *testing.T) {
 		t.Fatal("gateway changed the supplied client or did not bound its own timeout")
 	}
 	got, err := gateway.Lookup(t.Context(), ReservationQuery{" ua ", "zx1234", " D’Ávila-Li "})
-	if err != nil || calls != 1 || !slices.Equal(got, []ReservationLeg{{"UA7", "2026-11-05"}, {"UAL8A", "2026-11-06"}}) {
+	want := []ReservationLeg{
+		{Number: "UA7", Date: "2026-11-05"},
+		{Number: "UAL8A", Date: "2026-11-06", Origin: "JFK", Destination: "KLAX", Departure: instant(t, "2026-11-07T02:45:00Z")},
+		{Number: "UAL8A", Date: "2026-11-06", Origin: "KLAX", Destination: "HNL", Departure: instant(t, "2026-11-07T07:15:00Z")},
+	}
+	if err != nil || calls != 1 || !slices.Equal(got, want) {
 		t.Fatalf("unexpected reservation result %+v, calls=%d, err=%v", got, calls, err)
 	}
 }
@@ -149,6 +156,13 @@ func TestReservationGatewayRejectsUnverifiedOrMalformedResults(t *testing.T) {
 		{"private extra field", `{"version":1,"authorized":true,"legs":[{"number":"UA7","date":"2026-11-05","passenger":"Fixture"}]}`, "application/json", http.StatusOK, ErrUnavailable},
 		{"locator masquerading as flight", `{"version":1,"authorized":true,"legs":[{"number":"ZX1234","date":"2026-11-05"}]}`, "application/json", http.StatusOK, ErrUnavailable},
 		{"not a local date", `{"version":1,"authorized":true,"legs":[{"number":"UA7","date":"2026-02-29"}]}`, "application/json", http.StatusOK, ErrUnavailable},
+		{"un-normalized airport", `{"version":1,"authorized":true,"legs":[{"number":"UA7","date":"2026-11-05","origin":"kjfk"}]}`, "application/json", http.StatusOK, ErrUnavailable},
+		{"invalid destination", `{"version":1,"authorized":true,"legs":[{"number":"UA7","date":"2026-11-05","destination":"1AX"}]}`, "application/json", http.StatusOK, ErrUnavailable},
+		{"departure lacks offset", `{"version":1,"authorized":true,"legs":[{"number":"UA7","date":"2026-11-05","departure":"2026-11-05T21:45:00"}]}`, "application/json", http.StatusOK, ErrUnavailable},
+		{"departure has invalid offset", `{"version":1,"authorized":true,"legs":[{"number":"UA7","date":"2026-11-05","departure":"2026-11-05T21:45:00+24:00"}]}`, "application/json", http.StatusOK, ErrUnavailable},
+		{"departure precedes local date window", `{"version":1,"authorized":true,"legs":[{"number":"UA7","date":"2026-11-05","departure":"2026-11-04T09:59:59Z"}]}`, "application/json", http.StatusOK, ErrUnavailable},
+		{"departure follows local date window", `{"version":1,"authorized":true,"legs":[{"number":"UA7","date":"2026-11-05","departure":"2026-11-06T12:00:00Z"}]}`, "application/json", http.StatusOK, ErrUnavailable},
+		{"null departure", `{"version":1,"authorized":true,"legs":[{"number":"UA7","date":"2026-11-05","departure":null}]}`, "application/json", http.StatusOK, ErrUnavailable},
 		{"un-normalized designator", `{"version":1,"authorized":true,"legs":[{"number":"UA 7","date":"2026-11-05"}]}`, "application/json", http.StatusOK, ErrUnavailable},
 		{"extra JSON value", `{"version":1,"authorized":true,"legs":[` + validLeg + `]} {}`, "application/json", http.StatusOK, ErrUnavailable},
 		{"too many flights", `{"version":1,"authorized":true,"legs":[` + tooMany + `]}`, "application/json", http.StatusOK, ErrUnavailable},

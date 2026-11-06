@@ -14,6 +14,8 @@ var ErrInvalid = errors.New("no unambiguous dated flights in itinerary")
 
 type Leg struct {
 	Number, Date   string
+	Origin         string
+	Destination    string
 	LocalDeparture string
 	UTCDeparture   time.Time
 }

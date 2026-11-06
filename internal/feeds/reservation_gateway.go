@@ -22,10 +22,12 @@ const (
 )
 
 var (
-	reservationCarrierPattern = regexp.MustCompile(`^(?:[A-Z0-9]{2}|[A-Z]{3})$`)
-	reservationLocatorPattern = regexp.MustCompile(`^[A-Z0-9]{6}$`)
-	reservationFlightPattern  = regexp.MustCompile(`^(?:[A-Z0-9]{2}|[A-Z]{3})[0-9]{1,5}[A-Z]?$`)
-	reservationBearerPattern  = regexp.MustCompile(`^[A-Za-z0-9._~+/-]+=*$`)
+	reservationCarrierPattern   = regexp.MustCompile(`^(?:[A-Z0-9]{2}|[A-Z]{3})$`)
+	reservationLocatorPattern   = regexp.MustCompile(`^[A-Z0-9]{6}$`)
+	reservationFlightPattern    = regexp.MustCompile(`^(?:[A-Z0-9]{2}|[A-Z]{3})[0-9]{1,5}[A-Z]?$`)
+	reservationBearerPattern    = regexp.MustCompile(`^[A-Za-z0-9._~+/-]+=*$`)
+	reservationAirportPattern   = regexp.MustCompile(`^[A-Z]{3,4}$`)
+	reservationDeparturePattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$`)
 )
 
 type ReservationQuery struct {
@@ -34,10 +36,14 @@ type ReservationQuery struct {
 	Surname string `json:"surname"`
 }
 
-// ReservationLeg contains only a flight designator and its local departure date.
+// ReservationLeg identifies a dated flight, optionally narrowed by its route
+// and scheduled departure instant.
 type ReservationLeg struct {
-	Number string `json:"number"`
-	Date   string `json:"date"`
+	Number      string    `json:"number"`
+	Date        string    `json:"date"`
+	Origin      string    `json:"origin,omitempty"`
+	Destination string    `json:"destination,omitempty"`
+	Departure   time.Time `json:"departure,omitzero"`
 }
 
 type ReservationSource interface {
@@ -150,9 +156,13 @@ func (g *ReservationGateway) Lookup(ctx context.Context, input ReservationQuery)
 func reservationLegs(raw []byte, locator string) ([]ReservationLeg, error) {
 	invalid := fmt.Errorf("%w: invalid reservation gateway response", ErrUnavailable)
 	var response struct {
-		Version    int              `json:"version"`
-		Authorized *bool            `json:"authorized"`
-		Legs       []ReservationLeg `json:"legs"`
+		Version    int   `json:"version"`
+		Authorized *bool `json:"authorized"`
+		Legs       []struct {
+			ReservationLeg
+			// Validate the wire spelling before parsing it as a time.Time.
+			DepartureJSON json.RawMessage `json:"departure"`
+		} `json:"legs"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -168,10 +178,27 @@ func reservationLegs(raw []byte, locator string) ([]ReservationLeg, error) {
 	}
 	seen := make(map[ReservationLeg]bool)
 	legs := make([]ReservationLeg, 0, len(response.Legs))
-	for _, leg := range response.Legs {
+	for _, wireLeg := range response.Legs {
+		leg := wireLeg.ReservationLeg
 		date, err := time.Parse(time.DateOnly, leg.Date)
-		if !reservationFlightPattern.MatchString(leg.Number) || leg.Number == locator || err != nil || date.Year() == 0 {
+		if !reservationFlightPattern.MatchString(leg.Number) || leg.Number == locator || err != nil || date.Year() == 0 ||
+			leg.Origin != "" && !reservationAirportPattern.MatchString(leg.Origin) ||
+			leg.Destination != "" && !reservationAirportPattern.MatchString(leg.Destination) {
 			return nil, invalid
+		}
+		if wireLeg.DepartureJSON != nil {
+			var stamp string
+			if err := json.Unmarshal(wireLeg.DepartureJSON, &stamp); err != nil || !reservationDeparturePattern.MatchString(stamp) {
+				return nil, invalid
+			}
+			departure, err := time.Parse(time.RFC3339Nano, stamp)
+			leg.Departure = departure.UTC()
+			start, end := departureDayUTCWindow(date)
+			if err != nil || departure.Year() == 0 ||
+				leg.Departure.IsZero() || leg.Departure.Year() < 1 || leg.Departure.Year() > 9999 ||
+				leg.Departure.Before(start) || !leg.Departure.Before(end) {
+				return nil, invalid
+			}
 		}
 		if !seen[leg] {
 			legs = append(legs, leg)

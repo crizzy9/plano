@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +63,62 @@ func TestTripItSyncResumesAtFirstUnattemptedLegAfterBudgetExpires(t *testing.T) 
 	}
 	if len(searches) != 3 || searches[1] != "UA456" {
 		t.Fatalf("unexpected resumed order: %v", searches)
+	}
+}
+
+func TestTripItSyncRotatesAfterFirstLookupTimesOut(t *testing.T) {
+	service := newImportTestServer(t)
+	_, owner := newImportTestInstallation(t, service.Store)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	const date = "2026-11-07"
+	legs := []itinerary.Leg{{Number: "UA123", Date: date}, {Number: "UA456", Date: date}}
+	if err := service.Store.SetTripItSubscription(ctx, owner, []byte("fixture"), now); err != nil {
+		t.Fatal(err)
+	}
+	claim := func(at time.Time) core.TripItJob {
+		t.Helper()
+		job, err := service.Store.ClaimTripItSync(ctx, at)
+		if err != nil || job == nil {
+			t.Fatalf("claim failed: %v", err)
+		}
+		return *job
+	}
+	attempt, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var searches []string
+	service.Source = tripItTestFlightSource{search: func(ctx context.Context, number string, day time.Time) ([]feeds.Flight, error) {
+		searches = append(searches, number)
+		if number == "UA123" {
+			if len(searches) == 1 {
+				cancel()
+				return nil, context.DeadlineExceeded
+			}
+			return nil, nil
+		}
+		return (demodata.Source{}).Search(ctx, number, day)
+	}}
+	first := claim(now)
+	result, more, err := service.resolveTripItBatch(attempt, legs, map[string]bool{}, first.Cursor)
+	if !errors.Is(err, context.DeadlineExceeded) || more || result.Cursor != 1 || !slices.Equal(searches, []string{"UA123"}) {
+		t.Fatalf("first attempt: %+v, more=%v, searches=%v, err=%v", result, more, searches, err)
+	}
+	result.Unavailable = true
+	next := now.Add(time.Hour)
+	if err := service.Store.FinishTripItSync(ctx, first, result, now, next); err != nil {
+		t.Fatal(err)
+	}
+	second := claim(next)
+	result, _, err = service.resolveTripItBatch(ctx, legs, map[string]bool{}, second.Cursor)
+	if err != nil || !slices.Equal(searches, []string{"UA123", "UA456", "UA123"}) {
+		t.Fatalf("resumed attempt: %+v, searches=%v, err=%v", result, searches, err)
+	}
+	if err := service.Store.FinishTripItSync(ctx, second, result, next, next.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	tracked, err := service.Store.Tracked(ctx, owner)
+	if err != nil || len(tracked) != 1 || tracked[0].ID != "demo-UA456-"+date {
+		t.Fatalf("tracked flights: %+v, err=%v", tracked, err)
 	}
 }
 
@@ -214,5 +272,65 @@ func TestPartnerBookingOnlyReturnsPublicFlightsForReview(t *testing.T) {
 	}
 	if tracked := importTestRequest(t, handler, "GET", "/v1/tracked", token, "", 200); strings.Contains(tracked, id) {
 		t.Fatalf("partner result tracked without review: %s", tracked)
+	}
+}
+
+func TestPartnerBookingResolvesRepeatedDesignatorByRoute(t *testing.T) {
+	service := newImportTestServer(t)
+	token, owner := newImportTestInstallation(t, service.Store)
+	const date = "2026-11-07"
+	const path = "/v1/bookings/resolve"
+	const input = `{"carrier":"UA","locator":"AB12CD","lastName":"Example"}`
+	const body = `{"version":1,"authorized":true,"legs":[
+		{"number":"UA123","date":"2026-11-07","origin":"KSFO","destination":"DEN","departure":"2026-11-07T16:00:00-08:00"},
+		{"number":"UA123","date":"2026-11-07","origin":"DEN","destination":"KORD"},
+		{"number":"UA123","date":"2026-11-07","origin":"SFO","destination":"JFK"}
+	]}`
+	gateway, err := feeds.NewReservationGateway("https://reservation.invalid/lookup", "fixture-token", &http.Client{
+		Transport: tripItTransport(func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}},
+				Body: io.NopCloser(strings.NewReader(body))}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.ReservationSource = gateway
+	departure := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
+	shifted := departure.Add(10 * time.Minute)
+	onward := departure.Add(4 * time.Hour)
+	later := departure.Add(2 * time.Hour)
+	first := feeds.Flight{ID: "pnr-first", Number: "UA123", Origin: "SFO", OriginICAO: "KSFO", Destination: "DEN",
+		Status: "scheduled", ScheduledDeparture: &shifted, ObservedAt: departure}
+	second := feeds.Flight{ID: "pnr-second", Number: "UA123", Origin: "DEN", Destination: "KORD",
+		Status: "scheduled", ScheduledDeparture: &onward, ObservedAt: departure}
+	wrongTime := first
+	wrongTime.ID, wrongTime.ScheduledDeparture = "pnr-wrong-time", &later
+	wrongRoute := first
+	wrongRoute.ID, wrongRoute.Destination, wrongRoute.ScheduledDeparture = "pnr-wrong-route", "DFW", &departure
+	service.Source = tripItTestFlightSource{search: func(_ context.Context, number string, day time.Time) ([]feeds.Flight, error) {
+		if number != "UA123" {
+			t.Fatalf("unexpected flight number %q", number)
+		}
+		switch day.Format(time.DateOnly) {
+		case date:
+			return []feeds.Flight{wrongRoute, first, second, wrongTime}, nil
+		case "2026-11-08":
+			return []feeds.Flight{first}, nil
+		default:
+			return nil, nil
+		}
+	}}
+	response := importTestRequest(t, service.Handler(), "POST", path, token, input, 200)
+	var result importResult
+	if err := json.Unmarshal([]byte(response), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Flights) != 2 || result.Flights[0].ID != first.ID || result.Flights[1].ID != second.ID ||
+		!slices.Equal(result.Unmatched, []string{"UA123 · " + date}) {
+		t.Fatalf("unexpected reservation resolution: %s", response)
+	}
+	if tracked, err := service.Store.Tracked(t.Context(), owner); err != nil || len(tracked) != 0 {
+		t.Fatalf("reservation lookup modified tracking: %+v, err=%v", tracked, err)
 	}
 }

@@ -58,8 +58,7 @@ func (a *AeroAPI) Search(ctx context.Context, number string, date time.Time) ([]
 	}
 	year, month, day := date.Date()
 	midnight := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-	start := midnight.Add(-14 * time.Hour)
-	end := midnight.Add(36 * time.Hour)
+	start, end := departureDayUTCWindow(midnight)
 	params := url.Values{"ident_type": {"designator"}, "max_pages": {"3"}}
 	now := a.now().UTC()
 	path := "/flights/"
@@ -114,6 +113,12 @@ func (a *AeroAPI) Search(ctx context.Context, number string, date time.Time) ([]
 		return a.future(ctx, number, midnight, start, end)
 	}
 	return found, nil
+}
+
+// departureDayUTCWindow covers a local calendar day across UTC+14 to UTC-12.
+// The input is midnight UTC on the named local date.
+func departureDayUTCWindow(midnight time.Time) (start, end time.Time) {
+	return midnight.Add(-14 * time.Hour), midnight.Add(36 * time.Hour)
 }
 
 func onDepartureDate(instant time.Time, timezone string, date time.Time) bool {

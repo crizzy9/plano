@@ -198,10 +198,9 @@ func (s Server) resolveTripItBatch(ctx context.Context, legs []itinerary.Leg, se
 		checked++
 		matches, err := s.lookupLeg(ctx, leg)
 		if err != nil {
+			// Rotate past attempted legs even when a lookup uses the whole
+			// budget. A slow flight should not starve later entries.
 			result.Cursor = (start + visited + 1) % len(legs)
-			if ctx.Err() != nil {
-				result.Cursor = (start + visited) % len(legs)
-			}
 			result.Unmatched = len(legs) - result.Matched
 			return result, ctx.Err() != nil && checked > 1, err
 		}

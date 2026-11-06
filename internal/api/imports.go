@@ -72,16 +72,23 @@ func (s Server) resolveItinerary(ctx context.Context, parsed itinerary.Itinerary
 }
 
 func (s Server) lookupLeg(ctx context.Context, leg itinerary.Leg) ([]feeds.Flight, error) {
+	matchesRoute := func(flight feeds.Flight) bool {
+		return importAirportMatches(leg.Origin, flight.Origin, flight.OriginICAO) &&
+			importAirportMatches(leg.Destination, flight.Destination, flight.DestinationICAO)
+	}
 	if leg.UTCDeparture.IsZero() {
 		flights, err := s.lookup(ctx, leg.Number, leg.Date)
-		if err != nil || leg.LocalDeparture == "" {
+		if err != nil || leg.LocalDeparture == "" && leg.Origin == "" && leg.Destination == "" {
 			return flights, err
 		}
 		seen := make(map[string]bool)
 		var matches []feeds.Flight
 		for _, flight := range flights {
-			if seen[flight.ID] || flight.ScheduledDeparture == nil ||
-				!leg.MatchesLocalDeparture(*flight.ScheduledDeparture, flight.OriginTimeZone) {
+			if seen[flight.ID] || !matchesRoute(flight) {
+				continue
+			}
+			if leg.LocalDeparture != "" && (flight.ScheduledDeparture == nil ||
+				!leg.MatchesLocalDeparture(*flight.ScheduledDeparture, flight.OriginTimeZone)) {
 				continue
 			}
 			seen[flight.ID] = true
@@ -100,7 +107,7 @@ func (s Server) lookupLeg(ctx context.Context, leg itinerary.Leg) ([]feeds.Fligh
 	seenExact, seenNearby := make(map[string]bool), make(map[string]bool)
 	addMatches := func(flights []feeds.Flight) {
 		for _, f := range flights {
-			if f.ScheduledDeparture == nil {
+			if f.ScheduledDeparture == nil || !matchesRoute(f) {
 				continue
 			}
 			difference := f.ScheduledDeparture.Sub(utc).Abs()
@@ -140,6 +147,16 @@ func (s Server) lookupLeg(ctx context.Context, leg itinerary.Leg) ([]feeds.Fligh
 		return exact, nil
 	}
 	return nearby, nil
+}
+
+func importAirportMatches(expected, reported, icao string) bool {
+	if expected == "" {
+		return true
+	}
+	if len(expected) == 4 && icao != "" {
+		reported = icao
+	}
+	return strings.EqualFold(expected, reported)
 }
 
 func (s Server) emailRelay(w http.ResponseWriter, r *http.Request, owner string) error {
@@ -301,7 +318,10 @@ func (s Server) resolveBooking(w http.ResponseWriter, r *http.Request, _ string)
 	}
 	parsed := itinerary.Itinerary{Legs: make([]itinerary.Leg, 0, len(legs))}
 	for _, leg := range legs {
-		parsed.Legs = append(parsed.Legs, itinerary.Leg{Number: leg.Number, Date: leg.Date})
+		parsed.Legs = append(parsed.Legs, itinerary.Leg{
+			Number: leg.Number, Date: leg.Date, Origin: leg.Origin,
+			Destination: leg.Destination, UTCDeparture: leg.Departure,
+		})
 	}
 	result, err := s.resolveItinerary(ctx, parsed)
 	if err != nil {
