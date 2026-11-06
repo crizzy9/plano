@@ -58,6 +58,8 @@ type Message struct {
 	Kind                Kind
 	FlightID            string
 	ConnectionInboundID string `json:",omitempty"`
+	AlertKind           string `json:",omitempty"`
+	AlertPhase          string `json:",omitempty"`
 	Title               string
 	Body                string
 	CollapseID          string
@@ -141,6 +143,12 @@ func (m Message) prepare(now time.Time) (Message, error) {
 		!validConnectionFlightID(m.ConnectionInboundID) || !validConnectionFlightID(m.FlightID)) {
 		return m, errors.New("invalid push connection route")
 	}
+	if m.AlertKind != "" && (m.Kind != Alert || !alertLabelPattern.MatchString(m.AlertKind)) {
+		return m, errors.New("invalid push alert kind")
+	}
+	if m.AlertPhase != "" && (m.AlertKind == "" || !alertLabelPattern.MatchString(m.AlertPhase)) {
+		return m, errors.New("invalid push alert phase")
+	}
 	if len(m.CollapseID) > 64 || strings.IndexFunc(m.CollapseID, unicode.IsControl) >= 0 {
 		return m, errors.New("invalid push collapse ID")
 	}
@@ -159,10 +167,17 @@ func (m Message) prepare(now time.Time) (Message, error) {
 	if !m.ExpiresAt.After(now) {
 		return m, errors.New("push message expired")
 	}
+	if m.AlertKind != "" {
+		observed := m.Timestamp.UnixNano()
+		if observed <= 0 || !time.Unix(0, observed).Equal(m.Timestamp) || m.ExpiresAt.UnixMilli() <= m.Timestamp.UnixMilli() {
+			return m, errors.New("invalid push alert delivery window")
+		}
+	}
 	return m, nil
 }
 
 var connectionFlightIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+var alertLabelPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 
 func validConnectionFlightID(id string) bool {
 	return id != "." && id != ".." && connectionFlightIDPattern.MatchString(id)

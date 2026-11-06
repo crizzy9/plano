@@ -5,44 +5,21 @@ import android.content.Context
 import android.util.AtomicFile
 import org.json.JSONObject
 import java.io.File
-import java.security.MessageDigest
 import java.util.UUID
 
-private const val PUSH_CLOCK_SKEW_MILLIS = 5 * 60 * 1000L
-private const val SOURCE_CLOCK_SKEW_MILLIS = 30_000L
 private const val ORDER_TTL_MILLIS = 2 * 24 * 60 * 60 * 1000L
 private const val MAX_ORDER_ENTRIES = 64
 
-internal fun acceptsPushBinding(active: String?, supplied: String?, sentAt: Long, now: Long) =
-  active != null && supplied == active && sentAt in 0..now + PUSH_CLOCK_SKEW_MILLIS
-
-internal fun validPushObservation(observedAt: Long, sentAt: Long, now: Long): Boolean {
-  val observed = epochMillis(observedAt)
-  // FCM reports zero when a sent time is unavailable. Use a tighter device-time
-  // bound then, because no transport timestamp corroborates the observation.
-  if (observed == 0L || sentAt !in 0..now + PUSH_CLOCK_SKEW_MILLIS) return false
-  if (sentAt == 0L) return observed <= now + SOURCE_CLOCK_SKEW_MILLIS
-  return observed <= now + PUSH_CLOCK_SKEW_MILLIS && observed - sentAt <= SOURCE_CLOCK_SKEW_MILLIS
-}
-
-internal fun acceptsLiveAfterStop(stoppedAt: Long, started: Boolean, observedAt: Long, sentAt: Long): Boolean {
-  val delivery = sentAt.takeIf { it > 0 } ?: epochMillis(observedAt)
-  return stoppedAt == 0L || started && delivery > stoppedAt && observedAt >= stoppedAt / 1000
-}
-
-internal fun hashPushIdentity(id: String) =
-  MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
-
-internal fun liveNotificationTag(flightId: String) = "plano-live-${hashPushIdentity(flightId)}"
-
 internal object AndroidPushSession {
   private data class Order(val observed: Long, val sent: Long, val received: Long, val stoppedAt: Long = 0)
+  private data class AlertOrder(val received: Long, val revisions: Map<String, Long>)
   private data class State(
     val origin: String = "",
     val generation: String = UUID.randomUUID().toString(),
     val enabled: Boolean = false,
     val suppressed: Boolean = false,
     val order: Map<String, Order> = emptyMap(),
+    val alertOrder: Map<String, AlertOrder> = emptyMap(),
   ) {
     fun retired() = if (enabled) mapOf("origin" to origin, "binding" to generation) else null
   }
@@ -146,6 +123,30 @@ internal object AndroidPushSession {
   }
 
   @Synchronized
+  fun advanceAlert(context: Context, flightId: String?, metadata: FlightAlertMetadata): FlightAlertDecision? {
+    val current = state(context)
+    val now = System.currentTimeMillis()
+    if (!current.enabled || metadata.expiresAt?.let { it <= now } == true) return null
+    val kind = metadata.kind ?: return FlightAlertDecision()
+    val observedNs = metadata.observedNs ?: return null
+    val id = flightId?.takeIf(::validNotificationFlightId) ?: return null
+    val key = hashPushIdentity(id)
+    val recent = current.alertOrder.filterValues { it.received >= now - ORDER_TTL_MILLIS }
+    val previous = recent[key]?.revisions.orEmpty()
+    val update = updateFlightAlertOrder(previous, kind, observedNs, metadata.phase) ?: return null
+    if (update.revisions != previous) {
+      val ordered = recent.toMutableMap().apply { put(key, AlertOrder(now, update.revisions)) }
+      val bounded = ordered.entries.sortedByDescending { it.value.received }.take(MAX_ORDER_ENTRIES)
+        .associate { it.key to it.value }
+      if (runCatching { write(context, current.copy(alertOrder = bounded)) }.isFailure) return null
+    }
+    return FlightAlertDecision(
+      notificationTag = if (kind in flightStateAlertKinds) flightStateAlertTag(id, kind) else null,
+      cancelTags = update.supersededKinds.map { flightStateAlertTag(id, it) },
+    )
+  }
+
+  @Synchronized
   fun advance(context: Context, flightId: String, observedAt: Long, sentAt: Long, started: Boolean = false): Boolean {
     val now = System.currentTimeMillis()
     if (!validPushObservation(observedAt, sentAt, now)) return false
@@ -201,8 +202,18 @@ internal object AndroidPushSession {
         val entry = entries.getJSONObject(id)
         Order(entry.getLong("observed"), entry.getLong("sent"), entry.getLong("received"), entry.optLong("stoppedAt"))
       }
+      val alertEntries = json.optJSONObject("alertOrder") ?: JSONObject()
+      val alertOrder = alertEntries.keys().asSequence().take(MAX_ORDER_ENTRIES).mapNotNull { id ->
+        val entry = alertEntries.optJSONObject(id) ?: return@mapNotNull null
+        val received = entry.optLong("received").takeIf { it > 0L } ?: return@mapNotNull null
+        val values = entry.optJSONObject("revisions") ?: return@mapNotNull null
+        val revisions = flightStateAlertKinds.mapNotNull { kind ->
+          values.optLong(kind).takeIf { it > 0L }?.let { kind to it }
+        }.toMap()
+        id to AlertOrder(received, revisions)
+      }.toMap()
       check(UUID.fromString(generation).toString() == generation)
-      State(origin, generation, enabled, json.optBoolean("suppressed"), order)
+      State(origin, generation, enabled, json.optBoolean("suppressed"), order, alertOrder)
     }.getOrNull()
     val current = restored ?: State()
     loaded = current
@@ -217,8 +228,15 @@ internal object AndroidPushSession {
       if (value.stoppedAt != 0L) entry.put("stoppedAt", value.stoppedAt)
       order.put(key, entry)
     }
+    val alertOrder = JSONObject()
+    for ((key, value) in state.alertOrder) {
+      val revisions = JSONObject()
+      for ((kind, revision) in value.revisions) revisions.put(kind, revision)
+      alertOrder.put(key, JSONObject().put("received", value.received).put("revisions", revisions))
+    }
     val json = JSONObject().put("origin", state.origin).put("generation", state.generation)
       .put("enabled", state.enabled).put("suppressed", state.suppressed).put("order", order)
+      .put("alertOrder", alertOrder)
     val file = file(context)
     val stream = file.startWrite()
     try {

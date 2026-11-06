@@ -343,6 +343,12 @@ app verifies the binding before displaying a notification or updating its
 widget. Switching servers or turning alerts off invalidates the old binding
 on the device, including while a remote revocation is pending.
 
+With the current backend and Android build, delayed alerts are checked against
+their expiry and recent flight revisions. A newer gate or carousel update
+replaces the visible alert for that category. Movement alerts can clear older
+boarding and departure alerts. Ordered alert history is scoped to the active
+push session.
+
 When Android hides private notification content, Plano supplies a lock-screen
 version with phase, progress, and countdown. Flight number, route, gate,
 terminal, and seat stay in the private notification. The phone's settings

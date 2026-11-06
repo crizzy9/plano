@@ -237,10 +237,18 @@ type fcmAndroid struct {
 	BandwidthConstrained bool   `json:"bandwidth_constrained_ok,omitempty"`
 }
 
+func fcmDeadline(expiresAt, now time.Time) time.Time {
+	if limit := now.Add(maxFCMTTL); expiresAt.After(limit) {
+		return limit
+	}
+	return expiresAt
+}
+
 func (f *FCM) request(m Message, deviceToken string, now time.Time) (fcmRequest, error) {
 	var payload fcmRequest
 	payload.Message.Token = deviceToken
-	remaining := min(m.ExpiresAt.Sub(now), maxFCMTTL)
+	deadline := fcmDeadline(m.ExpiresAt, now)
+	remaining := deadline.Sub(now)
 	if remaining <= 0 {
 		return payload, errors.New("push message expired")
 	}
@@ -261,6 +269,17 @@ func (f *FCM) request(m Message, deviceToken string, now time.Time) (fcmRequest,
 	}
 	if m.Kind == Alert {
 		data["type"] = "alert"
+		data["alertExpiresMs"] = strconv.FormatInt(deadline.UnixMilli(), 10)
+		if m.AlertKind != "" {
+			if deadline.UnixMilli() <= m.Timestamp.UnixMilli() {
+				return payload, errors.New("invalid push alert delivery window")
+			}
+			data["alertKind"] = m.AlertKind
+			data["alertObservedNs"] = strconv.FormatInt(m.Timestamp.UnixNano(), 10)
+			if m.AlertPhase != "" {
+				data["alertPhase"] = m.AlertPhase
+			}
+		}
 		if m.ConnectionInboundID != "" {
 			data["connectionInboundId"] = m.ConnectionInboundID
 		}
@@ -304,11 +323,12 @@ func (f *FCM) Send(ctx context.Context, deviceToken string, message Message) err
 	if !validFCMToken(deviceToken) || strings.ContainsFunc(deviceToken, unicode.IsSpace) {
 		return &DeliveryError{Provider: "FCM", Code: "MalformedDeviceToken", InvalidToken: true}
 	}
-	m, err := message.prepare(time.Now())
+	now := time.Now()
+	m, err := message.prepare(now)
 	if err != nil {
 		return err
 	}
-	payload, err := f.request(m, deviceToken, time.Now())
+	payload, err := f.request(m, deviceToken, now)
 	if err != nil {
 		return err
 	}
@@ -316,8 +336,9 @@ func (f *FCM) Send(ctx context.Context, deviceToken string, message Message) err
 	if err != nil {
 		return err
 	}
-	// The first OAuth exchange can consume part of the delivery window.
-	remaining := min(time.Until(m.ExpiresAt), maxFCMTTL)
+	// The first OAuth exchange can consume part of the delivery window. Keep
+	// the TTL tied to the same deadline that was included in the alert data.
+	remaining := time.Until(fcmDeadline(m.ExpiresAt, now))
 	if remaining <= 0 {
 		return errors.New("push message expired")
 	}

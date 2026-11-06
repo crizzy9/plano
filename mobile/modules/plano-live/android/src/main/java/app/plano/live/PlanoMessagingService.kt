@@ -39,30 +39,38 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     val binding = data["binding"]
     AndroidPushSession.accept(this, binding, remoteMessage.sentTime) {
       when (data["type"]) {
-        "alert" -> showAlert(data, remoteMessage.messageId)
+        "alert" -> showAlert(data, remoteMessage.messageId, remoteMessage.sentTime)
         "live" -> if (binding != null) showProgress(data, binding, remoteMessage.sentTime)
       }
     }
   }
 
-  private fun showAlert(data: Map<String, String>, messageId: String?) {
-    if (!manager.areNotificationsEnabled()) return
+  private fun showAlert(data: Map<String, String>, messageId: String?, sentAt: Long) {
     val title = data["title"] ?: return
     val event = data["eventId"] ?: messageId ?: return
+    val flightId = data["flightId"]
+    val metadata = parseFlightAlertMetadata(data, sentAt, System.currentTimeMillis()) ?: return
+    val decision = runCatching { AndroidPushSession.advanceAlert(this, flightId, metadata) }.getOrNull() ?: return
+    decision.cancelTags.forEach { manager.cancel(it, 0) }
+    if (!manager.areNotificationsEnabled()) return
+    val remaining = metadata.expiresAt?.minus(System.currentTimeMillis())
+    if (remaining != null && remaining <= 0L) return
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       manager.createNotificationChannel(NotificationChannel(FLIGHT_ALERTS_CHANNEL, "Flight alerts", NotificationManager.IMPORTANCE_HIGH))
     }
     val body = data["body"].orEmpty()
-    val notification = notificationBuilder(FLIGHT_ALERTS_CHANNEL, highPriority = true)
+    val builder = notificationBuilder(FLIGHT_ALERTS_CHANNEL, highPriority = true)
       .setSmallIcon(R.drawable.plano_flight)
       .setContentTitle(title)
       .setContentText(body)
       .setStyle(Notification.BigTextStyle().bigText(body))
       .setVisibility(Notification.VISIBILITY_PRIVATE)
       .setAutoCancel(true)
-      .setContentIntent(openApp(data["flightId"], data["connectionInboundId"]))
-      .build()
-    manager.notify("plano-alert-${hashPushIdentity(event)}", 0, notification)
+      .setContentIntent(openApp(flightId, data["connectionInboundId"]))
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && decision.notificationTag != null && remaining != null) {
+      builder.setTimeoutAfter(remaining)
+    }
+    manager.notify(decision.notificationTag ?: "plano-alert-${hashPushIdentity(event)}", 0, builder.build())
   }
 
   private fun showProgress(data: Map<String, String>, binding: String, sentAt: Long) {

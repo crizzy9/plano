@@ -169,6 +169,12 @@ func assertFlightAlertSends(t *testing.T, store *Store, jobs []deliveryJob, want
 	t.Helper()
 	var sent, want []string
 	sender := pushFunc(func(_ context.Context, target push.Target, message push.Message) error {
+		if (message.AlertKind != "") != (target.Platform == "android") {
+			t.Fatalf("flight event kind %q for %s", message.AlertKind, target.Platform)
+		}
+		if (message.AlertPhase != "") != (target.Platform == "android") {
+			t.Fatalf("flight event phase %q for %s", message.AlertPhase, target.Platform)
+		}
 		sent = append(sent, target.Platform+"|"+message.Title+"|"+message.Body)
 		return nil
 	})

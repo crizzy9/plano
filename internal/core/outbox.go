@@ -645,7 +645,7 @@ func (s *Store) deliver(ctx context.Context, sender PushSender, logger *slog.Log
 	// the lease again at the transport boundary without holding a transaction.
 	var expires int64
 	var connectionDirty, hasAdvisoryEvidence bool
-	var flightEventKind string
+	var flightEventKind, flightPhase string
 	var latestFlight []byte
 	var newerFlightEvent bool
 	var predictedDelay int
@@ -653,7 +653,7 @@ func (s *Store) deliver(ctx context.Context, sender PushSender, logger *slog.Log
 	const leasedRow = ` FROM outbox o` + leaseFilter
 	err := s.db.QueryRowContext(ctx, `SELECT o.expires, `+dirtyConnectionAlert+`,
 EXISTS(SELECT 1 FROM outbox_advisory_evidence WHERE outbox_id=o.id),
-COALESCE(json_extract(e.data,'$.kind'),''), f.snapshot,
+COALESCE(json_extract(e.data,'$.kind'),''), COALESCE(json_extract(f.snapshot,'$.status'),''), f.snapshot,
 CASE WHEN json_extract(e.data,'$.kind')='delay_prediction' THEN COALESCE(json_extract(f.prediction,'$.delayMinutes'),0) ELSE 0 END,
 EXISTS(SELECT 1 FROM events newer WHERE newer.flight_id=e.flight_id AND newer.at_ns>e.at_ns
   AND json_extract(newer.data,'$.kind')=json_extract(e.data,'$.kind')
@@ -661,7 +661,7 @@ EXISTS(SELECT 1 FROM events newer WHERE newer.flight_id=e.flight_id AND newer.at
     AND json_extract(replacement.message,'$.CollapseID')=newer.id))
 FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leaseFilter,
 		job.id, job.deviceID, job.lease).Scan(&expires, &connectionDirty, &hasAdvisoryEvidence,
-		&flightEventKind, &latestFlight, &predictedDelay, &newerFlightEvent)
+		&flightEventKind, &flightPhase, &latestFlight, &predictedDelay, &newerFlightEvent)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
 			logger.Error("could not validate push lease", "job", job.id, "error", err)
@@ -730,6 +730,12 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 	}
 	if expires < job.message.ExpiresAt.UnixNano() {
 		job.message.ExpiresAt = time.Unix(0, expires).UTC()
+	}
+	if job.target.Platform == "android" && flightEventKind != "" {
+		// The event join identifies ordinary flight alerts even when the job
+		// was queued before Android supported alert ordering.
+		job.message.AlertKind = flightEventKind
+		job.message.AlertPhase = flightPhase
 	}
 	attempt, cancel := context.WithDeadline(ctx, deadline)
 	err = sender.Send(attempt, job.target, job.message)

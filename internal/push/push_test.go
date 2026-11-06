@@ -84,6 +84,13 @@ func fixtureConnectionAlert(now time.Time) Message {
 	return message
 }
 
+func fixtureOrderedAlert(now time.Time) Message {
+	message := fixtureAlert(now)
+	message.AlertKind = "departure_gate"
+	message.AlertPhase = "boarding"
+	return message
+}
+
 func fixtureActivity(kind Kind, now time.Time) Message {
 	return Message{
 		Kind: kind, FlightID: "flight-fixture", CollapseID: "flight-update", Timestamp: now, ExpiresAt: now.Add(90 * time.Second),
@@ -107,7 +114,7 @@ func TestAPNsWireRequests(t *testing.T) {
 		message                                   Message
 		inputToken                                int
 	}{
-		{"alert", "com.example.plano", "alert", "10", "event-fixture", fixtureAlert(now), 0},
+		{"alert", "com.example.plano", "alert", "10", "event-fixture", fixtureOrderedAlert(now), 0},
 		{"connection alert", "com.example.plano", "alert", "10", "event-fixture", fixtureConnectionAlert(now), 0},
 		{"start", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 0},
 		{"start requests update token", "com.example.plano.push-type.liveactivity", "liveactivity", "10", "", fixtureActivity(LiveStart, now), 1},
@@ -177,6 +184,10 @@ func TestAPNsWireRequests(t *testing.T) {
 				if test.message.Kind == Alert {
 					if wire.FlightID != test.message.FlightID || aps.Alert["title"] != test.message.Title || aps.Alert["body"] != test.message.Body || aps.Event != "" {
 						t.Errorf("invalid APNs alert: %s", body)
+					}
+					if strings.Contains(string(body), `"alertKind"`) || strings.Contains(string(body), `"alertObservedNs"`) ||
+						strings.Contains(string(body), `"alertExpiresMs"`) || strings.Contains(string(body), `"alertPhase"`) {
+						t.Errorf("APNs alert contained Android delivery metadata: %s", body)
 					}
 					return fixtureResponse(200, "", nil)
 				}
@@ -259,7 +270,7 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 	const device = "fixture:android-registration"
 	const binding = "ffffffff-ffff-4fff-bfff-ffffffffffff"
 	now := time.Now()
-	messages := []Message{fixtureAlert(now), fixtureActivity(LiveStart, now), fixtureActivity(LiveUpdate, now), fixtureActivity(LiveEnd, now), fixtureConnectionAlert(now)}
+	messages := []Message{fixtureOrderedAlert(now), fixtureActivity(LiveStart, now), fixtureActivity(LiveUpdate, now), fixtureActivity(LiveEnd, now), fixtureConnectionAlert(now)}
 	var exchanges, sends int
 	client.client = &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		body, err := io.ReadAll(r.Body)
@@ -323,12 +334,26 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 			if got.Token != device || got.Android.Priority != "HIGH" || !got.Android.Bandwidth || err != nil || ttl <= 0 || ttl > 90*time.Second || got.Notification != nil || got.Android.UI != nil || got.Data["flightId"] != message.FlightID || got.Data["binding"] != binding {
 				t.Errorf("invalid FCM data request: %s", body)
 			}
+			kind, hasKind := got.Data["alertKind"]
+			phase, hasPhase := got.Data["alertPhase"]
+			observed, hasObserved := got.Data["alertObservedNs"]
+			expires, hasExpires := got.Data["alertExpiresMs"]
 			if message.Kind == Alert {
 				if got.Data["type"] != "alert" || got.Data["title"] != message.Title || got.Data["body"] != message.Body || got.Data["eventId"] != message.CollapseID {
 					t.Errorf("invalid FCM alert: %s", body)
 				}
+				if !hasExpires || expires != strconv.FormatInt(message.ExpiresAt.UnixMilli(), 10) {
+					t.Errorf("invalid FCM alert expiry: %s", body)
+				}
+				if kind != message.AlertKind || hasKind != (message.AlertKind != "") || hasObserved != hasKind ||
+					hasObserved && observed != strconv.FormatInt(message.Timestamp.UnixNano(), 10) ||
+					phase != message.AlertPhase || hasPhase != (message.AlertPhase != "") {
+					t.Errorf("invalid FCM alert ordering metadata: %s", body)
+				}
 			} else if got.Data["type"] != "live" || got.Data["event"] != string(message.Kind) || got.Data["departureGate"] != "C12" || got.Data["seat"] != "14A" || got.Data["observedEpoch"] != strconv.FormatInt(message.State.ObservedEpoch, 10) {
 				t.Errorf("invalid FCM activity: %s", body)
+			} else if hasKind || hasObserved || hasExpires || hasPhase {
+				t.Errorf("FCM activity contained alert delivery metadata: %s", body)
 			}
 			wantCollapse := ""
 			if message.Kind == LiveUpdate {
@@ -358,6 +383,67 @@ func TestFCMOAuthAndAndroidDataRequests(t *testing.T) {
 	}
 	if sends != len(messages) || exchanges != 2 {
 		t.Fatalf("OAuth cache / invalidation: sends=%d, exchanges=%d", sends, exchanges)
+	}
+}
+
+func TestFCMAlertDeliveryWindowCapsWireExpiry(t *testing.T) {
+	now := time.Unix(1800000000, 123456789)
+	message := fixtureOrderedAlert(now)
+	message.AlertPhase = ""
+	message.ExpiresAt = now.Add(maxFCMTTL + time.Hour)
+	payload, err := (&FCM{}).request(message, "fixture-registration", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := payload.Message.Data["alertExpiresMs"], strconv.FormatInt(now.Add(maxFCMTTL).UnixMilli(), 10); got != want {
+		t.Errorf("alert expiry = %q, want %q", got, want)
+	}
+	if got, want := payload.Message.Android.TTL, strconv.FormatInt(int64(maxFCMTTL/time.Second), 10)+"s"; got != want {
+		t.Errorf("FCM TTL = %q, want %q", got, want)
+	}
+	if _, ok := payload.Message.Data["alertPhase"]; ok {
+		t.Error("FCM alert sent an empty phase")
+	}
+}
+
+func TestAlertOrderingValidatesKindAndTimes(t *testing.T) {
+	now := time.Unix(1800000000, 0)
+	for _, kind := range []string{"Boarding", "arrival gate", "x\n", strings.Repeat("x", 33)} {
+		message := fixtureOrderedAlert(now)
+		message.AlertKind = kind
+		if _, err := message.prepare(now); err == nil {
+			t.Errorf("accepted invalid alert kind %q", kind)
+		}
+	}
+	live := fixtureActivity(LiveUpdate, now)
+	live.AlertKind = "arrival_gate"
+	if _, err := live.prepare(now); err == nil {
+		t.Error("accepted alert kind on live update")
+	}
+	for _, phase := range []string{"BOARDING", "taxi out", "landed\n", strings.Repeat("a", 33)} {
+		message := fixtureOrderedAlert(now)
+		message.AlertPhase = phase
+		if _, err := message.prepare(now); err == nil {
+			t.Errorf("accepted invalid alert phase %q", phase)
+		}
+	}
+	untyped := fixtureAlert(now)
+	untyped.AlertPhase = "boarding"
+	if _, err := untyped.prepare(now); err == nil {
+		t.Error("accepted alert phase without an alert kind")
+	}
+	for _, observed := range []time.Time{time.Unix(0, 0), now.Add(time.Minute)} {
+		message := fixtureOrderedAlert(now)
+		message.Timestamp, message.ExpiresAt = observed, now.Add(time.Minute)
+		if _, err := message.prepare(now); err == nil {
+			t.Errorf("accepted invalid alert window starting at %v", observed)
+		}
+	}
+	message := fixtureOrderedAlert(now)
+	message.Timestamp, message.ExpiresAt = time.Time{}, time.Time{}
+	prepared, err := message.prepare(now)
+	if err != nil || !prepared.Timestamp.Equal(now) || !prepared.ExpiresAt.Equal(now.Add(15*time.Minute)) {
+		t.Errorf("invalid alert window defaults: %+v, %v", prepared, err)
 	}
 }
 
