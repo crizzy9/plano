@@ -15,13 +15,18 @@ onFlowComplete:
     visible: "View UA123"
     timeout: 10000
 - tapOn: "Settings"
+- extendedWaitUntil:
+    visible: "Plano server"
+    timeout: 20000
 - scrollUntilVisible:
-    element:
+    element: "Enable flight alerts"
+    direction: DOWN
+    timeout: 20000
+- extendedWaitUntil:
+    visible:
       text: "Enable flight alerts"
       enabled: true
-    direction: DOWN
-    timeout: 5000
-    centerElement: true
+    timeout: 10000
 - tapOn: "Enable flight alerts"
 - extendedWaitUntil:
     visible: "Allow"
@@ -30,18 +35,15 @@ onFlowComplete:
 - tapOn: "Allow"
 # Await settled UI rather than only waiting out a failed success assertion.
 # If registration rejects, its actual error remains beside the enabled action.
+- scrollUntilVisible:
+    element: "Enable flight alerts|Turn off flight alerts"
+    direction: DOWN
+    timeout: 20000
 - extendedWaitUntil:
     visible:
       text: "Enable flight alerts|Turn off flight alerts"
       enabled: true
     timeout: 25000
-- scrollUntilVisible:
-    element:
-      text: "Enable flight alerts|Turn off flight alerts"
-      enabled: true
-    direction: DOWN
-    timeout: 3000
-    centerElement: true
 - takeScreenshot: ios-alert-registration-result
 - assertVisible: 'Flight alerts are enabled for this server\.'
 - assertVisible: "Turn off flight alerts"
@@ -57,19 +59,16 @@ onFlowComplete:
     timeout: 10000
 - assertVisible: "Demo flight · Simulated data"
 - tapOn: "Start Live Activity"
+# This captures any ActivityKit/configuration error even if no native surface follows.
+- scrollUntilVisible:
+    element: "Start Live Activity"
+    direction: DOWN
+    timeout: 20000
 - extendedWaitUntil:
     visible:
       text: "Start Live Activity"
       enabled: true
     timeout: 10000
-# This captures any ActivityKit/configuration error even if no native surface follows.
-- scrollUntilVisible:
-    element:
-      text: "Start Live Activity"
-      enabled: true
-    direction: DOWN
-    timeout: 3000
-    centerElement: true
 - takeScreenshot: ios-activity-start-result
 # Background normally. From here onward, never restart or terminate Plano.
 - pressKey: Home

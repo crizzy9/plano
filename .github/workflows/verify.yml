@@ -165,6 +165,25 @@ jobs:
           test -s "$extension/PlanoActivity"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")" = "$PLANO_IOS_BUNDLE_ID"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$extension/Info.plist")" = "$PLANO_IOS_BUNDLE_ID.activity"
+      - name: Archive the compiled iOS simulator app
+        run: |
+          app="$RUNNER_TEMP/plano-ios/Build/Products/Release-iphonesimulator/Plano.app"
+          archive_dir="$RUNNER_TEMP/plano-ios-compiled-simulator-app"
+          mkdir -p "$archive_dir"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app" "$archive_dir/Plano.app.zip"
+          archive_sha256=$(shasum -a 256 "$archive_dir/Plano.app.zip" | awk '{print $1}')
+          bundle_id=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")
+          jq -n --arg source_commit "$GITHUB_SHA" --arg bundle_id "$bundle_id" \
+            --arg archive_sha256 "$archive_sha256" \
+            '{source_commit: $source_commit, bundle_id: $bundle_id, archive: "Plano.app.zip", archive_sha256: $archive_sha256}' \
+            >"$archive_dir/manifest.json"
+      - name: Keep the compiled iOS simulator app
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plano-ios-compiled-simulator-app
+          path: ${{ runner.temp }}/plano-ios-compiled-simulator-app/
+          if-no-files-found: error
+          retention-days: 1
       - name: Verify iOS tracking and optional Live Activity
         timeout-minutes: 22
         run: bash ../deploy/verify-ios-demo.sh
