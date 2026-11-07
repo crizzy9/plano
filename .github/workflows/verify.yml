@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      ios_activity_probe:
+        description: Run the strict iOS Live Activity probe after the base demo
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -119,6 +124,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
       PLANO_IOS_BUNDLE_ID: app.plano.verify
       PLANO_IOS_APNS_ENVIRONMENT: production
+      PLANO_IOS_ACTIVITY_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.ios_activity_probe && 'true' || 'false' }}
     defaults:
       run:
         working-directory: mobile
@@ -159,8 +165,8 @@ jobs:
           test -s "$extension/PlanoActivity"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")" = "$PLANO_IOS_BUNDLE_ID"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$extension/Info.plist")" = "$PLANO_IOS_BUNDLE_ID.activity"
-      - name: Connect and track through the iOS app
-        timeout-minutes: 15
+      - name: Verify iOS tracking and optional Live Activity
+        timeout-minutes: 22
         run: bash ../deploy/verify-ios-demo.sh
       - name: Keep the iOS demo evidence
         if: always()

@@ -9,7 +9,17 @@ app="$RUNNER_TEMP/plano-ios/Build/Products/Release-iphonesimulator/Plano.app"
 test -d "$app"
 work=$(mktemp -d "$RUNNER_TEMP/plano-ios-demo.XXXXXXXX")
 evidence="$RUNNER_TEMP/plano-ios-demo-evidence"
-mkdir -p "$evidence"
+activity_probe=${PLANO_IOS_ACTIVITY_PROBE:-false}
+case "$activity_probe" in
+  true|false) ;;
+  *) printf '%s\n' 'PLANO_IOS_ACTIVITY_PROBE must be true or false.' >&2; exit 1 ;;
+esac
+mkdir -p "$evidence/activity"
+if [[ "$activity_probe" == true ]]; then
+  printf '%s\n' '{"status":"UNVERIFIED","reason":"base-flow-not-complete","deadline_seconds":360}' >"$evidence/activity/status.json"
+else
+  printf '%s\n' '{"status":"UNVERIFIED","reason":"not-requested"}' >"$evidence/activity/status.json"
+fi
 
 device='' demo_pid='' proxy_pid=''
 cleanup() {
@@ -112,12 +122,22 @@ done
 curl -q --noproxy '*' --fail --silent --show-error --max-time 5 --cacert "$work/ca.pem" \
   https://127.0.0.1:8443/healthz | grep -q '"mode":"demo"'
 
-device=$(xcrun simctl list devices available --json | jq -er '
+if ! selected_device=$(xcrun simctl list devices available --json | jq -ce --arg probe "$activity_probe" '
   [.devices | to_entries[]
    | select(.key | startswith("com.apple.CoreSimulator.SimRuntime.iOS-26-4"))
-   | .value[]
-   | select(.isAvailable and .state == "Shutdown" and (.name | startswith("iPhone")))]
-  | .[0].udid | strings')
+   | .key as $runtime | .value[]
+   | select(.isAvailable and .state == "Shutdown" and (.name | startswith("iPhone")))
+   | select($probe != "true" or (.name | test("^iPhone (14|15|16|17) Pro( Max)?$")))
+   | {udid, name, runtime: $runtime}]
+  | .[0] // error("No suitable iOS 26.4 iPhone simulator is available.")'); then
+  if [[ "$activity_probe" == true ]]; then
+    printf '%s\n' '{"status":"UNVERIFIED","reason":"no-dynamic-island-simulator"}' >"$evidence/activity/status.json"
+  fi
+  printf '%s\n' 'No suitable iOS 26.4 iPhone simulator is available; the activity probe requires a known Dynamic Island Pro model.' >&2
+  exit 1
+fi
+printf '%s\n' "$selected_device" >"$evidence/device.json"
+device=$(jq -er '.udid | strings' <<<"$selected_device")
 test -n "$device"
 xcrun simctl boot "$device"
 xcrun simctl bootstatus "$device" -b
@@ -132,36 +152,89 @@ kill -0 "$pid"
 ps -p "$pid" -o command= | grep -F '/Plano.app/Plano'
 xcrun simctl io "$device" screenshot "$evidence/startup.png"
 
-python3 - "$work/maestro/bin/maestro" "$device" "$PLANO_IOS_BUNDLE_ID" "$evidence" <<'PY'
+python3 - "$work/maestro/bin/maestro" "$device" "$PLANO_IOS_BUNDLE_ID" "$evidence" "$activity_probe" <<'PY'
 import collections
+import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 
-driver, device, app_id, evidence = sys.argv[1:]
+driver, device, app_id, evidence, activity_probe = sys.argv[1:]
 destination = Path(evidence)
-artifacts = destination / "maestro"
-artifacts.mkdir()
-command = [
-    driver, "test", "--device", device, "-p", "ios", "--no-ansi",
-    "--test-output-dir", str(artifacts), "--debug-output", str(destination / "debug"),
-    "--format", "JUNIT", "--output", str(destination / "results.xml"),
-    "-e", "APP_ID=" + app_id,
-    "-e", "SERVER_URL=https://127.0.0.1:8443",
-    "-e", "EVIDENCE_DIR=" + str(artifacts),
-    "mobile/scripts/ios-demo-flow.yaml",
-]
-log = destination / "maestro.log"
-with log.open("w") as output:
-    try:
-        completed = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, timeout=540)
-        result = completed.returncode
-    except subprocess.TimeoutExpired:
-        print("The iOS demo UI flow exceeded nine minutes.")
-        result = 124
-with log.open() as output:
-    print("".join(collections.deque(output, maxlen=80)), end="")
+activity = destination / "activity"
+activity_deadline = 360
+selected = json.loads((destination / "device.json").read_text())
+
+def activity_status(reason, result=None):
+    (activity / "status.json").write_text(json.dumps({
+        "status": "UNVERIFIED", "reason": reason, "cli_exit": result,
+        "deadline_seconds": activity_deadline,
+        "source_commit": os.environ.get("GITHUB_SHA"),
+        "device_name": selected["name"], "runtime": selected["runtime"],
+        "evidence": {"junit": "activity/results.xml", "screenshots": "activity/maestro", "final": "activity/final.png"},
+    }, indent=2) + "\n")
+
+def run_flow(flow, output_directory, timeout, parameters=(), environment=None):
+    artifacts = output_directory / "maestro"
+    artifacts.mkdir()
+    command = [
+        driver, "test", "--device", device, "-p", "ios", "--no-ansi",
+        "--test-output-dir", str(artifacts), "--debug-output", str(output_directory / "debug"),
+        "--format", "JUNIT", "--output", str(output_directory / "results.xml"),
+        "-e", "APP_ID=" + app_id, *parameters, flow,
+    ]
+    log = output_directory / "maestro.log"
+    with log.open("w") as output:
+        try:
+            completed = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, timeout=timeout, env=environment)
+            result = completed.returncode
+        except subprocess.TimeoutExpired:
+            print(f"The iOS flow exceeded its {timeout}-second deadline: {flow}")
+            result = 124
+        except OSError:
+            print(f"The iOS flow driver could not start: {flow}")
+            result = 127
+    with log.open() as output:
+        print("".join(collections.deque(output, maxlen=80)), end="")
+    return result
+
+result = run_flow("mobile/scripts/ios-demo-flow.yaml", destination, 540,
+                  ("-e", "SERVER_URL=https://127.0.0.1:8443"))
+if result != 0:
+    if activity_probe == "true":
+        activity_status("base-flow-failed")
+    sys.exit(result)
+
+try:
+    subprocess.run(["xcrun", "simctl", "io", device, "screenshot", str(destination / "final-detail.png")],
+                   check=True, timeout=10)
+except (subprocess.SubprocessError, OSError):
+    if activity_probe == "true":
+        activity_status("base-evidence-capture-failed")
+    raise
+print("iOS connected over HTTPS, searched and tracked UA123, and retained it after relaunch.")
+if activity_probe != "true":
+    sys.exit(0)
+
+activity_status("probe-running")
+probe_environment = os.environ.copy()
+probe_environment["JAVA_TOOL_OPTIONS"] = os.environ["JAVA_TOOL_OPTIONS"].replace("-Xmx512m", "-Xmx256m", 1)
+result = run_flow("mobile/scripts/ios-activity-probe.yaml", activity, activity_deadline, environment=probe_environment)
+activity_status("native-surface-review-pending" if result == 0 else "activity-flow-failed", result)
+if result == 124:
+    activity_status("activity-flow-timeout", result)
+# Also retain the actual UI when the driver times out before its completion hook.
+try:
+    subprocess.run(["xcrun", "simctl", "io", device, "screenshot", str(activity / "final.png")],
+                   check=True, timeout=10)
+except (subprocess.SubprocessError, OSError):
+    if result == 0:
+        activity_status("activity-evidence-capture-failed", result)
+        result = 1
+if result == 0:
+    print("iOS Live Activity probe completed; native surface review is pending (UNVERIFIED).")
+else:
+    print("iOS Live Activity remains UNVERIFIED; inspect activity/results.xml and its UI evidence.")
 sys.exit(result)
 PY
-xcrun simctl io "$device" screenshot "$evidence/final-detail.png"
-printf '%s\n' 'iOS connected over HTTPS, searched and tracked UA123, and retained it after relaunch.'

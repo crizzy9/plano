@@ -1,0 +1,102 @@
+appId: ${APP_ID}
+name: Plano iOS Live Activity probe
+onFlowComplete:
+  - takeScreenshot: ios-activity-probe-final
+---
+# Run only after the base HTTPS demo flow has passed on its isolated device.
+# It must leave tomorrow's UA123 tracked. Do not clear state or Keychain.
+# This first restart returns to Home before any Live Activity is created.
+# Override Maestro's default permission grant so the normal prompt is tested.
+- launchApp:
+    stopApp: true
+    permissions:
+      notifications: unset
+- extendedWaitUntil:
+    visible: "View UA123"
+    timeout: 10000
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element:
+      text: "Enable flight alerts"
+      enabled: true
+    direction: DOWN
+    timeout: 5000
+    centerElement: true
+- tapOn: "Enable flight alerts"
+- extendedWaitUntil:
+    visible: "Allow"
+    timeout: 10000
+- takeScreenshot: ios-notification-permission-prompt
+- tapOn: "Allow"
+# Await settled UI rather than only waiting out a failed success assertion.
+# If registration rejects, its actual error remains beside the enabled action.
+- extendedWaitUntil:
+    visible:
+      text: "Enable flight alerts|Turn off flight alerts"
+      enabled: true
+    timeout: 25000
+- scrollUntilVisible:
+    element:
+      text: "Enable flight alerts|Turn off flight alerts"
+      enabled: true
+    direction: DOWN
+    timeout: 3000
+    centerElement: true
+- takeScreenshot: ios-alert-registration-result
+- assertVisible: 'Flight alerts are enabled for this server\.'
+- assertVisible: "Turn off flight alerts"
+# No activity exists yet; restart to Home using the same pattern as the base flow.
+- launchApp:
+    stopApp: true
+- extendedWaitUntil:
+    visible: "View UA123"
+    timeout: 10000
+- tapOn: "View UA123"
+- extendedWaitUntil:
+    visible: "Stop tracking"
+    timeout: 10000
+- assertVisible: "Demo flight · Simulated data"
+- tapOn: "Start Live Activity"
+- extendedWaitUntil:
+    visible:
+      text: "Start Live Activity"
+      enabled: true
+    timeout: 10000
+# This captures any ActivityKit/configuration error even if no native surface follows.
+- scrollUntilVisible:
+    element:
+      text: "Start Live Activity"
+      enabled: true
+    direction: DOWN
+    timeout: 3000
+    centerElement: true
+- takeScreenshot: ios-activity-start-result
+# Background normally. From here onward, never restart or terminate Plano.
+- pressKey: Home
+- takeScreenshot: ios-native-island-before-assertion
+- extendedWaitUntil:
+    visible: "Plano flight"
+    timeout: 10000
+- takeScreenshot: ios-native-island-compact
+# Source-backed compact icon label; no guessed system coordinates.
+- longPressOn: "Plano flight"
+- extendedWaitUntil:
+    visible: "SFO"
+    timeout: 10000
+- assertVisible: "EWR"
+- assertVisible: "Gate F12"
+- assertVisible: "Gate C82"
+- takeScreenshot: ios-native-island-expanded
+- launchApp:
+    stopApp: false
+- assertVisible: "Stop tracking"
+- tapOn: "Stop tracking"
+- extendedWaitUntil:
+    visible: "Track flight"
+    timeout: 10000
+- takeScreenshot: ios-activity-untracked
+- pressKey: Home
+- extendedWaitUntil:
+    notVisible: "Plano flight"
+    timeout: 5000
+- takeScreenshot: ios-native-island-after-untrack

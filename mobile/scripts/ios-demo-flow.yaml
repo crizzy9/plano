@@ -37,13 +37,13 @@ name: Plano iOS demo
 - extendedWaitUntil:
     visible: "Stop tracking"
     timeout: 30000
-- takeScreenshot: ${EVIDENCE_DIR}/ios-tracked-detail
+- takeScreenshot: ios-tracked-detail
 - launchApp:
     stopApp: true
 - extendedWaitUntil:
     visible: "View UA123"
     timeout: 30000
-- takeScreenshot: ${EVIDENCE_DIR}/ios-relaunch-home
+- takeScreenshot: ios-relaunch-home
 - tapOn: "View UA123"
 - extendedWaitUntil:
     visible: "Stop tracking"
