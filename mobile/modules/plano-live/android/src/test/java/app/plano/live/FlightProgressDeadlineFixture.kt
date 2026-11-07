@@ -102,13 +102,26 @@ fun main() {
   check(!acceptsLiveAfterStop(now + 500, true, early, now + 2_000))
   check(acceptsLiveAfterStop(now + 500, true, late, 0))
 
-  val original = checkNotNull(nextLiveProgressNotification(null, started = true, ended = false) { "first" })
+  val original = checkNotNull(nextLiveProgressNotification(null, null, early, started = true, ended = false) { "first" })
   check(!original.dismiss("stale").dismissed)
   val dismissed = original.dismiss("first")
   check(dismissed.dismissed)
-  check(nextLiveProgressNotification(dismissed, started = false, ended = false) { error("ordinary update replaced the notice") } == dismissed)
-  check(nextLiveProgressNotification(dismissed, started = false, ended = true) { error("end created a notice") } == null)
-  val restarted = checkNotNull(nextLiveProgressNotification(dismissed, started = true, ended = false) { "second" })
+  // FCM retries can have a later send time while carrying the same source observation.
+  check(early.isNewerThan(early, now + 2_000, now + 1_000))
+  val retried = nextLiveProgressNotification(dismissed, early, early, started = true, ended = false) {
+    error("duplicate start replaced the dismissed notice")
+  }
+  check(retried == dismissed)
+  val heartbeat = nextLiveProgressNotification(dismissed, early, early, started = false, ended = false) {
+    error("heartbeat replaced the dismissed notice")
+  }
+  check(heartbeat == dismissed)
+  val ended = nextLiveProgressNotification(dismissed, early, late, started = false, ended = true) {
+    error("end created a notice")
+  }
+  check(ended == null)
+  val restarted = checkNotNull(nextLiveProgressNotification(dismissed, early, late, started = true, ended = false) { "second" })
+  check(restarted.instance == "second")
   check(!restarted.dismiss("first").dismissed)
   println("Flight progress ordering, deadline, selection, stop, and notification dismissal fixtures passed")
 }

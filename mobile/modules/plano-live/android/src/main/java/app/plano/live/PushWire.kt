@@ -55,12 +55,15 @@ internal data class LiveProgressNotification(val instance: String, val dismissed
 
 internal fun nextLiveProgressNotification(
   previous: LiveProgressNotification?,
+  previousObservation: LiveObservation?,
+  observation: LiveObservation,
   started: Boolean,
   ended: Boolean,
   newInstance: () -> String,
 ): LiveProgressNotification? = when {
   ended -> null
-  !started && previous != null -> previous
+  // A retry can have a later FCM send time while carrying the same start.
+  previous != null && (!started || previousObservation == observation) -> previous
   else -> LiveProgressNotification(newInstance())
 }
 

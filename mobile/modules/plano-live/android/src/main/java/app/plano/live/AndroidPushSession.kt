@@ -229,7 +229,10 @@ internal object AndroidPushSession {
     val old = current.order[key]?.takeIf { it.received >= now - ORDER_TTL_MILLIS }
     if (!acceptsLiveAfterStop(old?.stoppedAt ?: 0, started, observation, sentAt)) return null
     if (old != null && !observation.isNewerThan(old.observation, sentAt, old.sent)) return null
-    val notification = nextLiveProgressNotification(old?.notification, started, ended) { UUID.randomUUID().toString() }
+    if (!ended && old != null && observation == old.observation && (old.ended || old.stoppedAt != 0L)) return null
+    val notification = nextLiveProgressNotification(old?.notification, old?.observation, observation, started, ended) {
+      UUID.randomUUID().toString()
+    }
     val next = current.withOrder(key, Order(observation, sentAt, now, notification = notification, ended = ended))
     write(context, next)
     return AcceptedProgress(notification, next.hiddenWidgetKeys())
