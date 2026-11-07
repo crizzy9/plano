@@ -9,7 +9,7 @@ name: Plano iOS demo
 - assertVisible: 'https://plano\.example\.org'
 - tapOn: 'https://plano\.example\.org'
 - inputText: ${SERVER_URL}
-- hideKeyboard
+- tapOn: "Plano server"
 - tapOn: "Connect to server"
 - extendedWaitUntil:
     visible: "Find a flight"
@@ -23,7 +23,7 @@ name: Plano iOS demo
 - tapOn: "Find a flight"
 - tapOn: "UA123"
 - inputText: "UA123"
-- hideKeyboard
+- tapOn: "Use the departure date at the origin airport."
 - tapOn: "Tomorrow"
 - tapOn: "Search flights"
 - extendedWaitUntil:

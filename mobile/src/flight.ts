@@ -93,4 +93,13 @@ export function pathDistance(points: Position[]) {
   return km;
 }
 
-export const errorText = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Try again.';
+export function errorText(error: unknown) {
+  if (!(error instanceof Error)) return 'Something went wrong. Try again.';
+  // Expo wraps iOS SecureStore failures; keep its native diagnostics out of UI copy.
+  const keychainFailure = ('code' in error && error.code === 'ERR_KEY_CHAIN') ||
+    /^FunctionCallException: Calling the '(?:get|set|delete)ValueWithKeyAsync' function has failed(?: \(at ExpoModulesCore\/[^\n]+\))?\n→ Caused by: KeyChainException: /.test(error.message);
+  if (keychainFailure) {
+    return 'Plano couldn’t access secure storage. Unlock your device and try again. If this continues, contact the app developer.';
+  }
+  return error.message;
+}

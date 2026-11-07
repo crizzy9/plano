@@ -40,6 +40,18 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Keep the signature and simulator capabilities available when a UI check fails.
+for target in "$app" "$app/PlugIns/PlanoActivity.appex"; do
+  name=${target##*/}
+  executable=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$target/Info.plist")
+  codesign --display --verbose=2 "$target" >"$evidence/$name-codesign.txt" 2>&1
+  if ! xcrun otool -s __TEXT __entitlements "$target/$executable" \
+    >"$evidence/$name-simulator-entitlements.txt" 2>&1; then
+    printf '%s\n' 'Simulator entitlement section diagnostic unavailable.' \
+      >>"$evidence/$name-simulator-entitlements.txt"
+  fi
+done
+
 # Keep the portable driver and its runtime state in this disposable workspace.
 driver_sha=54dbb0716425626604973cbb374c585ca30272375d9ce15177a1152765ddd9d7
 curl -q --fail --silent --show-error --location --retry 2 --connect-timeout 10 --max-time 180 \
