@@ -249,6 +249,43 @@ func TestDailyClosureAlertsFollowThePublishedOccurrence(t *testing.T) {
 	}
 }
 
+func TestDailyClosureAlertOccurrencesPersistWithoutDuplicates(t *testing.T) {
+	store, _, id := dispatcherFixture(t)
+	ctx := t.Context()
+	now := time.Now().UTC().Add(time.Second).Truncate(time.Second)
+	start := now.Truncate(24*time.Hour).AddDate(0, 0, 1).Add(22 * time.Hour)
+	end := start.Add(27*time.Hour + 45*time.Minute)
+	closure := feeds.Advisory{ID: "daily-closure", Kind: "airport_closure", Source: feeds.FAASWIM,
+		Airport: "KSFO", Direction: "departure", ObservedAt: now,
+		RawReason: "(A1234/26 NOTAMN\nA) KSFO B) " + start.Format("0601021504") + " C) " + end.Format("0601021504") +
+			"\nD) DLY 2200-0145\nE) AD CLSD)"}
+	flight := noticeFlight(now)
+	flight.ID, flight.ObservedAt, flight.ScheduledDeparture = id, now, new(start.Add(30*time.Minute))
+	for _, departure := range []time.Time{start.Add(30 * time.Minute), start.Add(time.Hour), start.Add(25 * time.Hour), start.Add(26 * time.Hour)} {
+		flight.ObservedAt = flight.ObservedAt.Add(time.Second)
+		flight.EstimatedDeparture = &departure
+		if err := store.Observe(ctx, flight, nil, nil, []feeds.Advisory{closure}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	details, err := store.Details(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var occurrences []Event
+	for _, event := range details.Events {
+		if event.Kind == "airport_closure" {
+			occurrences = append(occurrences, event)
+		}
+	}
+	firstEnd := start.Add(3*time.Hour + 45*time.Minute)
+	if len(occurrences) != 2 || occurrences[0].ID == occurrences[1].ID ||
+		!strings.Contains(occurrences[0].Body, end.Format("Jan 2 at 15:04 UTC")) ||
+		!strings.Contains(occurrences[1].Body, firstEnd.Format("Jan 2 at 15:04 UTC")) {
+		t.Fatalf("persisted closure occurrences = %+v, want one per window", occurrences)
+	}
+}
+
 func TestEndedAdvisorySurvivesDelayedReplayAndSuppressesOldPoll(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "advisory.db"))
@@ -335,7 +372,7 @@ func TestMaterialAdvisoryRevisionSupersedesPendingAlert(t *testing.T) {
 		}
 	}
 	jobs, err := store.claim(ctx, now, 4)
-	if err != nil || len(jobs) != 2 || jobs[0].message.CollapseID != jobs[1].message.CollapseID {
+	if err != nil || len(jobs) != 1 || jobs[0].message.Body != revised.Reason {
 		t.Fatalf("unexpected revision jobs: %+v %v", jobs, err)
 	}
 	var delivered []string
@@ -348,6 +385,158 @@ func TestMaterialAdvisoryRevisionSupersedesPendingAlert(t *testing.T) {
 	}
 	if len(delivered) != 1 || delivered[0] != revised.Reason {
 		t.Fatalf("wrong program revision delivered: %v", delivered)
+	}
+}
+
+func TestAdvisoryRestorationReplacesPendingFamilyAndPreservesTimeline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		poll bool
+	}{
+		{name: "callbacks"},
+		{name: "observation and restart", poll: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "advisory-restoration.db")
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			now := time.Now().UTC()
+			flight := feeds.Flight{ID: "restoration-flight", Number: "AA2", Origin: "JFK", Destination: "SFO",
+				Status: "scheduled", ObservedAt: now.Add(-10 * time.Second),
+				ScheduledDeparture: new(now.Add(25 * time.Hour)), ScheduledArrival: new(now.Add(31 * time.Hour))}
+			if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			token, err := store.CreateInstallation(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner, err := store.Installation(ctx, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Track(ctx, owner, flight.ID, ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Register(ctx, owner, Device{Platform: "android", Kind: "alert", Token: "restoration-fixture"}, now); err != nil {
+				t.Fatal(err)
+			}
+			flight.DepartureGate, flight.ObservedAt = "B2", now.Add(-9*time.Second)
+			if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			initial := feeds.Advisory{ID: "airport-program", Source: feeds.FAASWIM, Airport: "JFK", Kind: "departure_delay",
+				Direction: "departure", Reason: "Low visibility.", ObservedAt: now.Add(-6 * time.Minute)}
+			family := hash(flight.ID + "\x00advisory\x00" + initial.Source + "\x00" + initial.ID)
+			publishDispatchAdvisory(t, store, initial, now.Add(-8*time.Second))
+			publishDispatchAdvisory(t, store, initial, now.Add(-7*time.Second))
+			refresh := initial
+			refresh.ObservedAt = now.Add(-5 * time.Minute)
+			publishDispatchAdvisory(t, store, refresh, now.Add(-6*time.Second))
+			assertPending := func(body string, observed time.Time) {
+				t.Helper()
+				var count int
+				var pendingBody string
+				var pendingObserved int64
+				if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(json_extract(o.message,'$.Body')),''),
+COALESCE(MAX(e.observed_ns),0) FROM outbox o JOIN outbox_advisory_evidence e ON e.outbox_id=o.id
+WHERE o.flight_id=? AND o.done=0 AND json_extract(o.message,'$.CollapseID')=?`, flight.ID, family).
+					Scan(&count, &pendingBody, &pendingObserved); err != nil {
+					t.Fatal(err)
+				}
+				if count != 1 || pendingBody != body || pendingObserved != observed.UnixNano() {
+					t.Fatalf("pending family = %d, %q, %d, want one %q at %d", count, pendingBody, pendingObserved, body, observed.UnixNano())
+				}
+			}
+			assertPending(initial.Reason, initial.ObservedAt)
+
+			changed := initial
+			changed.ObservedAt, changed.Reason = now.Add(-4*time.Minute), "Runway congestion."
+			if tc.poll {
+				flight.ObservedAt = now.Add(-5 * time.Second)
+				if err := store.Observe(ctx, flight, nil, nil, []feeds.Advisory{changed}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				publishDispatchAdvisory(t, store, changed, now.Add(-5*time.Second))
+			}
+			assertPending(changed.Reason, changed.ObservedAt)
+			if tc.poll {
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reopened, err := Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				store = reopened
+			}
+			restored := initial
+			restored.ObservedAt = now.Add(-3 * time.Minute)
+			publishDispatchAdvisory(t, store, restored, now.Add(-4*time.Second))
+			publishDispatchAdvisory(t, store, changed, now.Add(-3*time.Second))
+			flight.ObservedAt = now.Add(-2 * time.Second)
+			if err := store.Observe(ctx, flight, nil, nil, []feeds.Advisory{changed}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.poll {
+				latestPoll := restored
+				latestPoll.ObservedAt = now.Add(-time.Minute)
+				if err := store.cachePolledFlightNotices(ctx, latestPoll.Source, []feeds.Advisory{latestPoll}, now.Add(-time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				// This callback is newer than the event head, but the cached
+				// poll is already ahead of it and agrees with the restored alert.
+				lateCallback := changed
+				lateCallback.ObservedAt = now.Add(-2 * time.Minute)
+				publishDispatchAdvisory(t, store, lateCallback, now)
+			}
+			assertPending(restored.Reason, restored.ObservedAt)
+
+			details, err := store.Details(ctx, flight.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gateID string
+			var revisions []Event
+			for _, event := range details.Events {
+				switch event.Kind {
+				case initial.Kind:
+					revisions = append(revisions, event)
+				case "departure_gate":
+					gateID = event.ID
+				}
+			}
+			if len(revisions) != 3 || revisions[0].Body != restored.Reason || revisions[1].Body != changed.Reason ||
+				revisions[2].Body != initial.Reason || revisions[0].ID == revisions[1].ID || revisions[0].ID == revisions[2].ID ||
+				revisions[1].ID == revisions[2].ID || gateID == "" {
+				t.Fatalf("unexpected timeline: %+v", details.Events)
+			}
+			jobs, err := store.claim(ctx, now, 3)
+			if err != nil || len(jobs) != 2 {
+				t.Fatalf("pending jobs = %+v, error = %v", jobs, err)
+			}
+			sent := make(map[string]push.Message)
+			for _, job := range jobs {
+				store.deliver(ctx, pushFunc(func(_ context.Context, _ push.Target, message push.Message) error {
+					sent[message.CollapseID] = message
+					if message.CollapseID == family && (message.AndroidAdvisoryRevision == nil ||
+						message.AndroidAdvisoryRevision.ObservedNS != restored.ObservedAt.UnixNano() || message.AndroidAdvisoryRevision.OutboxID != job.id) {
+						t.Fatalf("restored push lost source ordering evidence: %+v", message.AndroidAdvisoryRevision)
+					}
+					return nil
+				}), slog.New(slog.DiscardHandler), job)
+			}
+			if len(sent) != 2 || sent[family].Body != restored.Reason || sent[gateID].AlertKind != "departure_gate" ||
+				sent[gateID].AndroidAdvisoryRevision != nil || !strings.HasSuffix(sent[gateID].Body, "B2") {
+				t.Fatalf("unexpected deliveries: %+v", sent)
+			}
+		})
 	}
 }
 

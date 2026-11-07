@@ -17,6 +17,7 @@ type Event struct {
 	At               time.Time `json:"at"`
 	validUntil       *time.Time
 	collapseID       string
+	advisoryScope    string
 	advisoryEvidence []forecastAdvisory
 	advisoryWindow   *push.AdvisoryWindow
 	inboundLegID     string

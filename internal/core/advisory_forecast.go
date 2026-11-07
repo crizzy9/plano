@@ -97,6 +97,10 @@ func legacyAdvisoryReason(reason string) bool {
 	return !strings.HasPrefix(reason, "In the historical model, ") && strings.Contains(reason, " reports ") && strings.Contains(reason, " at ")
 }
 
+const jsonAdvisoryEvidenceSQL = `SELECT json_extract(value,'$.source'), json_extract(value,'$.id'),
+ json_extract(value,'$.observedNs'), COALESCE(json_extract(value,'$.stateHash'),''), COALESCE(json_extract(value,'$.airport'),'')
+FROM json_each(?) WHERE json_extract(value,'$.source')<>'' AND json_extract(value,'$.id')<>''`
+
 func forecastAdvisoryRevised(ctx context.Context, db rowQueryer, forecast *Prediction, now time.Time) (bool, error) {
 	if len(forecast.AdvisoryEvidence) == 0 {
 		return false, nil
@@ -105,9 +109,7 @@ func forecastAdvisoryRevised(ctx context.Context, db rowQueryer, forecast *Predi
 	if err != nil {
 		return false, err
 	}
-	return advisoryEvidenceRevised(ctx, db, `SELECT json_extract(value,'$.source'), json_extract(value,'$.id'),
- json_extract(value,'$.observedNs'), COALESCE(json_extract(value,'$.stateHash'),''), COALESCE(json_extract(value,'$.airport'),'')
-FROM json_each(?) WHERE json_extract(value,'$.source')<>'' AND json_extract(value,'$.id')<>''`, string(evidence), now, false)
+	return advisoryEvidenceRevised(ctx, db, jsonAdvisoryEvidenceSQL, string(evidence), now, false)
 }
 
 func advisoryEvidenceRevised(ctx context.Context, db rowQueryer, evidenceSQL string, evidence any, now time.Time, requireCurrent bool) (bool, error) {

@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,13 @@ const (
 	signedAdvisoryRetention = feeds.AdvisoryMaxAge + time.Hour
 	tfmsAdvisoryRetention   = feeds.TFMSAdvisoryMaxAge + time.Hour
 )
+
+const advisoryAlertSchema = `
+CREATE TABLE IF NOT EXISTS advisory_alert_heads (
+  flight_id TEXT NOT NULL REFERENCES flights(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL, state_id TEXT NOT NULL, observed_ns INTEGER NOT NULL, applied_ns INTEGER NOT NULL,
+  PRIMARY KEY(flight_id,scope)
+);`
 
 func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time, cancellations ...tfmsProgramCancellation) (Event, bool) {
 	if a.Kind == feeds.AdvisoryAirportNotice {
@@ -72,6 +81,7 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time, cancella
 	}
 	body := a.Reason
 	family := hash(flight.ID + "\x00advisory\x00" + a.Source + "\x00" + a.ID)
+	scope := family
 	evidence := advisoryEvidence(original)
 	revision := family + "\x00" + evidence.StateHash
 	if !cancellation.IsZero() && cancellation.Before(a.ObservedAt) {
@@ -86,7 +96,9 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time, cancella
 			direction = "arrival"
 		}
 		window = &push.AdvisoryWindow{Airport: a.Airport, Direction: direction, StartsAt: *a.StartsAt, EndsAt: *a.EndsAt}
-		revision += "\x00" + direction + "\x00" + a.StartsAt.UTC().Format(time.RFC3339)
+		occurrence := "\x00" + direction + "\x00" + a.StartsAt.UTC().Format(time.RFC3339)
+		revision += occurrence
+		scope = hash(family + occurrence)
 	} else if a.AirportContextOnly && (a.Kind == "ground_stop" || a.Kind == "ground_delay") && a.StartsAt != nil && a.EndsAt != nil {
 		window = &push.AdvisoryWindow{Airport: a.Airport, Direction: a.Direction, StartsAt: *a.StartsAt, EndsAt: *a.EndsAt, Kind: a.Kind}
 	}
@@ -95,7 +107,73 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time, cancella
 	}
 	return Event{ID: hash(revision), Kind: a.Kind,
 		Title: fmt.Sprintf("%s · %s", a.Airport, strings.ReplaceAll(a.Kind, "_", " ")), Body: body, At: at,
-		validUntil: &validUntil, collapseID: family, advisoryEvidence: []forecastAdvisory{evidence}, advisoryWindow: window}, true
+		validUntil: &validUntil, collapseID: family, advisoryScope: scope,
+		advisoryEvidence: []forecastAdvisory{evidence}, advisoryWindow: window}, true
+}
+
+// saveAdvisoryEvent deduplicates consecutive states within each affected
+// occurrence, while allowing a later revision to restore an earlier state.
+func saveAdvisoryEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event) error {
+	state, observed, applied := event.ID, event.advisoryEvidence[0].ObservedNS, event.At.UnixNano()
+	var priorState string
+	var priorObserved, priorApplied int64
+	err := tx.QueryRowContext(ctx, `SELECT state_id,observed_ns,applied_ns FROM advisory_alert_heads WHERE flight_id=? AND scope=?`,
+		flightID, event.advisoryScope).Scan(&priorState, &priorObserved, &priorApplied)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if priorState != "" && (observed < priorObserved || observed == priorObserved && applied <= priorApplied) {
+		return nil
+	}
+	changed := state != priorState
+	if changed {
+		// A signed callback can arrive behind a newer poll whose flight
+		// refresh has not run yet. Check the same source order as dispatch.
+		evidence, err := json.Marshal(event.advisoryEvidence)
+		if err != nil {
+			return err
+		}
+		revised, err := advisoryEvidenceRevised(ctx, tx, jsonAdvisoryEvidenceSQL, string(evidence), event.At, false)
+		if err != nil || revised {
+			return err
+		}
+		if priorState != "" {
+			event.ID = hash(state + "\x00" + strconv.FormatInt(observed, 10) + "\x00" + strconv.FormatInt(applied, 10))
+			if err := retirePriorAdvisoryAlerts(ctx, tx, flightID, event); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO advisory_alert_heads(flight_id,scope,state_id,observed_ns,applied_ns) VALUES(?,?,?,?,?)
+ON CONFLICT(flight_id,scope) DO UPDATE SET state_id=excluded.state_id,observed_ns=excluded.observed_ns,applied_ns=excluded.applied_ns`,
+		flightID, event.advisoryScope, state, observed, applied); err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	// Keep the original event ID on first sight, so existing databases can
+	// initialize their current state without resending an old alert.
+	return saveEvent(ctx, tx, flightID, event, true)
+}
+
+func retirePriorAdvisoryAlerts(ctx context.Context, tx *sql.Tx, flightID string, event Event) error {
+	var occurrence any
+	var direction string
+	if window := event.advisoryWindow; window != nil && window.Kind == "" {
+		occurrence, direction = window.StartsAt.UTC().Format(time.RFC3339Nano), window.Direction
+	}
+	// A return to the old content would otherwise reauthorize jobs from its
+	// first appearance. Leave independent closure occurrences alone.
+	_, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE flight_id=?1 AND done=0
+AND json_extract(message,'$.Kind')='alert' AND json_extract(message,'$.CollapseID')=?2
+AND CASE WHEN ?3 IS NULL THEN json_extract(message,'$.AdvisoryWindow.StartsAt') IS NULL
+  OR json_extract(message,'$.AdvisoryWindow.Kind')<>''
+ELSE COALESCE(json_extract(message,'$.AdvisoryWindow.Kind'),'')=''
+  AND json_extract(message,'$.AdvisoryWindow.Direction')=?4
+  AND julianday(json_extract(message,'$.AdvisoryWindow.StartsAt'))=julianday(?3) END`,
+		flightID, event.collapseID, occurrence, direction)
+	return err
 }
 
 func advisoryAlertOperation(flight feeds.Flight, a feeds.Advisory, at time.Time) (time.Time, bool, bool) {
@@ -272,7 +350,7 @@ AND (? IN (json_extract(f.snapshot,'$.origin'),json_extract(f.snapshot,'$.origin
 		return err
 	}
 	for _, item := range affected {
-		if err := saveEvent(ctx, tx, item.id, item.event, true); err != nil {
+		if err := saveAdvisoryEvent(ctx, tx, item.id, item.event); err != nil {
 			return err
 		}
 	}

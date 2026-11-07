@@ -79,11 +79,16 @@ func TestTFMSScopedCancellationRetiresOnlyCoveredFlights(t *testing.T) {
 	program.ObservedAt, program.Reason = now.Add(-time.Minute), "Airport program"
 	publishDispatchAdvisory(t, store, program, time.Now())
 	jobs = claim()
-	if len(jobs) != 1 || jobs[0].message.FlightID != covered.ID {
-		t.Fatalf("restored unchanged program queued %d jobs, want just the previously covered flight", len(jobs))
+	if len(jobs) != 2 {
+		t.Fatalf("restored program queued %d jobs, want both flights", len(jobs))
 	}
-	store.deliver(ctx, deliver, logger, jobs[0])
-	if !slices.Equal(sent, []string{outside.ID, covered.ID}) {
+	for _, job := range jobs {
+		if job.message.Body != program.Reason {
+			t.Fatalf("restoration queued stale content %q", job.message.Body)
+		}
+		store.deliver(ctx, deliver, logger, job)
+	}
+	if len(sent) != 3 || !slices.Contains(sent[1:], covered.ID) || !slices.Contains(sent[1:], outside.ID) {
 		t.Fatalf("restored program delivery sequence = %v", sent)
 	}
 	program.ObservedAt = now.Add(-30 * time.Second)
