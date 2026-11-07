@@ -109,10 +109,10 @@ func forecastAdvisoryRevised(ctx context.Context, db rowQueryer, forecast *Predi
 	if err != nil {
 		return false, err
 	}
-	return advisoryEvidenceRevised(ctx, db, jsonAdvisoryEvidenceSQL, string(evidence), now, false)
+	return advisoryEvidenceRevised(ctx, db, jsonAdvisoryEvidenceSQL, string(evidence), now, false, true)
 }
 
-func advisoryEvidenceRevised(ctx context.Context, db rowQueryer, evidenceSQL string, evidence any, now time.Time, requireCurrent bool) (bool, error) {
+func advisoryEvidenceRevised(ctx context.Context, db rowQueryer, evidenceSQL string, evidence any, now time.Time, requireCurrent, checkWithdrawals bool) (bool, error) {
 	var superseded bool
 	var raw []byte
 	t := now.UnixNano()
@@ -137,9 +137,12 @@ candidates(source,id,evidence_ns,state_hash,airport,data,observed_ns,expires_ns,
 )
 SELECT EXISTS(SELECT 1 FROM scoped e JOIN advisory_supersessions s
  ON s.source=e.source AND s.airport=e.airport AND s.predecessor_id=e.id
- AND s.observed_ns BETWEEN e.observed_ns AND ?),
+ AND s.observed_ns BETWEEN e.observed_ns AND ?) OR (? AND EXISTS (
+ SELECT 1 FROM evidence e JOIN advisory_withdrawals w ON w.source=e.source AND w.id=e.id
+ WHERE `+effectiveAdvisoryWithdrawal+` AND `+advisoryWithdrawalCutoff+`>=COALESCE((SELECT MAX(c.observed_ns) FROM candidates c
+  WHERE c.source=e.source AND c.id=e.id AND c.evidence_ns=e.observed_ns),e.observed_ns) AND w.observed_ns<=?)),
  (SELECT json_group_array(json_object('stateHash',state_hash,'advisory',json(data),'expiresNs',expires_ns)) FROM latest WHERE revision_rank=1)`,
-		evidence, t, t, t, t, t).Scan(&superseded, &raw)
+		evidence, t, t, t, t, t, checkWithdrawals, t).Scan(&superseded, &raw)
 	if err != nil || superseded {
 		return superseded, err
 	}

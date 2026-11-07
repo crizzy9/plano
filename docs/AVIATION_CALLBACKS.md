@@ -447,6 +447,10 @@ facility releases are outside this path. [FAA GS cancellation example](https://w
 An operator bridge can still withdraw an entire definition using its key,
 such as `tfms/gs/ORD` or `tfms/gdp/ORD`, with a newer `observedAt` and
 kind `cancelled`. Submit withdrawals within six hours of their observation.
+An effective whole-definition withdrawal retires pending warnings for that
+key. A later accepted definition can alert again with the original wording
+and notification group. A later poll that omits the withdrawal preserves its
+effect until the source reopens the definition.
 Plano retains revision ordering for 49 hours to prevent older packets from
 restoring a withdrawn or shortened program. Upgrading SQLite extends eligible
 saved definitions. The first upgraded startup records a cutoff seven hours

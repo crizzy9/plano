@@ -240,7 +240,7 @@ CREATE INDEX IF NOT EXISTS bookings_by_locator ON bookings(owner, locator_hash);
 CREATE TABLE IF NOT EXISTS shares (
   token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, flight_id TEXT NOT NULL, expires INTEGER NOT NULL,
   FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
-);` + radarSchema + providerTrackSchema + pickupSchema + friendSchema + airportCacheSchema + passportArchiveSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisoryAlertSchema + advisorySupersessionSchema + delayProviderSamplesSchema + delayEarlySamplesSchema + tfmsProgramCancellationSchema + calendarSyncSchema + automaticFlightReceiptSchema + atfmSlotSchema + emailIdentitySchema); err != nil {
+);` + radarSchema + providerTrackSchema + pickupSchema + friendSchema + airportCacheSchema + passportArchiveSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisoryAlertSchema + advisoryWithdrawalSchema + advisorySupersessionSchema + delayProviderSamplesSchema + delayEarlySamplesSchema + tfmsProgramCancellationSchema + calendarSyncSchema + automaticFlightReceiptSchema + atfmSlotSchema + emailIdentitySchema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -887,6 +887,14 @@ ON CONFLICT(flight_id) DO UPDATE SET revision=flight_event_revisions.revision+1`
 		}
 	}
 	for _, a := range advisories {
+		if wholeAdvisoryWithdrawal(a) {
+			if !a.ObservedAt.After(flight.ObservedAt) {
+				if err := applyObservedAdvisoryWithdrawal(ctx, tx, a, flight.ObservedAt); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if event, ok := advisoryEvent(flight, a, flight.ObservedAt, cancellations...); ok {
 			if err := saveAdvisoryEvent(ctx, tx, flight.ID, event); err != nil {
 				return err

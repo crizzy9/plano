@@ -215,11 +215,15 @@ func TestDispatcherDropsSupersededAdvisoryAlerts(t *testing.T) {
 			if !claimBeforeRevision {
 				publishDispatchAdvisory(t, store, withdrawal, now)
 			}
+			wantClaims := 1
+			if claimBeforeRevision {
+				wantClaims = 2
+			}
 			var jobs []deliveryJob
 			for _, platform := range []string{"ios", "android"} {
 				claimed, err := store.claimForPlatform(ctx, now, 2, platform)
-				if err != nil || len(claimed) != 2 {
-					t.Fatalf("%s claims = %d, error = %v", platform, len(claimed), err)
+				if err != nil || len(claimed) != wantClaims {
+					t.Fatalf("%s claims = %d, want %d, error = %v", platform, len(claimed), wantClaims, err)
 				}
 				jobs = append(jobs, claimed...)
 			}
@@ -250,6 +254,36 @@ func TestDispatcherDropsSupersededAdvisoryAlerts(t *testing.T) {
 				t.Fatalf("obsolete jobs = %d, evidence rows = %d, devices = %d, error = %v", obsolete, evidence, devices, err)
 			}
 		})
+	}
+}
+
+func TestDispatcherDoesNotReviveWarningAcrossEffectiveFutureWithdrawal(t *testing.T) {
+	store, owner, flight := dispatcherFixture(t)
+	ctx := t.Context()
+	received := time.Now().UTC().Add(-time.Minute)
+	if err := store.Register(ctx, owner, Device{Platform: "ios", Kind: "alert", Token: "future-withdrawal"}, received); err != nil {
+		t.Fatal(err)
+	}
+	initial := dispatchAdvisoryFixture(received)
+	publishDispatchAdvisory(t, store, initial, received)
+	enqueueDispatchAdvisory(t, store, owner, flight, initial, received)
+	withdrawal := initial
+	withdrawal.Kind, withdrawal.ObservedAt = "cancelled", received.Add(10*time.Second)
+	restored := initial
+	restored.ObservedAt = received.Add(20 * time.Second)
+	publishDispatchAdvisory(t, store, restored, received)
+	publishDispatchAdvisory(t, store, withdrawal, received)
+	jobs, err := store.claimForPlatform(ctx, time.Now(), 1, "ios")
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("initial claim = %+v, error = %v", jobs, err)
+	}
+	store.deliver(ctx, pushFunc(func(context.Context, push.Target, push.Message) error {
+		t.Fatal("warning queued before the withdrawal reached transport after restoration")
+		return nil
+	}), slog.New(slog.DiscardHandler), jobs[0])
+	var count int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE id=?`, jobs[0].id).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("withdrawn warning rows = %d, error = %v", count, err)
 	}
 }
 

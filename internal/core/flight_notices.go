@@ -40,9 +40,10 @@ func (s *Store) cachePolledFlightNotices(ctx context.Context, source string, adv
 		return nil
 	}
 	type entry struct {
-		Data     feeds.Advisory `json:"data"`
-		Observed int64          `json:"observed"`
-		Expires  int64          `json:"expires"`
+		Data      feeds.Advisory `json:"data"`
+		Observed  int64          `json:"observed"`
+		Expires   int64          `json:"expires"`
+		Withdrawn bool           `json:"withdrawn"`
 	}
 	entries := make([]entry, 0, min(len(advisories), maxPolledNotices))
 	var cancellations []feeds.Advisory
@@ -65,7 +66,7 @@ func (s *Store) cachePolledFlightNotices(ctx context.Context, source string, adv
 		}
 		linked = linked || a.SupersedesID != ""
 		expires := earliestTime(a.Expiry(), polledAt.Add(polledNoticeMaxAge))
-		entries = append(entries, entry{a, a.ObservedAt.UnixNano(), expires.UnixNano()})
+		entries = append(entries, entry{a, a.ObservedAt.UnixNano(), expires.UnixNano(), wholeAdvisoryWithdrawal(a)})
 	}
 	payload, err := json.Marshal(entries)
 	if err != nil {
@@ -94,6 +95,19 @@ ON CONFLICT(source,id) DO UPDATE SET airport=excluded.airport,observed_ns=exclud
   expires_ns=excluded.expires_ns,data=excluded.data
 WHERE excluded.observed_ns>=polled_flight_notices.observed_ns`, source, snapshot); err != nil {
 		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE advisory_withdrawals SET cleared_ns=?3 WHERE source=?1 AND signed=0 AND cleared_ns=0 AND (id,observed_ns) IN (
+ SELECT p.id,p.observed_ns FROM json_each(?2) incoming JOIN polled_flight_notices p
+ ON p.source=?1 AND p.id=json_extract(incoming.value,'$.data.id') AND p.observed_ns=json_extract(incoming.value,'$.observed')
+ WHERE json_extract(incoming.value,'$.withdrawn')=0 AND json_extract(incoming.value,'$.data.kind')=json_extract(p.data,'$.kind'))`, source, snapshot, polledAt.UnixNano()); err != nil {
+		return err
+	}
+	for _, item := range entries {
+		if item.Withdrawn {
+			if err := applyObservedAdvisoryWithdrawal(ctx, tx, item.Data, polledAt); err != nil {
+				return err
+			}
+		}
 	}
 	if linked {
 		if err := storeAdvisorySupersessions(ctx, tx, `SELECT source,airport,json_extract(data,'$.supersedesId'),observed_ns,id FROM polled_flight_notices
@@ -222,10 +236,12 @@ SELECT source,id,observed_ns,expires_ns,data FROM (
                     AND p.observed_ns>a.observed_ns AND p.observed_ns<=?)
 ) AS c WHERE NOT EXISTS (SELECT 1 FROM advisory_supersessions r WHERE r.source=c.source
   AND r.airport=json_extract(c.data,'$.airport') AND r.predecessor_id=c.id AND r.observed_ns BETWEEN c.observed_ns AND ?)
+AND NOT EXISTS (SELECT 1 FROM advisory_withdrawals w WHERE w.source=c.source AND w.id=c.id
+  AND `+effectiveAdvisoryWithdrawal+` AND `+advisoryWithdrawalCutoff+`>=c.observed_ns AND w.observed_ns<=?)
 ORDER BY observed_ns DESC,source,id`,
 		t, t, t,
 		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t,
-		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t, t)
+		flight.Origin, flight.OriginICAO, flight.Destination, flight.DestinationICAO, t, t, t, t)
 }
 
 func readCurrentFlightAdvisories(ctx context.Context, tx *sql.Tx, flight feeds.Flight, now time.Time) ([]feeds.Advisory, map[forecastAdvisory]time.Time, error) {

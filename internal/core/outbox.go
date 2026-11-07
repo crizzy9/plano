@@ -978,7 +978,7 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 		defer s.apnsFlightAlerts.Delete(key)
 	}
 	if hasAdvisoryEvidence {
-		revised, err := outboxAdvisoryRevised(ctx, s.db, job.id, time.Now(), window != nil)
+		revised, err := outboxAdvisoryRevised(ctx, s.db, job.id, time.Now(), window != nil, directAdvisory)
 		if err != nil {
 			if ctx.Err() == nil {
 				logger.Error("could not validate advisory push evidence", "job", job.id, "error", err)
@@ -1250,6 +1250,14 @@ AND newer.observed_ns>r.observed_ns AND newer.observed_ns<=?)`,
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tfms_program_cancellations WHERE ends_ns<=? AND observed_ns<=?`,
 		now.UnixNano(), now.Add(-signedAdvisoryRetention).UnixNano()); err != nil {
+		return err
+	}
+	// The newest withdrawal can still separate a future reactivation from an
+	// older alert head. Compact older history once its successor is settled.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM advisory_withdrawals AS w WHERE (w.cleared_ns>0 AND w.cleared_ns<w.observed_ns) OR EXISTS (
+SELECT 1 FROM advisory_withdrawals newer WHERE newer.source=w.source AND newer.id=w.id
+AND newer.observed_ns>w.observed_ns AND newer.observed_ns<=?
+AND (newer.cleared_ns=0 OR newer.cleared_ns>=newer.observed_ns))`, tfmsCutoff); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM live_wire_clocks WHERE wire_epoch<=?`, now.Add(-7*24*time.Hour).Unix()); err != nil {

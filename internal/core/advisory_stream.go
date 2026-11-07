@@ -114,7 +114,8 @@ func advisoryEvent(flight feeds.Flight, a feeds.Advisory, at time.Time, cancella
 // saveAdvisoryEvent deduplicates consecutive states within each affected
 // occurrence, while allowing a later revision to restore an earlier state.
 func saveAdvisoryEvent(ctx context.Context, tx *sql.Tx, flightID string, event Event) error {
-	state, observed, applied := event.ID, event.advisoryEvidence[0].ObservedNS, event.At.UnixNano()
+	evidence := event.advisoryEvidence[0]
+	state, observed, applied := event.ID, evidence.ObservedNS, event.At.UnixNano()
 	var priorState string
 	var priorObserved, priorApplied int64
 	err := tx.QueryRowContext(ctx, `SELECT state_id,observed_ns,applied_ns FROM advisory_alert_heads WHERE flight_id=? AND scope=?`,
@@ -126,18 +127,26 @@ func saveAdvisoryEvent(ctx context.Context, tx *sql.Tx, flightID string, event E
 		return nil
 	}
 	changed := state != priorState
-	if changed {
-		// A signed callback can arrive behind a newer poll whose flight
-		// refresh has not run yet. Check the same source order as dispatch.
-		evidence, err := json.Marshal(event.advisoryEvidence)
+	var reopened bool
+	if (priorState == "" || !changed) && observed >= priorObserved {
+		reopened, err = advisoryReopened(ctx, tx, evidence, priorObserved, priorApplied, applied)
 		if err != nil {
 			return err
 		}
-		revised, err := advisoryEvidenceRevised(ctx, tx, jsonAdvisoryEvidenceSQL, string(evidence), event.At, false)
+	}
+	changed = changed || reopened
+	if changed {
+		// A signed callback can arrive behind a newer poll whose flight
+		// refresh has not run yet. Check the same source order as dispatch.
+		payload, err := json.Marshal(event.advisoryEvidence)
+		if err != nil {
+			return err
+		}
+		revised, err := advisoryEvidenceRevised(ctx, tx, jsonAdvisoryEvidenceSQL, string(payload), event.At, false, true)
 		if err != nil || revised {
 			return err
 		}
-		if priorState != "" {
+		if priorState != "" || reopened {
 			event.ID = hash(state + "\x00" + strconv.FormatInt(observed, 10) + "\x00" + strconv.FormatInt(applied, 10))
 			if err := retirePriorAdvisoryAlerts(ctx, tx, flightID, event); err != nil {
 				return err
@@ -152,8 +161,8 @@ ON CONFLICT(flight_id,scope) DO UPDATE SET state_id=excluded.state_id,observed_n
 	if !changed {
 		return nil
 	}
-	// Keep the original event ID on first sight, so existing databases can
-	// initialize their current state without resending an old alert.
+	// Without a recorded withdrawal, keep the original event ID on first
+	// sight so existing databases can seed the head without a duplicate.
 	return saveEvent(ctx, tx, flightID, event, true)
 }
 
@@ -285,6 +294,23 @@ AND (? OR NOT EXISTS(SELECT 1 FROM pushed_advisory_predecessors WHERE source=? A
 	}
 	if future || retained != 0 {
 		if err := boundPendingAdvisoryRevisions(ctx, tx, a.Source, a.ID, now); err != nil {
+			return err
+		}
+	}
+	if wholeAdvisoryWithdrawal(a) {
+		if n+retained != 0 {
+			if err := recordAdvisoryWithdrawal(ctx, tx, a, now, true); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+	if n+retained != 0 {
+		// A signed active revision wins over a polled withdrawal at the
+		// same source time, including before a future revision takes effect.
+		if _, err := tx.ExecContext(ctx, `UPDATE advisory_withdrawals SET cleared_ns=?
+WHERE source=? AND id=? AND observed_ns=? AND signed=0 AND cleared_ns=0`,
+			now.UnixNano(), a.Source, a.ID, a.ObservedAt.UnixNano()); err != nil {
 			return err
 		}
 	}

@@ -48,8 +48,9 @@ func filterSupersededAdvisories(ctx context.Context, db advisoryQueryer, advisor
 		return advisories, nil
 	}
 	var active bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM advisory_supersessions WHERE observed_ns<=?)`,
-		now.UnixNano()).Scan(&active); err != nil || !active {
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM advisory_supersessions WHERE observed_ns<=?)
+OR EXISTS (SELECT 1 FROM advisory_withdrawals w WHERE `+effectiveAdvisoryWithdrawal+` AND w.observed_ns<=?)`,
+		now.UnixNano(), now.UnixNano()).Scan(&active); err != nil || !active {
 		return advisories, err
 	}
 	type candidate struct {
@@ -69,7 +70,10 @@ func filterSupersededAdvisories(ctx context.Context, db advisoryQueryer, advisor
 	rows, err := db.QueryContext(ctx, `SELECT c.key FROM json_each(?) c WHERE EXISTS (
 SELECT 1 FROM advisory_supersessions r WHERE r.source=json_extract(c.value,'$.source')
 AND r.airport=json_extract(c.value,'$.airport') AND r.predecessor_id=json_extract(c.value,'$.id')
-AND r.observed_ns BETWEEN json_extract(c.value,'$.observed') AND ?)`, string(payload), now.UnixNano())
+AND r.observed_ns BETWEEN json_extract(c.value,'$.observed') AND ?) OR EXISTS (
+SELECT 1 FROM advisory_withdrawals w WHERE w.source=json_extract(c.value,'$.source') AND w.id=json_extract(c.value,'$.id')
+AND `+effectiveAdvisoryWithdrawal+` AND `+advisoryWithdrawalCutoff+`>=json_extract(c.value,'$.observed') AND w.observed_ns<=?)`,
+		string(payload), now.UnixNano(), now.UnixNano())
 	if err != nil {
 		return nil, err
 	}

@@ -540,6 +540,169 @@ WHERE o.flight_id=? AND o.done=0 AND json_extract(o.message,'$.CollapseID')=?`, 
 	}
 }
 
+func TestWholeAdvisoryWithdrawalAllowsSameStateRestoration(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		poll, future   bool
+		sameTime       bool
+		sameInitial    bool
+		withoutRefresh bool
+	}{
+		{name: "signed callback"},
+		{name: "cached poll", poll: true},
+		{name: "signed restoration wins a poll tie", poll: true, sameTime: true},
+		{name: "all three observations share a source time", poll: true, sameTime: true, sameInitial: true},
+		{name: "future withdrawal observed after it takes effect", future: true},
+		{name: "future withdrawal superseded after it takes effect", future: true, withoutRefresh: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			store, err := Open(filepath.Join(t.TempDir(), "whole-advisory-withdrawal.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			now := time.Now().UTC().Add(-30 * time.Second)
+			flight := feeds.Flight{ID: "withdrawal-flight", Number: "AA2", Origin: "JFK", Destination: "SFO",
+				Status: "scheduled", ObservedAt: now, ScheduledDeparture: new(now.Add(25 * time.Hour))}
+			if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			token, err := store.CreateInstallation(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner, err := store.Installation(ctx, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Track(ctx, owner, flight.ID, ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Register(ctx, owner, Device{Platform: "android", Kind: "alert", Token: "withdrawal-fixture"}, now); err != nil {
+				t.Fatal(err)
+			}
+			initial := feeds.Advisory{ID: "airport-program", Source: feeds.FAASWIM, Airport: "JFK", Kind: "departure_delay",
+				Direction: "departure", Reason: "Low visibility.", ObservedAt: now.Add(-time.Minute)}
+			withdrawn := initial
+			withdrawn.ObservedAt, withdrawn.Kind = now.Add(time.Second), "cancelled"
+			withdrawalAt := withdrawn.ObservedAt
+			if tc.sameInitial {
+				initial.ObservedAt, withdrawn.ObservedAt = now, now
+				withdrawalAt = now.Add(2 * time.Millisecond)
+			}
+			restored := initial
+			restored.ObservedAt = now.Add(3 * time.Second)
+			if tc.sameTime {
+				restored.ObservedAt = withdrawn.ObservedAt
+			}
+			pending := func(want int) int64 {
+				t.Helper()
+				var count int
+				var id int64
+				if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(id),0) FROM outbox WHERE flight_id=? AND done=0`, flight.ID).
+					Scan(&count, &id); err != nil || count != want {
+					t.Fatalf("pending alerts = %d, want %d, error = %v", count, want, err)
+				}
+				return id
+			}
+			observe := func(a feeds.Advisory, at time.Time) {
+				t.Helper()
+				flight.ObservedAt = at
+				if err := store.Observe(ctx, flight, nil, nil, []feeds.Advisory{a}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cache := func(a feeds.Advisory, at time.Time) {
+				t.Helper()
+				if err := store.cachePolledFlightNotices(ctx, a.Source, []feeds.Advisory{a}, at); err != nil {
+					t.Fatal(err)
+				}
+				observe(a, at)
+			}
+			if tc.sameInitial {
+				cache(initial, now.Add(time.Millisecond))
+			} else {
+				publishDispatchAdvisory(t, store, initial, now)
+			}
+			originalJob := pending(1)
+			before, err := store.Details(ctx, flight.ID)
+			if err != nil || len(before.Events) != 1 || before.Events[0].Body != initial.Reason {
+				t.Fatalf("initial advisory timeline = %+v, error = %v", before.Events, err)
+			}
+			switch {
+			case tc.future:
+				publishDispatchAdvisory(t, store, withdrawn, now)
+				if pending(1) != originalJob {
+					t.Fatal("future withdrawal changed the pending alert before taking effect")
+				}
+				if !tc.withoutRefresh {
+					observe(withdrawn, withdrawn.ObservedAt)
+				}
+			case tc.poll:
+				cache(withdrawn, withdrawalAt)
+				if err := store.cachePolledFlightNotices(ctx, withdrawn.Source, nil, withdrawalAt); err != nil {
+					t.Fatal(err)
+				}
+				if notices, err := store.FlightNotices(ctx, flight, withdrawalAt); err != nil || len(notices) != 0 {
+					t.Fatalf("omitting a poll withdrawal revived notices %+v, error = %v", notices, err)
+				}
+				forecast := &Prediction{AdvisoryEvidence: []forecastAdvisory{advisoryEvidence(initial)}}
+				if stale, err := forecastAdvisoryRevised(ctx, store.db, forecast, withdrawalAt); err != nil || !stale {
+					t.Fatalf("omitting a poll withdrawal revived forecast evidence, stale = %v, error = %v", stale, err)
+				}
+			default:
+				publishDispatchAdvisory(t, store, withdrawn, withdrawn.ObservedAt)
+			}
+			if !tc.withoutRefresh {
+				pending(0)
+			}
+			restoreAt := restored.ObservedAt
+			if !restoreAt.After(withdrawalAt) {
+				restoreAt = withdrawalAt.Add(time.Millisecond)
+			}
+			publishDispatchAdvisory(t, store, restored, restoreAt)
+			restoredJob := pending(1)
+			if restoredJob == originalJob {
+				t.Fatal("restoration reused the alert from before withdrawal")
+			}
+			observe(restored, now.Add(3500*time.Millisecond))
+			if pending(1) != restoredJob {
+				t.Fatal("unchanged observation queued another restoration alert")
+			}
+			stale := withdrawn
+			stale.ObservedAt = restored.ObservedAt.Add(-time.Nanosecond)
+			if tc.poll {
+				cache(stale, now.Add(4*time.Second))
+			} else {
+				publishDispatchAdvisory(t, store, stale, now.Add(4*time.Second))
+			}
+			if pending(1) != restoredJob {
+				t.Fatal("stale withdrawal changed the newer alert")
+			}
+			after, err := store.Details(ctx, flight.ID)
+			if err != nil || len(after.Events) != 2 || after.Events[0].ID == before.Events[0].ID ||
+				after.Events[0].Body != restored.Reason || after.Events[0].Kind != initial.Kind || after.Events[1].ID != before.Events[0].ID {
+				t.Fatalf("restored advisory timeline = %+v, error = %v", after.Events, err)
+			}
+			jobs, err := store.claim(ctx, time.Now(), 2)
+			if err != nil || len(jobs) != 1 || jobs[0].id != restoredJob {
+				t.Fatalf("restored jobs = %+v, error = %v", jobs, err)
+			}
+			var sent push.Message
+			store.deliver(ctx, pushFunc(func(_ context.Context, _ push.Target, message push.Message) error {
+				sent = message
+				return nil
+			}), slog.New(slog.DiscardHandler), jobs[0])
+			family := hash(flight.ID + "\x00advisory\x00" + initial.Source + "\x00" + initial.ID)
+			if sent.Body != restored.Reason || sent.CollapseID != family || sent.AndroidAdvisoryRevision == nil ||
+				sent.AndroidAdvisoryRevision.ObservedNS != restored.ObservedAt.UnixNano() || sent.AndroidAdvisoryRevision.OutboxID != restoredJob {
+				t.Fatalf("unexpected restored delivery: %+v", sent)
+			}
+		})
+	}
+}
+
 func TestIntermediateFutureAdvisoryWithdrawalBecomesEffective(t *testing.T) {
 	for _, reverse := range []bool{false, true} {
 		name := "source order"
