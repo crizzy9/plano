@@ -1,0 +1,101 @@
+name: Android emulator release preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-emulator-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  EXPO_NO_TELEMETRY: '1'
+  NODE_OPTIONS: --max-old-space-size=1024
+
+jobs:
+  android:
+    name: Android x86_64 preview APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PLANO_ANDROID_PREVIEW_BUILD: '1'
+      PLANO_ANDROID_PACKAGE: app.plano.preview
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e # v5.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android build tools
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.1.12297006' 'cmake;3.22.1'
+      - run: npm ci
+      - run: npx --no-install expo prebuild --platform android --no-install
+      - name: Build and verify the self-contained x86_64 release preview
+        working-directory: mobile/android
+        run: |
+          ./gradlew --no-daemon --max-workers=1 --no-parallel \
+            '-Dorg.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=768m -XX:ActiveProcessorCount=2' \
+            -Pkotlin.compiler.execution.strategy=in-process -PreactNativeArchitectures=x86_64 :app:assembleRelease
+          apk=app/build/outputs/apk/release/app-release.apk
+          test -s "$apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
+          badging=$("$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$apk")
+          grep -F "package: name='$PLANO_ANDROID_PACKAGE'" <<< "$badging"
+          grep -E "^native-code: 'x86_64'[[:space:]]*$" <<< "$badging"
+          if grep -Eq '^application-debuggable([[:space:]]|$)' <<< "$badging"; then
+            printf '%s\n' 'The release preview APK must not be debuggable.' >&2
+            exit 1
+          fi
+          manifest=$("$ANDROID_HOME/build-tools/36.0.0/aapt2" dump xmltree "$apk" --file AndroidManifest.xml)
+          grep -F 'app.plano.live.PlanoMessagingService' <<< "$manifest"
+          grep -F 'app.plano.live.PlanoFlightWidgetProvider' <<< "$manifest"
+          if grep -Fq 'expo.modules.notifications.service.ExpoFirebaseMessagingService' <<< "$manifest"; then exit 1; fi
+          python3 - "$apk" <<'PY'
+          import sys
+          from zipfile import ZipFile
+
+          with ZipFile(sys.argv[1]) as apk:
+              bundle = apk.getinfo("assets/index.android.bundle")
+              if bundle.is_dir() or bundle.file_size == 0:
+                  raise SystemExit("The release APK must contain a nonempty bundled JavaScript asset.")
+              abis = {entry.filename.split("/")[1] for entry in apk.infolist()
+                      if entry.filename.startswith("lib/") and entry.filename.endswith(".so")}
+              if abis != {"x86_64"}:
+                  raise SystemExit("The release APK must contain only x86_64 native libraries.")
+          PY
+          artifact_dir="$RUNNER_TEMP/plano-android-emulator-apk"
+          mkdir -p "$artifact_dir"
+          cp "$apk" "$artifact_dir/app-release.apk"
+          apk_sha256=$(sha256sum "$artifact_dir/app-release.apk" | awk '{print $1}')
+          jq -n --arg source_commit "$GITHUB_SHA" --arg package "$PLANO_ANDROID_PACKAGE" \
+            --arg apk_sha256 "$apk_sha256" \
+            '{source_commit: $source_commit, package: $package, abi: "x86_64", apk_sha256: $apk_sha256}' \
+            >"$artifact_dir/manifest.json"
+      - name: Keep the x86_64 release preview APK
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plano-android-x86_64-preview
+          path: |
+            ${{ runner.temp }}/plano-android-emulator-apk/app-release.apk
+            ${{ runner.temp }}/plano-android-emulator-apk/manifest.json
+          if-no-files-found: error
+          retention-days: 1
