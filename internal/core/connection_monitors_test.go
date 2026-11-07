@@ -201,6 +201,53 @@ func TestConnectionMonitorFencesDirtyLeasesUntilReassessment(t *testing.T) {
 	f.store.deliver(ctx, noConnectionSend(t), slog.New(slog.DiscardHandler), latest)
 }
 
+func TestConnectionMonitorRechecksAtProviderSubmission(t *testing.T) {
+	for _, stop := range []bool{false, true} {
+		name := "new observation"
+		if stop {
+			name = "stop monitoring"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			f := newMonitorFixture(t)
+			f.start(t, monitorFixtureScore)
+			first := f.now.Add(time.Second)
+			f.observe(t, &f.in, "Tight", first)
+			f.check(t, first, monitorFixtureScore)
+			job := f.claim(t, first, 1)[0]
+			second := first.Add(time.Second)
+			prepared := false
+			sender := guardedSenderFixture{
+				pushFunc: noConnectionSend(t),
+				beforeSubmit: func(attempt context.Context) {
+					prepared = true
+					if stop {
+						if err := f.store.UnmonitorConnection(attempt, f.owner, f.in.ID, f.out.ID); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						f.observe(t, &f.in, "Tight", second)
+					}
+				},
+			}
+			f.store.deliver(ctx, sender, slog.New(slog.DiscardHandler), job)
+			if !prepared {
+				t.Fatal("dispatcher did not reach the guarded provider boundary")
+			}
+			f.claim(t, second, 0)
+			f.check(t, second, monitorFixtureScore)
+			if stop {
+				f.claim(t, second, 0)
+				return
+			}
+			rechecked := f.claim(t, second, 1)[0]
+			if rechecked.id != job.id || rechecked.attempts != 0 {
+				t.Fatal("waiting for reassessment replaced the warning or consumed a delivery attempt")
+			}
+		})
+	}
+}
+
 func TestConnectionMonitorClockWorseningRetiresAfterAlertExpiry(t *testing.T) {
 	ctx := t.Context()
 	f := newMonitorFixture(t)

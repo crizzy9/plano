@@ -155,6 +155,34 @@ func TestBuiltInConnectionDirectionsRetainGeneralTiming(t *testing.T) {
 	}
 }
 
+func TestDFWConnectionRiskUsesValidatedTerminalAliases(t *testing.T) {
+	now := time.Date(2026, time.November, 6, 18, 0, 0, 0, time.UTC)
+	arrival := now.Add(10 * time.Minute)
+	departure := arrival.Add(65 * time.Minute)
+	for _, tc := range []struct {
+		name, terminal, gate, risk string
+		transfer                   int
+		hasDirections              bool
+	}{
+		{"same terminal", "A", "A12", "Tight", 35, true},
+		{"same terminal alias", "Terminal A", "A12", "Tight", 35, true},
+		{"conflicting gate", "Terminal A", "B12", "Risky", 65, false},
+		{"unrecognized gate", "Terminal A", "F12", "Risky", 65, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := feeds.Flight{Destination: "DFW", ArrivalTerminal: tc.terminal, ArrivalGate: tc.gate, ScheduledArrival: &arrival}
+			out := feeds.Flight{Origin: "DFW", DepartureTerminal: "A", DepartureGate: "A20", ScheduledDeparture: &departure}
+			got, _, err := (Server{}).assessConnection(t.Context(), in, out, now,
+				func(context.Context, feeds.Flight, bool, time.Time) (*core.GatePrediction, error) { return nil, nil })
+			if err != nil || got.Risk != tc.risk || got.TransferMinutes != tc.transfer ||
+				got.BoardingReserveMinutes != defaultConnectionBoardingReserveMinutes || (got.GuideURL != "") != tc.hasDirections ||
+				strings.Contains(strings.Join(got.Instructions, " "), "within Terminal A") != tc.hasDirections {
+				t.Fatalf("unexpected DFW transfer plan %+v, %v", got, err)
+			}
+		})
+	}
+}
+
 func TestBuiltInConnectionDirectionsFallBackWithoutUsableEndpoints(t *testing.T) {
 	var rules *ConnectionRules
 	for _, tc := range []struct{ name, gate, inboundStatus, outboundStatus string }{

@@ -101,7 +101,7 @@ func TestConnectionMonitorAPIAndWorker(t *testing.T) {
 		len(targets.Flights) != 1 || targets.Flights[0].ID != out.ID {
 		t.Fatalf("filtered lookup exposed an untracked leg: %+v %v", targets, err)
 	}
-	if result := status(owner); !result.MonitorEligible || result.Monitoring || result.Risk != "Relaxed" {
+	if result := status(owner); !result.MonitorEligible || result.Monitoring || result.Risk != "Relaxed" || result.TimingAvailable != nil {
 		t.Fatalf("unexpected baseline: %+v", result)
 	}
 	request(http.MethodPut, monitors+query, owner, http.StatusOK)
@@ -143,6 +143,34 @@ func TestConnectionMonitorAPIAndWorker(t *testing.T) {
 	request(http.MethodDelete, monitors+query, owner, http.StatusNoContent)
 	request(http.MethodDelete, monitors+query, owner, http.StatusNoContent)
 	list(owner, 0)
+
+	// An ordinary airport mismatch remains invalid. A confirmed diversion
+	// explains the mismatch even after the arrival times are withdrawn.
+	in.Destination, in.ObservedAt = "DFW", now.Add(2*time.Second)
+	if err := store.Observe(ctx, in, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	request(http.MethodGet, "/v1/connections"+query, owner, http.StatusBadRequest)
+	out.Status, out.ObservedAt = "cancelled", now.Add(2*time.Second)
+	if err := store.Observe(ctx, out, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	request(http.MethodGet, "/v1/connections"+query, owner, http.StatusBadRequest)
+	out.Status, out.ObservedAt = "scheduled", now.Add(3*time.Second)
+	if err := store.Observe(ctx, out, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	in.Status, in.ScheduledArrival, in.EstimatedArrival = "diverted", nil, nil
+	in.ObservedAt = now.Add(3 * time.Second)
+	if err := store.Observe(ctx, in, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if result := status(owner); result.Risk != "Missed" || result.Airport != "DEN" || result.GuidanceAvailable ||
+		result.TimingAvailable == nil || *result.TimingAvailable || result.MonitorEligible ||
+		len(result.Instructions) != 0 || result.MapURL != "" || result.GuideURL != "" ||
+		result.ArrivalGatePrediction != nil || result.DepartureGatePrediction != nil {
+		t.Fatalf("diverted connection should use the intended airport without estimating a transfer: %+v", result)
+	}
 }
 
 type connectionPush struct {
@@ -186,8 +214,21 @@ func TestConnectionEvaluationClockAndTerminalDisruption(t *testing.T) {
 	if err != nil || !assessment.Incomplete {
 		t.Fatalf("partial feed data should leave a watch eligible for reevaluation: %+v %v", assessment, err)
 	}
+	missingArrival := partial
+	missingArrival.Status = "cancelled"
+	result, assessment, err := service.assessConnection(t.Context(), missingArrival, out, now, noGate)
+	if err != nil || result.Risk != "Missed" || assessment.Risk != result.Risk || result.GuidanceAvailable ||
+		result.TimingAvailable == nil || *result.TimingAvailable || assessment.Monitorable {
+		t.Fatalf("cancellation without arrival times: %+v %+v %v", result, assessment, err)
+	}
 	gateIn, takeoff := now.Add(-10*time.Minute), now.Add(-15*time.Minute)
-	in.ActualArrival, out.ActualTakeoff = &gateIn, &takeoff
+	out.ActualTakeoff = &takeoff
+	result, assessment, err = service.assessConnection(t.Context(), in, out, now, noGate)
+	if err != nil || result.Risk != "Missed" || assessment.Risk != result.Risk || result.GuidanceAvailable ||
+		result.TimingAvailable == nil || *result.TimingAvailable || assessment.Monitorable {
+		t.Fatalf("onward departure without confirmed gate-in: %+v %+v %v", result, assessment, err)
+	}
+	in.ActualArrival = &gateIn
 	assessment, err = service.evaluateConnection(t.Context(), in, out, now, noGate)
 	if err != nil || assessment.Risk != "Missed" || assessment.Monitorable {
 		t.Fatalf("stale scheduled departure overrode actual takeoff: %+v %v", assessment, err)

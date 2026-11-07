@@ -20,12 +20,12 @@ func (fn pushFunc) Send(ctx context.Context, target push.Target, message push.Me
 	return fn(ctx, target, message)
 }
 
-type friendGuardFixture struct {
+type guardedSenderFixture struct {
 	pushFunc
 	beforeSubmit func(context.Context)
 }
 
-func (s friendGuardFixture) SendAuthorized(ctx context.Context, target push.Target, message push.Message, authorize func(context.Context) error) error {
+func (s guardedSenderFixture) SendAuthorized(ctx context.Context, target push.Target, message push.Message, authorize func(context.Context) error) error {
 	s.beforeSubmit(ctx)
 	if err := authorize(ctx); err != nil {
 		return err
@@ -65,7 +65,7 @@ func TestDispatcherChecksFriendAuthorizationAtProviderSubmission(t *testing.T) {
 	observeFlightAlertFixture(t, store, &flight)
 	job := claimFlightAlertJobs(t, store, 1)[0]
 	guardCalled := false
-	sender := friendGuardFixture{
+	sender := guardedSenderFixture{
 		pushFunc: func(context.Context, push.Target, push.Message) error {
 			t.Fatal("revoked friend alert reached provider transport")
 			return nil

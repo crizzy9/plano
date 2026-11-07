@@ -749,7 +749,9 @@ type guardedPushSender interface {
 	SendAuthorized(context.Context, push.Target, push.Message, func(context.Context) error) error
 }
 
-type friendPushGuardError struct{ error }
+type pushGuardError struct{ error }
+
+var errConnectionAssessmentDirty = errors.New("connection alert needs reassessment")
 
 // commitOutbox publishes a coalescing wake only after SQLite has committed.
 func (s *Store) commitOutbox(tx *sql.Tx) error {
@@ -877,12 +879,7 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 		return
 	}
 	if connectionDirty {
-		// Re-evaluation can keep the same warning. Return its lease without
-		// consuming a delivery attempt so it can be claimed again promptly.
-		if _, err := s.db.ExecContext(ctx, `UPDATE outbox SET lease_until=0 WHERE id=? AND device_id=? AND lease_until=? AND done=0`,
-			job.id, job.deviceID, job.lease); err != nil && ctx.Err() == nil {
-			logger.Error("could not release connection push lease", "job", job.id, "error", err)
-		}
+		s.releaseConnectionPushLease(ctx, logger, job)
 		return
 	}
 	stateAlert := flightAlertSupersedable(flightEventKind)
@@ -1114,16 +1111,19 @@ CASE WHEN ? THEN EXISTS(SELECT 1 FROM flights f WHERE f.id=o.flight_id
 			return
 		}
 	}
-	if friendAlert {
+	if friendAlert || job.message.ConnectionInboundID != "" {
 		authorize := func(ctx context.Context) error {
-			var revoked bool
-			err := s.db.QueryRowContext(ctx, `SELECT `+revokedFriendAlert+leasedRow,
-				job.id, job.deviceID, job.lease).Scan(&revoked)
+			var revoked, dirty bool
+			err := s.db.QueryRowContext(ctx, `SELECT `+revokedFriendAlert+`, `+dirtyConnectionAlert+leasedRow,
+				job.id, job.deviceID, job.lease).Scan(&revoked, &dirty)
 			if revoked || errors.Is(err, sql.ErrNoRows) {
-				return friendPushGuardError{ErrNotFound}
+				return pushGuardError{ErrNotFound}
 			}
 			if err != nil {
-				return friendPushGuardError{err}
+				return pushGuardError{err}
+			}
+			if dirty {
+				return pushGuardError{errConnectionAssessmentDirty}
 			}
 			return nil
 		}
@@ -1132,12 +1132,15 @@ CASE WHEN ? THEN EXISTS(SELECT 1 FROM flights f WHERE f.id=o.flight_id
 		} else if err = authorize(attempt); err == nil {
 			err = sender.Send(attempt, job.target, job.message)
 		}
-		var guardError friendPushGuardError
+		var guardError pushGuardError
 		if errors.As(err, &guardError) {
-			if errors.Is(guardError.error, ErrNotFound) {
+			switch {
+			case errors.Is(guardError.error, ErrNotFound):
 				s.removeObsoletePush(ctx, logger, job)
-			} else if attempt.Err() == nil {
-				logger.Error("could not authorize friend push", "job", job.id, "error", guardError)
+			case errors.Is(guardError.error, errConnectionAssessmentDirty):
+				s.releaseConnectionPushLease(ctx, logger, job)
+			case attempt.Err() == nil:
+				logger.Error("could not authorize push", "job", job.id, "error", guardError)
 			}
 			return
 		}
@@ -1160,6 +1163,15 @@ CASE WHEN ? THEN EXISTS(SELECT 1 FROM flights f WHERE f.id=o.flight_id
 	defer cancelFinish()
 	if err := s.resolve(finish, job, err, time.Now()); err != nil {
 		logger.Error("could not resolve push job", "job", job.id, "error", err)
+	}
+}
+
+func (s *Store) releaseConnectionPushLease(ctx context.Context, logger *slog.Logger, job deliveryJob) {
+	// Reassessment can keep the same warning. Release its lease without
+	// consuming a delivery attempt so it can be claimed again promptly.
+	if _, err := s.db.ExecContext(ctx, `UPDATE outbox SET lease_until=0 WHERE id=? AND device_id=? AND lease_until=? AND done=0`,
+		job.id, job.deviceID, job.lease); err != nil && ctx.Err() == nil {
+		logger.Error("could not release connection push lease", "job", job.id, "error", err)
 	}
 }
 

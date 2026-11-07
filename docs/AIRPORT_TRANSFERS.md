@@ -204,6 +204,8 @@ It reports **Missed** if the inbound gate arrival was unrecorded or the elapsed
 time fell short of the estimates. A cancellation, inbound diversion, or an elapsed
 connection window also results in **Missed**. The app hides transfer directions
 after a confirmed onward departure, a cancellation, or an inbound diversion.
+If a confirmed disruption leaves the transfer airport or timing uncertain,
+the app shows **Missed** and marks the timing unavailable.
 
 When comparable flights suggest a gate and that gate identifies a more
 precise airport path, Plano can show its duration including the configured
@@ -226,7 +228,9 @@ Saved pairs are private to that installation.
 Plano checks both legs as new observations arrive and as time runs short.
 The current risk is the starting point. A change to a worse risk level
 queues an alert. If the risk improves, that becomes the starting point for
-any later warning. Tap a warning to open Connection Assistant when both
+any later warning. Before submitting a queued warning to a push provider,
+Plano checks that the warning still matches the monitor's current assessment.
+Tap a warning to open Connection Assistant when both
 legs are still tracked and connect at the same airport. If the connection
 is no longer available, the tap opens the onward flight if it is still
 tracked. To stop warnings, choose **Stop monitoring** or untrack either leg.

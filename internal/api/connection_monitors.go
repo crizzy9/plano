@@ -54,19 +54,14 @@ func (s Server) evaluateConnection(ctx context.Context, in, out feeds.Flight, no
 	// A diversion can change the inbound destination and invalidate the route.
 	// A known disruption still ends this previously validated connection.
 	if connectionDisrupted(in, out) {
-		return core.ConnectionAssessment{Risk: "Missed", AlertUntil: terminalConnectionAlertUntil(in, out, now)}, nil
+		return missedConnectionAssessment(in, out, now), nil
 	}
-	airportKnown := in.DestinationICAO != "" && out.OriginICAO != "" || in.Destination != "" && out.Origin != ""
-	if airportKnown && !connectionAirportsMatch(in, out) {
+	if connectionAirportsKnown(in, out) && !connectionAirportsMatch(in, out) {
 		return core.ConnectionAssessment{}, nil
-	}
-	departed := connectionDeparted(out)
-	if departed && in.ActualArrival == nil {
-		return core.ConnectionAssessment{Risk: "Missed", AlertUntil: terminalConnectionAlertUntil(in, out, now)}, nil
 	}
 	_, assessment, err := s.assessConnection(ctx, in, out, now, predictGate)
 	if errors.Is(err, errInvalid) {
-		return core.ConnectionAssessment{Incomplete: !departed}, nil
+		return core.ConnectionAssessment{Incomplete: !connectionDeparted(out)}, nil
 	}
 	return assessment, err
 }

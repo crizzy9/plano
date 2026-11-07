@@ -32,6 +32,7 @@ func first(values ...*time.Time) *time.Time {
 
 type connectionResult struct {
 	Risk                    string               `json:"risk"`
+	TimingAvailable         *bool                `json:"timingAvailable,omitempty"`
 	AvailableMinutes        int                  `json:"availableMinutes"`
 	TransferMinutes         int                  `json:"transferMinutes"`
 	BoardingReserveMinutes  int                  `json:"boardingReserveMinutes"`
@@ -88,9 +89,29 @@ func (s Server) connection(w http.ResponseWriter, r *http.Request, owner string)
 
 func (s Server) assessConnection(ctx context.Context, in, out feeds.Flight, now time.Time, predictGate core.ConnectionGatePredictor) (connectionResult, core.ConnectionAssessment, error) {
 	var assessment core.ConnectionAssessment
+	departed := connectionDeparted(out)
+	disrupted := connectionDisrupted(in, out)
+	airportsMatch := connectionAirportsMatch(in, out)
+	// Only a diversion explains why a known arrival airport has changed.
+	if !airportsMatch && connectionAirportsKnown(in, out) && in.Status != "diverted" {
+		return connectionResult{}, assessment, errInvalid
+	}
+	missingGateIn := departed && in.ActualArrival == nil
 	arrive := first(in.ActualArrival, in.EstimatedArrival, in.ScheduledArrival)
 	depart := connectionWindowDeparture(out, now)
-	if arrive == nil || depart == nil || !connectionAirportsMatch(in, out) {
+	if arrive == nil || depart == nil || !airportsMatch || missingGateIn {
+		if disrupted || missingGateIn {
+			assessment = missedConnectionAssessment(in, out, now)
+			// An inbound diversion may report the airport it reached instead
+			// of the airport where the traveler was due to connect.
+			airport := out.Origin
+			if airport == "" {
+				airport = out.OriginICAO
+			}
+			return connectionResult{
+				Risk: assessment.Risk, Airport: airport, TimingAvailable: new(false), Instructions: []string{},
+			}, assessment, nil
+		}
 		return connectionResult{}, assessment, errInvalid
 	}
 	route, configured := s.ConnectionRules.routeForConnection(in, out)
@@ -100,8 +121,6 @@ func (s Server) assessConnection(ctx context.Context, in, out feeds.Flight, now 
 		result.BoardingReserveMinutes = defaultConnectionBoardingReserveMinutes
 	}
 	planningMinutes := result.TransferMinutes + result.BoardingReserveMinutes
-	departed := connectionDeparted(out)
-	disrupted := connectionDisrupted(in, out)
 	result.GuidanceAvailable = !departed && !disrupted
 	var err error
 	result.ArrivalGatePrediction, err = predictGate(ctx, in, true, now)
@@ -145,6 +164,10 @@ func canStartConnection(in, out feeds.Flight, now time.Time) bool {
 
 func connectionDisrupted(in, out feeds.Flight) bool {
 	return in.Status == "cancelled" || in.Status == "diverted" || out.Status == "cancelled"
+}
+
+func missedConnectionAssessment(in, out feeds.Flight, now time.Time) core.ConnectionAssessment {
+	return core.ConnectionAssessment{Risk: "Missed", AlertUntil: terminalConnectionAlertUntil(in, out, now)}
 }
 
 func terminalConnectionAlertUntil(in, out feeds.Flight, now time.Time) time.Time {
@@ -216,6 +239,10 @@ func connectionAirportsMatch(in, out feeds.Flight) bool {
 		return in.DestinationICAO == out.OriginICAO
 	}
 	return in.Destination != "" && in.Destination == out.Origin
+}
+
+func connectionAirportsKnown(in, out feeds.Flight) bool {
+	return in.DestinationICAO != "" && out.OriginICAO != "" || in.Destination != "" && out.Origin != ""
 }
 
 func estimateConnectionRoute(in, out feeds.Flight, route ConnectionRoute, configured bool) connectionResult {

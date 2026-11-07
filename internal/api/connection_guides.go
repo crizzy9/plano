@@ -31,7 +31,7 @@ func secureConnectionDirections(directions func(in, out feeds.Flight) []string) 
 var airportConnectionGuides = []airportConnectionGuide{
 	{"SEA", "KSEA", "https://www.portseattle.org/sea/maps", "https://www.portseattle.org/blog/all-aboard-sea-underground",
 		secureConnectionDirections(func(in, out feeds.Flight) []string { return seaConnectionDirections(in.ArrivalGate, out.DepartureGate) })},
-	{"DFW", "KDFW", "https://www.dfwairport.com/map/", "https://www.dfwairport.com/explore/plan/connect/", secureConnectionDirections(dfwConnectionDirections)},
+	{"DFW", "KDFW", "https://www.dfwairport.com/map/", "https://www.dfwairport.com/explore/plan/connect/", dfwConnectionDirections},
 	{"ATL", "KATL", "https://www.atl.com/maps/", "https://www.atl.com/maps-3/", secureConnectionDirections(atlConnectionDirections)},
 	{"SFO", "KSFO", "https://www.flysfo.com/maps", "https://www.flysfo.com/connecting-flights-faq", secureConnectionDirections(sfoConnectionDirections)},
 	{"EWR", "KEWR", "https://www.newarkairport.com/explore-ewr/airport-map", "https://www.newarkairport.com/flights/connections-guide", ewrConnectionDirections},
@@ -120,15 +120,20 @@ func dfwTerminal(terminal, gate string) string {
 	return terminal
 }
 
-func dfwConnectionDirections(in, out feeds.Flight) []string {
+func dfwConnectionDirections(in, out feeds.Flight) connectionGuideDirections {
 	from, to := dfwTerminal(in.ArrivalTerminal, in.ArrivalGate), dfwTerminal(out.DepartureTerminal, out.DepartureGate)
 	if from == "" || to == "" {
-		return nil
+		return connectionGuideDirections{}
 	}
 	if from == to {
-		return []string{fmt.Sprintf("Follow departure gate signs within Terminal %s.", to)}
+		return connectionGuideDirections{
+			steps:              []string{fmt.Sprintf("Follow departure gate signs within Terminal %s.", to)},
+			secureSameTerminal: true,
+		}
 	}
-	return []string{fmt.Sprintf("Follow Skylink signs in Terminal %s and check the platform signs for a train serving Terminal %s.", from, to)}
+	return connectionGuideDirections{
+		steps: []string{fmt.Sprintf("Follow Skylink signs in Terminal %s and check the platform signs for a train serving Terminal %s.", from, to)},
+	}
 }
 
 func atlConnectionDirections(in, out feeds.Flight) []string {

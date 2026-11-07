@@ -129,8 +129,9 @@ test('a failed connection poll hides prior guidance until a fresh assessment arr
 
 test('only a confirmed disruption or departure hides guidance for a missed connection', async () => {
   let guidanceAvailable = true;
+  let timingAvailable;
   const fixture = connectionFixture(async () => ({
-    ...assessment, risk: 'Missed', availableMinutes: -10, forecastTransferMinutes: 65, monitoring: true, guidanceAvailable,
+    ...assessment, risk: 'Missed', availableMinutes: -10, forecastTransferMinutes: 65, monitoring: true, guidanceAvailable, timingAvailable,
   }));
   fixture.render();
   await fixture.settle();
@@ -145,4 +146,11 @@ test('only a confirmed disruption or departure hides guidance for a missed conne
   assert.deepEqual(terminal.filter(({ type }) => type === 'Action').map(({ props }) => props.label), ['Stop monitoring']);
   assert.ok(terminal.every(({ type, props }) => type.name !== 'ConnectionGate' && props.children !== assessment.instructions[0]));
   assert.ok(terminal.every(({ type, props }) => type !== 'Body' || !String(props.children).startsWith('Historical gates suggest')));
+
+  timingAvailable = false;
+  await fixture.poll();
+  const missingTiming = nodes(fixture.render());
+  assert.ok(missingTiming.some(({ type, props }) => type === 'Heading' && props.children.join('') === 'Missed connection at EWR'));
+  assert.ok(missingTiming.some(({ type, props }) => type === 'Body' && props.children === 'Connection timing is unavailable.'));
+  assert.ok(missingTiming.every(({ type }) => type !== 'Text'));
 });

@@ -494,10 +494,14 @@ function CheckedConnection({ api, inbound, outbound, monitorBusy, changeMonitori
       {!result && !error && <Loading />}
       {result && (
         <>
-          <Heading>{result.risk} connection at {result.airport}</Heading>
-          <Text style={[styles.detail, { color: colors.text }]}>{Math.max(0, result.availableMinutes)} min connection window · {result.transferMinutes} min estimated transfer</Text>
-          {(result.boardingReserveMinutes ?? 0) > 0 && <Body>Timing includes an estimated {result.boardingReserveMinutes} min boarding reserve.</Body>}
-          {result.precision && transferDetail[result.precision] && <Body>{transferDetail[result.precision]}</Body>}
+          <Heading>{result.risk} connection{result.airport ? ` at ${result.airport}` : ''}</Heading>
+          {result.timingAvailable === false ? <Body>Connection timing is unavailable.</Body> : (
+            <>
+              <Text style={[styles.detail, { color: colors.text }]}>{Math.max(0, result.availableMinutes)} min connection window · {result.transferMinutes} min estimated transfer</Text>
+              {(result.boardingReserveMinutes ?? 0) > 0 && <Body>Timing includes an estimated {result.boardingReserveMinutes} min boarding reserve.</Body>}
+              {result.precision && transferDetail[result.precision] && <Body>{transferDetail[result.precision]}</Body>}
+            </>
+          )}
           {result.guidanceAvailable !== false && (
             <>
               {result.forecastTransferMinutes !== undefined && <Body>Historical gates suggest a {result.forecastTransferMinutes} min airport route. The risk estimate allows for whichever route requires more time, including boarding.</Body>}
