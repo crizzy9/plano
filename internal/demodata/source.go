@@ -124,6 +124,17 @@ func trackAt(id string, now time.Time) ([]feeds.Position, error) {
 	return positions, nil
 }
 
-func (Source) Rotation(context.Context, feeds.Flight) ([]feeds.Flight, error) {
-	return []feeds.Flight{}, nil
+func (s Source) Rotation(ctx context.Context, flight feeds.Flight) ([]feeds.Flight, error) {
+	current, err := s.Get(ctx, flight.ID)
+	if err != nil {
+		return nil, err
+	}
+	if current.Number != "UA456" {
+		return []feeds.Flight{}, nil
+	}
+	inbound, err := s.Get(ctx, "demo-UA123-"+current.ScheduledDeparture.Format(time.DateOnly))
+	if err != nil {
+		return nil, err
+	}
+	return []feeds.Flight{inbound}, nil
 }

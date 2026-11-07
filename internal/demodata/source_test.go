@@ -1,10 +1,69 @@
 package demodata
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/crizzy9/plano/internal/feeds"
 )
+
+func TestDemoRotationUsesSameDayInbound(t *testing.T) {
+	source := Source{}
+	for _, date := range []string{"2026-11-06", "2028-02-29"} {
+		t.Run(date, func(t *testing.T) {
+			outbound, err := source.Get(t.Context(), "demo-UA456-"+date)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := time.Now().UTC()
+			rotation, err := source.Rotation(t.Context(), outbound)
+			after := time.Now().UTC()
+			if err != nil || len(rotation) != 1 {
+				t.Fatalf("rotation has %d legs, want one: %v", len(rotation), err)
+			}
+			inbound := rotation[0]
+			day, err := time.Parse(time.DateOnly, date)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if inbound.ID != "demo-UA123-"+date || inbound.Number != "UA123" ||
+				inbound.Origin != "SFO" || inbound.Destination != outbound.Origin ||
+				inbound.TailNumber != outbound.TailNumber || inbound.Source != demoSource {
+				t.Fatalf("unexpected inbound identity or aircraft: %+v", inbound)
+			}
+			if inbound.ScheduledDeparture == nil || !inbound.ScheduledDeparture.Equal(day.Add(15*time.Hour)) ||
+				inbound.ScheduledArrival == nil || !inbound.ScheduledArrival.Equal(day.Add(20*time.Hour)) ||
+				outbound.ScheduledDeparture.Sub(*inbound.ScheduledArrival) != 2*time.Hour {
+				t.Fatalf("unexpected inbound chronology: %+v", inbound)
+			}
+			if inbound.ObservedAt.Before(before) || inbound.ObservedAt.After(after) {
+				t.Fatalf("inbound observation is outside this provider call: %s", inbound.ObservedAt)
+			}
+			for _, actual := range []*time.Time{inbound.ActualDeparture, inbound.ActualTakeoff, inbound.ActualLanding, inbound.ActualArrival} {
+				if actual != nil && actual.After(inbound.ObservedAt) {
+					t.Fatalf("inbound contains a future actual movement: %s", actual)
+				}
+			}
+		})
+	}
+}
+
+func TestDemoRotationRejectsUnsupportedIdentity(t *testing.T) {
+	source := Source{}
+	for _, id := range []string{"unknown", "demo-UA789-2026-11-06", "demo-UA456-", "demo-UA456-2026-02-30"} {
+		rotation, err := source.Rotation(context.Background(), feeds.Flight{ID: id})
+		if !errors.Is(err, feeds.ErrNotFound) || len(rotation) != 0 {
+			t.Errorf("rotation for %q returned %d legs and %v", id, len(rotation), err)
+		}
+	}
+	rotation, err := source.Rotation(t.Context(), feeds.Flight{ID: "demo-UA123-2026-11-06"})
+	if err != nil || len(rotation) != 0 {
+		t.Fatalf("UA123 has an unexpected predecessor: %+v, %v", rotation, err)
+	}
+}
 
 func TestDemoTrackOnlyShowsElapsedFlight(t *testing.T) {
 	day := time.Date(2026, time.November, 6, 0, 0, 0, 0, time.UTC)
