@@ -58,6 +58,15 @@ Use a stable source-native ID, a lowercase kind, an `airport` or `area` identifi
 
 Plano can read the FAA release ZIP directly from an operator-supplied file. It streams `MASTER.txt` and joins its manufacturer and model code to `ACFTREF.txt`. It keeps US tail numbers, transponder identifiers, manufacture years, and model names. An extracted `MASTER.txt` supplies identity and age. Aircraft age is the difference between calendar years. The current registry enriches near-term flights with an assigned tail. Saved flight details can carry earlier model and age observations forward for the same verified flight instance and tail. [FAA registry download](https://www.faa.gov/licenses_certificates/aircraft_certification/aircraft_registry/releasable_aircraft_download/index.cfm) · [FAA file layouts](https://registry.faa.gov/database/ardata.pdf)
 
+The official padded FAA format is selected only when the header and complete
+record layout match. Quotes within its fixed slots are literal label bytes;
+other CSV files retain strict CSV quoting. Every later padded record must keep
+the same layout. The padded MASTER reader passes only registration, model code,
+manufacture year, status and Mode S hexadecimal address to CSV decoding, replacing
+all unused cells with empty values. Owner, address, serial and kit-label slots
+do not reach that decoder. A complete literal quote in an unused slot is not a
+truncated record; a truncated or shifted record is rejected.
+
 The optional Canadian Civil Aircraft Register adapter streams the current
 aircraft table in Transport Canada's `ccarcsdb.zip` using its supplied field
 layout. It keeps the model designation, manufacture or assembly year, recorded Mode S

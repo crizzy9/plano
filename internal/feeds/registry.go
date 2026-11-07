@@ -149,8 +149,9 @@ func (r *faaDirectoryReader) ReadAt(p []byte, offset int64) (int, error) {
 }
 
 type faaCSV struct {
-	reader  *csv.Reader
-	limited *io.LimitedReader
+	reader     *csv.Reader
+	limited    *io.LimitedReader
+	duplicates map[string]bool
 }
 
 func newFAACSV(input io.Reader) faaCSV {
@@ -158,7 +159,7 @@ func newFAACSV(input io.Reader) faaCSV {
 	reader := csv.NewReader(limited)
 	reader.TrimLeadingSpace = true
 	reader.ReuseRecord = true
-	return faaCSV{reader: reader, limited: limited}
+	return faaCSV{reader: reader, limited: limited, duplicates: make(map[string]bool)}
 }
 
 func (r faaCSV) read() ([]string, error) {
@@ -183,8 +184,13 @@ func (r faaCSV) columns(table string, requireUnique bool) (map[string]int, error
 		if name == "" {
 			continue
 		}
-		if _, exists := columns[name]; requireUnique && exists {
-			return nil, fmt.Errorf("duplicate FAA registry %s column", table)
+		if _, exists := columns[name]; exists {
+			// Legacy callers can permit duplicates while profile selection still
+			// needs to know that a later correct index hid an earlier name.
+			r.duplicates[name] = true
+			if requireUnique {
+				return nil, fmt.Errorf("duplicate FAA registry %s column", table)
+			}
 		}
 		columns[name] = i
 	}
@@ -192,7 +198,8 @@ func (r faaCSV) columns(table string, requireUnique bool) (map[string]int, error
 }
 
 func loadFAARegistry(input io.Reader, models map[string]string) (*FAARegistry, error) {
-	reader := newFAACSV(input)
+	master := newFAAMasterCSVReader(input)
+	reader := newFAACSV(master)
 	columns, err := reader.columns("master", models != nil)
 	if err != nil {
 		return nil, err
@@ -205,6 +212,7 @@ func loadFAARegistry(input io.Reader, models map[string]string) (*FAARegistry, e
 	if !hasNumber || !hasYear || !hasHex || models != nil && !hasModel {
 		return nil, errors.New("FAA registry header lacks aircraft identity or manufacture columns")
 	}
+	master.columns(columns, reader.reader.FieldsPerRecord, reader.duplicates)
 	registry := &FAARegistry{byTail: make(map[string]registryEntry)}
 	for line := 2; ; line++ {
 		row, err := reader.read()
@@ -252,7 +260,8 @@ func loadFAARegistry(input io.Reader, models map[string]string) (*FAARegistry, e
 }
 
 func loadFAARegistryModels(input io.Reader) (map[string]string, error) {
-	reader := newFAACSV(input)
+	reference := newFAAReferenceCSVReader(input)
+	reader := newFAACSV(reference)
 	columns, err := reader.columns("reference", true)
 	if err != nil {
 		return nil, err
@@ -263,6 +272,7 @@ func loadFAARegistryModels(input io.Reader) (map[string]string, error) {
 	if !hasCode || !hasMaker || !hasModel {
 		return nil, errors.New("FAA registry reference header lacks aircraft model columns")
 	}
+	reference.columns(columns, reader.reader.FieldsPerRecord)
 	models := make(map[string]string)
 	for line := 2; ; line++ {
 		row, err := reader.read()
