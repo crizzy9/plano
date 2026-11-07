@@ -763,6 +763,58 @@ func TestFCMAlertDeliveryWindowCapsWireExpiry(t *testing.T) {
 	}
 }
 
+func TestFCMAdvisoryRevisionEnvelope(t *testing.T) {
+	now := time.Unix(1800000000, 123456789)
+	message := fixtureAlert(now)
+	message.CollapseID = strings.Repeat("a", 64)
+	message.AndroidAdvisoryRevision = &AdvisoryRevision{ObservedNS: 1799999999123456789, OutboxID: 42}
+	payload, err := (&FCM{}).request(message, "fixture-registration", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := payload.Message.Data
+	if data["eventId"] != message.CollapseID || data["advisoryRevision"] != "1799999999123456789:42" ||
+		data["type"] != "alert" || data["alertKind"] != "" || data["alertObservedNs"] != "" {
+		t.Fatalf("unexpected FCM advisory data: %v", data)
+	}
+	withoutRevision := message
+	withoutRevision.AndroidAdvisoryRevision = nil
+	legacy, err := (&FCM{}).request(withoutRevision, "fixture-registration", now)
+	if _, present := legacy.Message.Data["advisoryRevision"]; err != nil || present {
+		t.Fatalf("unexpected legacy FCM advisory data: %v, %v", legacy.Message.Data, err)
+	}
+	raw, err := json.Marshal(message)
+	if err != nil || strings.Contains(string(raw), "AdvisoryRevision") {
+		t.Fatalf("unexpected persisted outbox envelope: %s, %v", raw, err)
+	}
+	apns, headers, err := (&APNs{}).request(message)
+	if err != nil || headers.Get("apns-collapse-id") != message.CollapseID || strings.Contains(string(apns), "advisoryRevision") {
+		t.Fatalf("unexpected APNs advisory body %s, collapse ID %q, error %v", apns, headers.Get("apns-collapse-id"), err)
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*Message)
+	}{
+		{"missing family", func(m *Message) { m.CollapseID = "" }},
+		{"noncanonical family", func(m *Message) { m.CollapseID = strings.Repeat("A", 64) }},
+		{"invalid observation", func(m *Message) { m.AndroidAdvisoryRevision.ObservedNS = 0 }},
+		{"invalid outbox ID", func(m *Message) { m.AndroidAdvisoryRevision.OutboxID = -1 }},
+		{"ordinary alert", func(m *Message) { m.AlertKind = "arrival_gate" }},
+		{"ATFM alert", func(m *Message) { m.ATFMRevision = "slot-revision" }},
+		{"live update", func(m *Message) { m.Kind = LiveUpdate }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := message
+			revision := *message.AndroidAdvisoryRevision
+			invalid.AndroidAdvisoryRevision = &revision
+			test.change(&invalid)
+			if _, err := (&FCM{}).request(invalid, "fixture-registration", now); err == nil {
+				t.Fatal("accepted invalid advisory revision")
+			}
+		})
+	}
+}
+
 func TestAlertOrderingValidatesKindAndTimes(t *testing.T) {
 	now := time.Unix(1800000000, 0)
 	for _, kind := range []string{"Boarding", "arrival gate", "x\n", strings.Repeat("x", 33)} {

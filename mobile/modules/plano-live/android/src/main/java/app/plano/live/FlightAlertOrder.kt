@@ -3,6 +3,10 @@ package app.plano.live
 private const val NANOS_PER_MILLISECOND = 1_000_000L
 private const val NANOS_PER_SECOND = 1_000_000_000L
 private const val MAX_ALERT_EXPIRY_LEAD_MILLIS = 28 * 24 * 60 * 60 * 1000L + PUSH_CLOCK_SKEW_MILLIS
+internal const val ADVISORY_ORDER_TTL_MILLIS = 2 * 60 * 60 * 1000L + PUSH_CLOCK_SKEW_MILLIS
+internal const val MAX_ADVISORY_ORDER_ENTRIES = 256
+internal val advisoryFamilyPattern = Regex("[0-9a-f]{64}")
+private val advisoryRevisionPattern = Regex("[1-9][0-9]{0,18}:[1-9][0-9]{0,18}")
 private val alertKindPattern = Regex("[a-z][a-z0-9_]{0,31}")
 private val departureAlertKinds = setOf(
   "boarding", "check_in", "departure_gate", "etd", "delay_prediction", "inbound_takeoff", "inbound_landing",
@@ -18,12 +22,47 @@ internal data class FlightAlertMetadata(
   val kind: String? = null,
   val observedNs: Long? = null,
   val phase: String? = null,
+  val advisoryRevision: AdvisoryAlertRevision? = null,
 )
 
 internal data class FlightAlertDecision(
   val notificationTag: String? = null,
   val cancelTags: List<String> = emptyList(),
 )
+
+internal data class AdvisoryAlertRevision(val observedNs: Long, val outboxId: Long) {
+  fun encode() = "$observedNs:$outboxId"
+
+  fun isAfter(previous: AdvisoryAlertRevision) =
+    observedNs > previous.observedNs || observedNs == previous.observedNs && outboxId > previous.outboxId
+
+  companion object {
+    fun parse(encoded: String): AdvisoryAlertRevision? {
+      if (!advisoryRevisionPattern.matches(encoded)) return null
+      val observed = encoded.substringBefore(':').toLongOrNull() ?: return null
+      val id = encoded.substringAfter(':').toLongOrNull() ?: return null
+      return AdvisoryAlertRevision(observed, id)
+    }
+  }
+}
+
+internal data class AdvisoryAlertOrder(val received: Long, val revision: AdvisoryAlertRevision)
+
+internal fun updateAdvisoryAlertOrder(
+  order: Map<String, AdvisoryAlertOrder>, eventId: String?, revision: AdvisoryAlertRevision?, now: Long,
+): Map<String, AdvisoryAlertOrder>? {
+  val key = eventId?.takeIf(advisoryFamilyPattern::matches)?.let(::hashPushIdentity)
+    ?: return order.takeIf { revision == null }
+  val cutoff = now - ADVISORY_ORDER_TTL_MILLIS
+  val previous = order[key]?.takeIf { it.received > cutoff }
+  if (revision == null) return order.takeIf { previous == null }
+  if (previous != null && !revision.isAfter(previous.revision)) return null
+  val recent = order.filterValues { it.received > cutoff }
+  // A still-live entry prevents a delayed revision from replacing the current
+  // alert. Preserve those entries if a burst reaches the bound.
+  if (previous == null && recent.size >= MAX_ADVISORY_ORDER_ENTRIES) return null
+  return recent + (key to AdvisoryAlertOrder(now, revision))
+}
 
 internal fun parseFlightAlertMetadata(data: Map<String, String>, sentAt: Long, now: Long): FlightAlertMetadata? {
   val expiresAt = data["alertExpiresMs"]?.let { value ->
@@ -32,6 +71,16 @@ internal fun parseFlightAlertMetadata(data: Map<String, String>, sentAt: Long, n
   val kind = data["alertKind"]
   val observed = data["alertObservedNs"]
   val phase = data["alertPhase"]
+  data["advisoryRevision"]?.let { encoded ->
+    val revision = AdvisoryAlertRevision.parse(encoded) ?: return null
+    val eventId = data["eventId"] ?: return null
+    val sourceTime = revision.observedNs / NANOS_PER_MILLISECOND
+    if (kind != null || observed != null || phase != null || data["connectionInboundId"] != null ||
+      !advisoryFamilyPattern.matches(eventId) || expiresAt == null || expiresAt <= sourceTime ||
+      expiresAt - now > ADVISORY_ORDER_TTL_MILLIS || !validPushObservationMillis(sourceTime, sentAt, now)
+    ) return null
+    return FlightAlertMetadata(expiresAt, advisoryRevision = revision)
+  }
   // A legacy sender may omit all metadata. New generic alerts carry only expiry.
   if (kind == null && observed == null && phase == null) return FlightAlertMetadata(expiresAt)
   val observedNs = observed?.toLongOrNull() ?: return null

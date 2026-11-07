@@ -952,13 +952,17 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 		s.removeObsoletePush(ctx, logger, job)
 		return
 	}
+	directAdvisory := hasAdvisoryEvidence && flightEventKind == "" && job.message.Kind == push.Alert
+	androidAdvisory := directAdvisory && job.target.Platform == "android" && push.ValidAdvisoryFamilyID(job.message.CollapseID) &&
+		job.message.ATFMRevision == "" && job.message.AlertKind == "" && job.message.AlertPhase == "" &&
+		job.message.ConnectionInboundID == "" && job.message.InboundLegID == ""
 	var apnsFamily string
 	if job.target.Platform == "ios" {
 		switch {
 		case stateAlert:
 			job.message.APNsCollapseID = hash("apns-flight-alert\x00" + job.owner + "\x00" + job.message.FlightID + "\x00" + flightEventKind)
 			apnsFamily = job.message.APNsCollapseID
-		case hasAdvisoryEvidence && flightEventKind == "" && job.message.Kind == push.Alert:
+		case directAdvisory:
 			// Direct advisory revisions use their existing provider collapse ID.
 			apnsFamily = job.message.CollapseID
 		}
@@ -992,12 +996,15 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 		var leaseExpiry int64
 		var advisoryFlight []byte
 		var sameDelayInputs bool
+		var advisoryObservedNS int64
 		if err := s.db.QueryRowContext(ctx, `SELECT o.expires,
 CASE WHEN ? THEN (SELECT snapshot FROM flights WHERE id=o.flight_id) END,
 CASE WHEN ? THEN EXISTS(SELECT 1 FROM flights f WHERE f.id=o.flight_id
-  AND f.snapshot=? AND f.prediction=? AND f.inbound=?) ELSE 1 END`+leasedRow,
+  AND f.snapshot=? AND f.prediction=? AND f.inbound=?) ELSE 1 END,
+CASE WHEN ? THEN (SELECT CASE WHEN COUNT(*)=1 THEN MAX(observed_ns) ELSE 0 END
+  FROM outbox_advisory_evidence WHERE outbox_id=o.id) ELSE 0 END`+leasedRow,
 			window != nil, delayAlert, string(latestFlight), string(latestForecast), string(latestRotation),
-			job.id, job.deviceID, job.lease).Scan(&leaseExpiry, &advisoryFlight, &sameDelayInputs); err != nil {
+			androidAdvisory, job.id, job.deviceID, job.lease).Scan(&leaseExpiry, &advisoryFlight, &sameDelayInputs, &advisoryObservedNS); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
 				logger.Error("could not revalidate push lease", "job", job.id, "error", err)
 			}
@@ -1006,6 +1013,9 @@ CASE WHEN ? THEN EXISTS(SELECT 1 FROM flights f WHERE f.id=o.flight_id
 		if !sameDelayInputs {
 			s.deferFlightAlert(ctx, logger, job)
 			return
+		}
+		if advisoryObservedNS > 0 && job.id > 0 {
+			job.message.AndroidAdvisoryRevision = &push.AdvisoryRevision{ObservedNS: advisoryObservedNS, OutboxID: job.id}
 		}
 		expires = min(expires, leaseExpiry)
 		if window != nil {

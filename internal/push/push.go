@@ -65,6 +65,13 @@ type AdvisoryWindow struct {
 	Kind      string `json:",omitempty"`
 }
 
+// AdvisoryRevision orders Android advisory alerts by their original source
+// observation and durable outbox row. It is filled in at dispatch.
+type AdvisoryRevision struct {
+	ObservedNS int64
+	OutboxID   int64
+}
+
 type Message struct {
 	Kind                Kind
 	FlightID            string
@@ -90,8 +97,9 @@ type Message struct {
 	// APNsImmediateLiveUpdate requests priority 10 for an important activity update.
 	APNsImmediateLiveUpdate bool `json:",omitempty"`
 	// AndroidLiveHeartbeat marks a routine refresh for immediate delivery only.
-	AndroidLiveHeartbeat bool   `json:",omitempty"`
-	binding              string // Opaque session binding from the destination device registration.
+	AndroidLiveHeartbeat    bool              `json:",omitempty"`
+	AndroidAdvisoryRevision *AdvisoryRevision `json:"-"`
+	binding                 string            // Opaque session binding from the destination device registration.
 }
 
 type Sender struct {
@@ -216,6 +224,12 @@ func (m Message) prepare(now time.Time) (Message, error) {
 
 var connectionFlightIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 var alertLabelPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+var advisoryFamilyIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// ValidAdvisoryFamilyID reports whether id has the canonical advisory family format.
+func ValidAdvisoryFamilyID(id string) bool {
+	return advisoryFamilyIDPattern.MatchString(id)
+}
 
 func validCollapseID(id string) bool {
 	return len(id) <= 64 && strings.IndexFunc(id, unicode.IsControl) < 0

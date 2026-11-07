@@ -306,6 +306,13 @@ func (f *FCM) request(m Message, deviceToken string, now time.Time) (fcmRequest,
 	if m.binding != "" {
 		data["binding"] = m.binding
 	}
+	if revision := m.AndroidAdvisoryRevision; revision != nil {
+		if m.Kind != Alert || !ValidAdvisoryFamilyID(m.CollapseID) || revision.ObservedNS <= 0 || revision.OutboxID <= 0 ||
+			m.AlertKind != "" || m.AlertPhase != "" || m.ConnectionInboundID != "" || m.ATFMRevision != "" || m.InboundLegID != "" {
+			return payload, errors.New("invalid Android advisory revision")
+		}
+		data["advisoryRevision"] = strconv.FormatInt(revision.ObservedNS, 10) + ":" + strconv.FormatInt(revision.OutboxID, 10)
+	}
 	if m.Kind == Alert {
 		data["type"] = "alert"
 		if m.Title != "" {

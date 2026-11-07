@@ -133,6 +133,66 @@ func TestDispatcherSerializesAPNsAdvisoryRevisions(t *testing.T) {
 	}
 }
 
+func TestDispatcherUsesQueuedEvidenceForAndroidAdvisoryRevision(t *testing.T) {
+	store, owner, id := dispatcherFixture(t)
+	ctx, now := t.Context(), time.Now().UTC()
+	flight, err := store.Flight(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flight.ObservedAt, flight.ScheduledArrival = now, new(now.Add(35*time.Minute))
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Track(ctx, owner, id, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, platform := range []string{"android", "ios"} {
+		if err := store.Register(ctx, owner, Device{Platform: platform, Kind: "alert", Token: platform + "-advisory-fixture"}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	advisory := feeds.Advisory{ID: "dispatch-program", Source: feeds.Eurocontrol, Airport: "SFO", Kind: "ground_delay",
+		Direction: "arrival", Reason: "Arrival restrictions due to runway capacity.",
+		ObservedAt: now.Add(-2 * time.Minute), EndsAt: new(now.Add(time.Hour))}
+	publishDispatchAdvisory(t, store, advisory, now)
+	refresh := advisory
+	refresh.ObservedAt = now.Add(-time.Minute)
+	// An unchanged program refresh keeps the first queued alert valid. Its
+	// revision must still reflect the evidence that produced that alert.
+	publishDispatchAdvisory(t, store, refresh, now)
+	jobs, err := store.claim(ctx, now, 3)
+	if err != nil || len(jobs) != 2 {
+		t.Fatalf("advisory claims = %+v, error = %v", jobs, err)
+	}
+	for _, job := range jobs {
+		if job.message.AndroidAdvisoryRevision != nil {
+			t.Fatal("queued job already contains provider metadata")
+		}
+		sent := false
+		store.deliver(ctx, pushFunc(func(_ context.Context, target push.Target, message push.Message) error {
+			sent = true
+			if message.CollapseID != hash(id+"\x00advisory\x00"+advisory.Source+"\x00"+advisory.ID) || message.Body != advisory.Reason {
+				t.Fatalf("unexpected %s advisory message: %+v", target.Platform, message)
+			}
+			revision := message.AndroidAdvisoryRevision
+			if target.Platform == "ios" {
+				if revision != nil {
+					t.Fatalf("iOS advisory has Android revision: %+v", revision)
+				}
+				return nil
+			}
+			if revision == nil || revision.ObservedNS != advisory.ObservedAt.UnixNano() || revision.OutboxID != job.id {
+				t.Fatalf("Android revision = %+v, want original source ns %d and job %d", revision, advisory.ObservedAt.UnixNano(), job.id)
+			}
+			return nil
+		}), slog.New(slog.DiscardHandler), job)
+		if !sent {
+			t.Fatalf("%s advisory did not reach transport", job.target.Platform)
+		}
+	}
+}
+
 func TestDispatcherDropsSupersededAdvisoryAlerts(t *testing.T) {
 	for _, claimBeforeRevision := range []bool{false, true} {
 		name := "before claim"

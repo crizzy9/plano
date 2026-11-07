@@ -52,7 +52,7 @@ class PlanoMessagingService : ExpoFirebaseMessagingService() {
     val event = data["eventId"] ?: messageId ?: return
     val flightId = data["flightId"]
     val metadata = parseFlightAlertMetadata(data, sentAt, System.currentTimeMillis()) ?: return
-    val decision = runCatching { AndroidPushSession.advanceAlert(this, flightId, metadata) }.getOrNull() ?: return
+    val decision = runCatching { AndroidPushSession.advanceAlert(this, flightId, data["eventId"], metadata) }.getOrNull() ?: return
     decision.cancelTags.forEach { manager.cancel(it, 0) }
     val remaining = metadata.expiresAt?.minus(System.currentTimeMillis())
     if (remaining != null && remaining <= 0L) return

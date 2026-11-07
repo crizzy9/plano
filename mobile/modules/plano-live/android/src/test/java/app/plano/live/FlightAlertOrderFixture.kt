@@ -10,6 +10,9 @@ fun main() {
   checkAlertOrdering()
   checkTakeoffSlotOrdering()
   checkInboundMilestoneOrdering()
+  checkAdvisoryAlertMetadata()
+  checkAdvisoryAlertOrdering()
+  checkAdvisoryOrderCapacity()
   println("Flight alert metadata and ordering fixtures passed")
 }
 
@@ -153,4 +156,85 @@ private fun checkInboundMilestoneOrdering() {
       check(updateFlightAlertOrder(update.revisions, kind, 30) == null)
     }
   }
+}
+
+private fun checkAdvisoryAlertMetadata() {
+  val now = 1_760_000_000_000L
+  val expires = now + 60_000
+  val observedNs = (now - 10_000) * 1_000_000 + 7
+  val revision = AdvisoryAlertRevision(observedNs, 42)
+  val family = "a".repeat(64)
+  val valid = mapOf(
+    "alertExpiresMs" to expires.toString(),
+    "eventId" to family,
+    "advisoryRevision" to "$observedNs:42",
+  )
+  check(parseFlightAlertMetadata(valid, now, now) == FlightAlertMetadata(expires, advisoryRevision = revision))
+  check(parseFlightAlertMetadata(valid - "advisoryRevision", now, now) == FlightAlertMetadata(expires))
+  check(revision.encode() == valid["advisoryRevision"])
+  check(AdvisoryAlertRevision.parse(revision.encode()) == revision)
+
+  val malformed = listOf(
+    valid - "eventId",
+    valid - "alertExpiresMs",
+    valid + ("eventId" to family.uppercase()),
+    valid + ("eventId" to family.dropLast(1)),
+    valid + ("advisoryRevision" to "$observedNs:0"),
+    valid + ("advisoryRevision" to "0:42"),
+    valid + ("advisoryRevision" to "$observedNs:42:7"),
+    valid + ("advisoryRevision" to "$observedNs:9223372036854775808"),
+    valid + ("advisoryRevision" to "${(now + 40_000) * 1_000_000}:42"),
+    valid + ("alertExpiresMs" to now.toString()),
+    valid + ("alertExpiresMs" to (now + ADVISORY_ORDER_TTL_MILLIS + 1).toString()),
+    valid + mapOf("alertKind" to "departure_gate", "alertObservedNs" to observedNs.toString()),
+    valid + ("connectionInboundId" to "flight-2"),
+  )
+  for (payload in malformed) {
+    check(parseFlightAlertMetadata(payload, now, now) == null) { "Accepted invalid advisory payload $payload" }
+  }
+}
+
+private fun checkAdvisoryAlertOrdering() {
+  val now = 1_760_000_000_000L
+  val family = "a".repeat(64)
+  val other = "b".repeat(64)
+  val revision = AdvisoryAlertRevision(now * 1_000_000, 42)
+  check(updateAdvisoryAlertOrder(emptyMap(), family, null, now) == emptyMap<String, AdvisoryAlertOrder>())
+  val first = requireNotNull(updateAdvisoryAlertOrder(emptyMap(), family, revision, now))
+  val restored = first.mapValues { (_, entry) ->
+    entry.copy(revision = requireNotNull(AdvisoryAlertRevision.parse(entry.revision.encode())))
+  }
+  check(updateAdvisoryAlertOrder(restored, family, revision, now + 1) == null)
+  check(updateAdvisoryAlertOrder(restored, family, revision.copy(outboxId = 41), now + 1) == null)
+  check(updateAdvisoryAlertOrder(restored, family, AdvisoryAlertRevision(revision.observedNs - 1, 99), now + 1) == null)
+  check(updateAdvisoryAlertOrder(restored, family, null, now + 1) == null)
+  check(updateAdvisoryAlertOrder(restored, other, null, now + 1) == restored)
+  check(updateAdvisoryAlertOrder(restored, other, revision, now + 1)?.size == 2)
+
+  val recurrence = revision.copy(outboxId = 43)
+  val updated = requireNotNull(updateAdvisoryAlertOrder(restored, family, recurrence, now + 1))
+  check(updated.values.single() == AdvisoryAlertOrder(now + 1, recurrence))
+  val laterObservation = AdvisoryAlertRevision(revision.observedNs + 1, 1)
+  check(updateAdvisoryAlertOrder(updated, family, laterObservation, now + 2)?.values?.single()?.revision == laterObservation)
+}
+
+private fun checkAdvisoryOrderCapacity() {
+  val now = 1_760_000_000_000L
+  val oldFamily = "0".repeat(64)
+  val newFamily = "f".repeat(64)
+  val revision = AdvisoryAlertRevision(now * 1_000_000, 42)
+  val firstReceived = now - ADVISORY_ORDER_TTL_MILLIS + 1
+  var order = requireNotNull(updateAdvisoryAlertOrder(emptyMap(), oldFamily, revision, firstReceived))
+  for (index in 1 until MAX_ADVISORY_ORDER_ENTRIES) {
+    val family = index.toString(16).padStart(64, '0')
+    order = requireNotNull(updateAdvisoryAlertOrder(order, family, revision, now))
+  }
+  check(order.size == MAX_ADVISORY_ORDER_ENTRIES)
+  check(updateAdvisoryAlertOrder(order, newFamily, revision, now) == null)
+  check(updateAdvisoryAlertOrder(order, oldFamily, revision, now) == null)
+  check(updateAdvisoryAlertOrder(order, oldFamily, revision.copy(outboxId = 43), now)?.size == MAX_ADVISORY_ORDER_ENTRIES)
+
+  val afterExpiry = requireNotNull(updateAdvisoryAlertOrder(order, newFamily, revision, now + 2))
+  check(afterExpiry.size == MAX_ADVISORY_ORDER_ENTRIES)
+  check(updateAdvisoryAlertOrder(afterExpiry, oldFamily, null, now + 2) == afterExpiry)
 }

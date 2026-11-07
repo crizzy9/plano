@@ -31,6 +31,7 @@ internal object AndroidPushSession {
     val suppressed: Boolean = false,
     val order: Map<String, Order> = emptyMap(),
     val alertOrder: Map<String, AlertOrder> = emptyMap(),
+    val advisoryOrder: Map<String, AdvisoryAlertOrder> = emptyMap(),
   ) {
     fun retired() = if (enabled) mapOf("origin" to origin, "binding" to generation) else null
     fun hiddenWidgetKeys() = order.filterValues { it.ended || it.stoppedAt != 0L }.keys
@@ -189,11 +190,16 @@ internal object AndroidPushSession {
   }
 
   @Synchronized
-  fun advanceAlert(context: Context, flightId: String?, metadata: FlightAlertMetadata): FlightAlertDecision? {
+  fun advanceAlert(context: Context, flightId: String?, eventId: String?, metadata: FlightAlertMetadata): FlightAlertDecision? {
     val current = state(context)
     val now = System.currentTimeMillis()
     if (!current.enabled || metadata.expiresAt?.let { it <= now } == true) return null
-    val kind = metadata.kind ?: return FlightAlertDecision()
+    val kind = metadata.kind
+    if (kind == null) {
+      val order = updateAdvisoryAlertOrder(current.advisoryOrder, eventId, metadata.advisoryRevision, now) ?: return null
+      if (order != current.advisoryOrder) write(context, current.copy(advisoryOrder = order), verify = true)
+      return FlightAlertDecision()
+    }
     val observedNs = metadata.observedNs ?: return null
     val id = flightId?.takeIf(::validNotificationFlightId) ?: return null
     val key = hashPushIdentity(id)
@@ -287,8 +293,16 @@ internal object AndroidPushSession {
         }.toMap()
         id to AlertOrder(received, revisions)
       }.toMap()
+      val advisoryEntries = json.optJSONObject("advisoryOrder") ?: JSONObject()
+      val advisoryOrder = advisoryEntries.keys().asSequence().take(MAX_ADVISORY_ORDER_ENTRIES).mapNotNull { key ->
+        if (!advisoryFamilyPattern.matches(key)) return@mapNotNull null
+        val entry = advisoryEntries.optJSONObject(key) ?: return@mapNotNull null
+        val received = entry.optLong("received").takeIf { it > 0L } ?: return@mapNotNull null
+        val revision = AdvisoryAlertRevision.parse(entry.optString("revision")) ?: return@mapNotNull null
+        key to AdvisoryAlertOrder(received, revision)
+      }.toMap()
       check(UUID.fromString(generation).toString() == generation)
-      State(origin, generation, enabled, json.optBoolean("suppressed"), order, alertOrder)
+      State(origin, generation, enabled, json.optBoolean("suppressed"), order, alertOrder, advisoryOrder)
     }.getOrNull()
     val current = restored ?: State()
     loaded = current
@@ -315,9 +329,13 @@ internal object AndroidPushSession {
       for ((kind, revision) in value.revisions) revisions.put(kind, revision)
       alertOrder.put(key, JSONObject().put("received", value.received).put("revisions", revisions))
     }
+    val advisoryOrder = JSONObject()
+    for ((key, value) in state.advisoryOrder) {
+      advisoryOrder.put(key, JSONObject().put("received", value.received).put("revision", value.revision.encode()))
+    }
     val json = JSONObject().put("origin", state.origin).put("generation", state.generation)
       .put("enabled", state.enabled).put("suppressed", state.suppressed).put("order", order)
-      .put("alertOrder", alertOrder)
+      .put("alertOrder", alertOrder).put("advisoryOrder", advisoryOrder)
     val bytes = json.toString().toByteArray(Charsets.UTF_8)
     val file = file(context)
     val stream = file.startWrite()
@@ -328,7 +346,7 @@ internal object AndroidPushSession {
       file.failWrite(stream)
       throw cause
     }
-    if (verify) check(file.readFully().contentEquals(bytes)) { "Could not save live progress state" }
+    if (verify) check(file.readFully().contentEquals(bytes)) { "Could not save push session state" }
     loaded = state
   }
 }
