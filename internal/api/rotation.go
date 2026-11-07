@@ -20,7 +20,7 @@ func (s Server) rotationDetails(ctx context.Context, owner, parent, id string, n
 	trackCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	points, trackErr := s.Source.Track(trackCtx, leg.ID)
-	// The tracked relationship or operating aircraft can change during the request.
+	// The tracked relationship or flight movement can change during the request.
 	now = time.Now()
 	current, immediate, local, err := s.Store.TrackedRotationRadar(ctx, owner, parent, id, now)
 	if err != nil {
@@ -30,7 +30,8 @@ func (s Server) rotationDetails(ctx context.Context, owner, parent, id string, n
 	takeoffMatches := leg.ActualTakeoff == nil && current.ActualTakeoff == nil ||
 		leg.ActualTakeoff != nil && current.ActualTakeoff != nil && leg.ActualTakeoff.Equal(*current.ActualTakeoff)
 	if trackErr == nil && immediate && rotationTrackCurrent(current, now) && current.TailNumber == leg.TailNumber &&
-		current.Source == leg.Source && current.AeroProviderID() == leg.AeroProviderID() && takeoffMatches {
+		current.Source == leg.Source && current.AeroProviderID() == leg.AeroProviderID() && takeoffMatches &&
+		core.SameTrackRouteAndSchedule(leg, current) {
 		details.Telemetry = core.MergeFlightPositions(points, local)
 	}
 	if len(details.Telemetry) > 256 {

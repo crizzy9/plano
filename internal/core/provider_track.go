@@ -34,10 +34,16 @@ revision_ns=excluded.revision_ns, scope_ns=excluded.scope_ns, fetched_ns=exclude
 func sameProviderTrackIdentity(prior, flight feeds.Flight, previousProvider, provider string) bool {
 	return previousProvider != "" && previousProvider == provider &&
 		prior.Source == "flightaware_aeroapi" && flight.Source == prior.Source &&
-		sameProviderTrackAirport(prior.Origin, prior.OriginICAO, flight.Origin, flight.OriginICAO) &&
-		sameProviderTrackAirport(prior.Destination, prior.DestinationICAO, flight.Destination, flight.DestinationICAO) &&
-		sameOptionalInstant(prior.ScheduledDeparture, flight.ScheduledDeparture) &&
+		SameTrackRouteAndSchedule(prior, flight) &&
 		(prior.Status == "cancelled") == (flight.Status == "cancelled")
+}
+
+// SameTrackRouteAndSchedule reports whether a provider track still belongs to
+// the same route and scheduled departure after a flight observation changes.
+func SameTrackRouteAndSchedule(prior, flight feeds.Flight) bool {
+	return sameProviderTrackAirport(prior.Origin, prior.OriginICAO, flight.Origin, flight.OriginICAO) &&
+		sameProviderTrackAirport(prior.Destination, prior.DestinationICAO, flight.Destination, flight.DestinationICAO) &&
+		sameOptionalInstant(prior.ScheduledDeparture, flight.ScheduledDeparture)
 }
 
 func sameProviderTrackAirport(a, aICAO, b, bICAO string) bool {

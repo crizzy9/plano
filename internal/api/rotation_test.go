@@ -26,7 +26,7 @@ func TestTrackedRotationLegDetailsAndProviderTrack(t *testing.T) {
 	defer store.Close()
 	now := time.Now().Add(-time.Minute)
 	parent := feeds.Flight{ID: "out", ObservedAt: now}
-	inbound := feeds.Flight{ID: "in", Number: "UA7", Status: "airborne", TailNumber: "N1AA", ObservedAt: now,
+	inbound := feeds.Flight{ID: "in", Number: "UA7", Origin: "BOS", OriginICAO: "KBOS", Status: "airborne", TailNumber: "N1AA", ObservedAt: now,
 		ActualTakeoff: new(now.Add(-time.Hour))}
 	earlier := feeds.Flight{ID: "earlier", Number: "UA8", Status: "arrived", ObservedAt: now}
 	if err := store.Observe(ctx, parent, nil, []feeds.Flight{inbound, earlier}, nil); err != nil {
@@ -92,14 +92,15 @@ func TestTrackedRotationLegDetailsAndProviderTrack(t *testing.T) {
 		parent.ObservedAt = parent.ObservedAt.Add(time.Millisecond)
 		inbound.ObservedAt = parent.ObservedAt
 		inbound.EstimatedArrival = new(now.Add(time.Hour))
+		inbound.Origin = inbound.OriginICAO
 		if err := store.Observe(ctx, parent, nil, []feeds.Flight{inbound, earlier}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	result.Telemetry = nil
 	if err := json.Unmarshal(get("/v1/flights/in?rotationOf=out", ownerToken, 200), &result); err != nil ||
-		len(result.Telemetry) != 256 || result.Flight.EstimatedArrival == nil {
-		t.Fatalf("an estimate refresh dropped matching telemetry: %+v %v", result.Flight, err)
+		len(result.Telemetry) != 256 || result.Flight.EstimatedArrival == nil || result.Flight.Origin != inbound.Origin {
+		t.Fatalf("an estimate and display refresh dropped matching telemetry: %+v %v", result.Flight, err)
 	}
 	source.beforeReturn = func() {
 		parent.ObservedAt = parent.ObservedAt.Add(time.Millisecond)
@@ -150,8 +151,9 @@ func TestTrackedRotationReceiverTrackDuringProviderOutage(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	parent := feeds.Flight{ID: "out", Number: "UA8", Origin: "EWR", Destination: "SFO",
 		Status: "scheduled", TailNumber: "N1AA", ObservedAt: now, ScheduledDeparture: new(now.Add(2 * time.Hour))}
-	inbound := feeds.Flight{ID: "in", Number: "UA7", Origin: "BOS", Destination: "EWR",
-		Status: "airborne", TailNumber: "N1AA", ObservedAt: now, ActualTakeoff: new(now.Add(-time.Hour)),
+	inbound := feeds.Flight{ID: "in", Number: "UA7", Origin: "BOS", OriginICAO: "KBOS", Destination: "EWR",
+		Source: "flightaware_aeroapi", Status: "airborne", TailNumber: "N1AA", ObservedAt: now,
+		ScheduledDeparture: new(now.Add(-2 * time.Hour)), ActualTakeoff: new(now.Add(-time.Hour)),
 		ScheduledArrival: new(now.Add(time.Hour))}
 	if err := store.Observe(ctx, parent, nil, []feeds.Flight{inbound}, nil); err != nil {
 		t.Fatal(err)
@@ -203,30 +205,55 @@ func TestTrackedRotationReceiverTrackDuringProviderOutage(t *testing.T) {
 		{At: at.Add(-time.Second), Latitude: 41, Longitude: -72, Source: "flightaware_aeroapi"},
 	}}
 	server := Server{Store: store, Source: source, Logger: logger}
-	load := func() []feeds.Position {
+	load := func() core.Details {
 		t.Helper()
 		raw := importTestRequest(t, server.Handler(), "GET", "/v1/flights/in?rotationOf=out", token, "", 200)
 		var result core.Details
 		if err := json.Unmarshal([]byte(raw), &result); err != nil {
 			t.Fatal(err)
 		}
-		return result.Telemetry
+		return result
 	}
-	points := load()
+	points := load().Telemetry
 	if len(points) != 2 || !points[0].At.Before(points[1].At) || points[1].Source != "operator_readsb" || !points[1].At.Equal(at) {
 		t.Fatalf("expected chronological provider and receiver positions, got %+v", points)
 	}
 	source.points = append(source.points, points[1])
-	if points := load(); len(points) != 2 {
+	if points := load().Telemetry; len(points) != 2 {
 		t.Fatalf("expected exact provider and receiver duplicates to collapse, got %+v", points)
 	}
+	rewriteInbound := func() {
+		parent.ObservedAt = parent.ObservedAt.Add(time.Millisecond)
+		inbound.ObservedAt = parent.ObservedAt
+		if err := store.Observe(ctx, parent, nil, []feeds.Flight{inbound}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source.beforeReturn = func() {
+		inbound.ScheduledDeparture = new(inbound.ScheduledDeparture.Add(30 * time.Minute))
+		rewriteInbound()
+	}
+	if result := load(); result.Flight.ScheduledDeparture == nil || !result.Flight.ScheduledDeparture.Equal(*inbound.ScheduledDeparture) ||
+		len(result.Telemetry) != 1 || result.Telemetry[0].Source != "operator_readsb" || !result.Telemetry[0].At.Equal(at) {
+		t.Fatalf("a schedule correction should retain only the receiver fix: %+v", result)
+	}
+	source.beforeReturn = nil
 	source.err = feeds.ErrUnavailable
-	if points := load(); len(points) != 1 || points[0].Source != "operator_readsb" {
+	if points := load().Telemetry; len(points) != 1 || points[0].Source != "operator_readsb" {
 		t.Fatalf("expected receiver position during provider outage, got %+v", points)
 	}
 	server.Source = nil
-	if points := load(); len(points) != 1 || points[0].Source != "operator_readsb" {
+	if points := load().Telemetry; len(points) != 1 || points[0].Source != "operator_readsb" {
 		t.Fatalf("expected receiver position without a provider, got %+v", points)
+	}
+	server.Source = source
+	source.err = nil
+	source.beforeReturn = func() {
+		inbound.Origin, inbound.OriginICAO = "PVD", "KPVD"
+		rewriteInbound()
+	}
+	if result := load(); result.Flight.Origin != inbound.Origin || result.Flight.OriginICAO != inbound.OriginICAO || len(result.Telemetry) != 0 {
+		t.Fatalf("a route correction should discard the old provider and receiver fixes: %+v", result)
 	}
 	importTestRequest(t, server.Handler(), "GET", "/v1/flights/in?rotationOf=out", other, "", 404)
 }
