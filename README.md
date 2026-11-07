@@ -13,11 +13,15 @@ Demo mode starts with synthetic flights and requires no credentials. Search for 
 - [Architecture and Flighty evidence](ARCHITECTURE.md)
 - [Mobile app](mobile/)
 
+This Passport card was exported through Android's normal share sheet in a release-emulator check. Its totals come from three synthetic, manually logged flights.
+
+![Passport card exported from the Android release app](docs/images/passport-release-sample.png)
+
 Run backend checks with Go 1.26 and a C compiler using `CGO_ENABLED=1 go test ./...`.
 
 Run `bash deploy/verify-demo.sh` with Docker Compose and `jq` to check a
 fresh demo deployment, including data persistence after container recreation.
 It uses a temporary Compose project and loopback port. The [verification
 workflow](.github/workflows/verify.yml) also checks the mobile JavaScript
-bundles, builds an Android preview, and compiles the iOS app and Live Activity
-extension for an unsigned simulator.
+bundles, builds an Android preview, and compiles the iOS simulator app and Live
+Activity extension.
