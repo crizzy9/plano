@@ -947,22 +947,31 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 			job.message.Body = truncate(delayForecastAlertBody(current.Number, forecast.DelayMinutes), 180)
 		}
 	}
-	apnsFamily := stateAlert && job.target.Platform == "ios"
-	if apnsFamily {
+	window := job.message.AdvisoryWindow
+	if window != nil && !hasAdvisoryEvidence {
+		s.removeObsoletePush(ctx, logger, job)
+		return
+	}
+	var apnsFamily string
+	if job.target.Platform == "ios" {
+		switch {
+		case stateAlert:
+			job.message.APNsCollapseID = hash("apns-flight-alert\x00" + job.owner + "\x00" + job.message.FlightID + "\x00" + flightEventKind)
+			apnsFamily = job.message.APNsCollapseID
+		case hasAdvisoryEvidence && flightEventKind == "" && job.message.Kind == push.Alert:
+			// Direct advisory revisions use their existing provider collapse ID.
+			apnsFamily = job.message.CollapseID
+		}
+	}
+	if apnsFamily != "" {
 		// Keep related APNs requests in submission order. A previous send can
 		// still be in flight after its superseded SQLite row was removed.
-		job.message.APNsCollapseID = hash("apns-flight-alert\x00" + job.owner + "\x00" + job.message.FlightID + "\x00" + flightEventKind)
-		key := hash(strings.ToLower(job.target.Token) + "\x00" + job.message.APNsCollapseID)
+		key := hash(strings.ToLower(job.target.Token) + "\x00" + apnsFamily)
 		if _, sending := s.apnsFlightAlerts.LoadOrStore(key, struct{}{}); sending {
 			s.deferFlightAlert(ctx, logger, job)
 			return
 		}
 		defer s.apnsFlightAlerts.Delete(key)
-	}
-	window := job.message.AdvisoryWindow
-	if window != nil && !hasAdvisoryEvidence {
-		s.removeObsoletePush(ctx, logger, job)
-		return
 	}
 	if hasAdvisoryEvidence {
 		revised, err := outboxAdvisoryRevised(ctx, s.db, job.id, time.Now(), window != nil)
@@ -977,7 +986,7 @@ FROM outbox o`+outboxFlightEvent+` LEFT JOIN flights f ON f.id=e.flight_id`+leas
 			return
 		}
 	}
-	if hasAdvisoryEvidence || apnsFamily || delayAlert {
+	if hasAdvisoryEvidence || apnsFamily != "" || delayAlert {
 		// A revision or revocation can retire the job while evidence is read
 		// or while a previous same-family send releases its gate.
 		var leaseExpiry int64

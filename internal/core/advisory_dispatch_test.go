@@ -11,6 +11,128 @@ import (
 	"github.com/crizzy9/plano/internal/push"
 )
 
+func TestDispatcherSerializesAPNsAdvisoryRevisions(t *testing.T) {
+	store, owner, id := dispatcherFixture(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	flight, err := store.Flight(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	flight.ObservedAt, flight.DestinationICAO, flight.Status = now, "KSFO", "taxi_out"
+	flight.ActualDeparture, flight.ScheduledArrival = new(now.Add(-time.Minute)), new(now.Add(35*time.Minute))
+	if err := store.Observe(ctx, flight, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Track(ctx, owner, id, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Register(ctx, owner, Device{Platform: "ios", Kind: "alert", Token: "ios-advisory-fixture"}, now); err != nil {
+		t.Fatal(err)
+	}
+	program := feeds.Advisory{ID: "tfms/gs/KSFO", Source: feeds.FAASWIM, Airport: "KSFO", Kind: "ground_stop",
+		Direction: "arrival", AirportContextOnly: true, Reason: "Ground stop due to thunderstorms.",
+		ObservedAt: now.Add(-time.Minute), StartsAt: new(now.Add(-10 * time.Minute)), EndsAt: new(now.Add(time.Hour))}
+	publishDispatchAdvisory(t, store, program, now)
+	jobs, err := store.claimForPlatform(ctx, now, 1, "ios")
+	if err != nil || len(jobs) != 1 || jobs[0].message.Body != program.Reason {
+		t.Fatalf("original advisory claims = %+v, error = %v", jobs, err)
+	}
+	original := jobs[0]
+	logger := slog.New(slog.DiscardHandler)
+	started := make(chan push.Message, 1)
+	release, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		store.deliver(ctx, pushFunc(func(ctx context.Context, _ push.Target, message push.Message) error {
+			started <- message
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}), logger, original)
+	}()
+	defer func() { cancel(); <-finished }()
+	var sentOriginal push.Message
+	select {
+	case sentOriginal = <-started:
+	case <-ctx.Done():
+		t.Fatal("original advisory did not reach transport")
+	}
+	effectiveCollapseID := func(message push.Message) string {
+		if message.APNsCollapseID != "" {
+			return message.APNsCollapseID
+		}
+		return message.CollapseID
+	}
+	family := effectiveCollapseID(sentOriginal)
+	if family == "" || sentOriginal.Body != program.Reason {
+		t.Fatalf("original advisory transport message = %+v", sentOriginal)
+	}
+
+	publishedAt := time.Now().UTC()
+	revision := program
+	revision.ObservedAt, revision.Reason = publishedAt, "Ground stop extended due to thunderstorms."
+	revision.EndsAt = new(now.Add(90 * time.Minute))
+	publishDispatchAdvisory(t, store, revision, publishedAt)
+	other := revision
+	other.ID, other.Kind, other.Reason = "tfms/gdp/KSFO", "ground_delay", "Ground delay due to runway capacity."
+	publishDispatchAdvisory(t, store, other, publishedAt)
+	jobs, err = store.claimForPlatform(ctx, publishedAt, 2, "ios")
+	if err != nil || len(jobs) != 2 {
+		t.Fatalf("revised and independent claims = %+v, error = %v", jobs, err)
+	}
+	var revised, independent deliveryJob
+	for _, job := range jobs {
+		switch job.message.Body {
+		case revision.Reason:
+			revised = job
+		case other.Reason:
+			independent = job
+		}
+	}
+	if revised.id == 0 || independent.id == 0 {
+		t.Fatalf("missing revised or independent advisory in %+v", jobs)
+	}
+	var sent []push.Message
+	sender := pushFunc(func(_ context.Context, _ push.Target, message push.Message) error {
+		sent = append(sent, message)
+		return nil
+	})
+	store.deliver(ctx, sender, logger, revised)
+	store.deliver(ctx, sender, logger, independent)
+	if len(sent) != 1 || sent[0].Body != other.Reason || effectiveCollapseID(sent[0]) == family {
+		t.Fatalf("advisory sends while original was in flight = %+v, want only the independent alert", sent)
+	}
+	var due, lease int64
+	var attempts, done int
+	if err := store.db.QueryRowContext(ctx, `SELECT due,lease_until,attempts,done FROM outbox WHERE id=?`, revised.id).
+		Scan(&due, &lease, &attempts, &done); err != nil {
+		t.Fatal(err)
+	}
+	if due <= publishedAt.UnixNano() || lease != 0 || attempts != 0 || done != 0 {
+		t.Fatalf("revision due=%d lease=%d attempts=%d done=%d, want deferred and unleased", due, lease, attempts, done)
+	}
+
+	close(release)
+	select {
+	case <-finished:
+	case <-ctx.Done():
+		t.Fatal("original advisory did not finish")
+	}
+	jobs, err = store.claimForPlatform(ctx, time.Unix(0, due), 1, "ios")
+	if err != nil || len(jobs) != 1 || jobs[0].id != revised.id || jobs[0].attempts != 0 {
+		t.Fatalf("reclaimed revision = %+v, error = %v", jobs, err)
+	}
+	store.deliver(ctx, sender, logger, jobs[0])
+	if len(sent) != 2 || sent[1].Body != revision.Reason || effectiveCollapseID(sent[1]) != family {
+		t.Fatalf("advisory sends = %+v, want the revision under original collapse ID %q", sent, family)
+	}
+}
+
 func TestDispatcherDropsSupersededAdvisoryAlerts(t *testing.T) {
 	for _, claimBeforeRevision := range []bool{false, true} {
 		name := "before claim"
