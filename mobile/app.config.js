@@ -12,6 +12,7 @@ module.exports = ({ config }) => ({
   slug: 'plano',
   scheme: 'plano',
   version: '0.1.0',
+  icon: './assets/icon.png',
   userInterfaceStyle: 'automatic',
   ios: {
     bundleIdentifier: process.env.PLANO_IOS_BUNDLE_ID || 'app.plano.mobile',
@@ -25,6 +26,11 @@ module.exports = ({ config }) => ({
   android: {
     package: process.env.PLANO_ANDROID_PACKAGE || 'app.plano.mobile',
     googleServicesFile: process.env.PLANO_GOOGLE_SERVICES_FILE || undefined,
+    adaptiveIcon: {
+      foregroundImage: './assets/adaptive-icon.png',
+      monochromeImage: './assets/adaptive-icon.png',
+      backgroundColor: '#006952',
+    },
   },
   plugins: [
     'expo-secure-store',

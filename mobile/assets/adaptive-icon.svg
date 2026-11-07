@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Plano adaptive aircraft foreground</title>
+  <!-- The aircraft fits inside the central 66 dp safe circle on a 108 dp layer. -->
+  <path fill="#FFFFFF" transform="translate(176 176) scale(28)"
+    d="M11,2h2v7l8,5v2l-8,-2v5l2,2v1l-3,-1l-3,1v-1l2,-2v-5l-8,2v-2l8,-5z" />
+</svg>
