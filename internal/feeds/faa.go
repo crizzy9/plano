@@ -166,8 +166,18 @@ func parseFAANAS(body []byte) ([]Advisory, error) {
 			for _, event := range events.rows {
 				reason := strings.TrimSpace(event.Reason)
 				start, end := first(event.Start, event.CTOPStart), first(event.End, event.CTOPEnd)
-				add(Advisory{Area: first(event.Area, event.Program), Kind: events.kind, Reason: reason, RawReason: reason,
-					StartsAt: faaTime(start, observed), EndsAt: faaTime(end, observed), DelayMinutes: faaMinutes(event.Average)}, start)
+				row := Advisory{Area: first(event.Area, event.Program), Kind: events.kind, Reason: reason, RawReason: reason,
+					StartsAt: faaTime(start, observed), EndsAt: faaTime(end, observed), DelayMinutes: faaMinutes(event.Average)}
+				if events.kind == "ctop" {
+					// Published HHMM parent clocks do not establish a calendar day.
+					if faaCTOPClock.MatchString(start) {
+						row.RawStartTime = start
+					}
+					if faaCTOPClock.MatchString(end) {
+						row.RawEndTime = end
+					}
+				}
+				add(row, start)
 			}
 		}
 	}
@@ -184,9 +194,10 @@ func (e faaAirportEvent) advisory(kind, direction string) Advisory {
 }
 
 var (
-	faaDuration = regexp.MustCompile(`(?i)^(?:(\d{1,2})\s*(?:hours?|hrs?|h)(?:\s+and\s+|\s*))?(?:(\d{1,4})\s*(?:minutes?|mins?|m))?$\z`)
-	notamRange  = regexp.MustCompile(`\b([0-9]{10}) ?[-‐‑–] ?([0-9]{10})(?: ?EST)?\b`)
-	faaZulu     = regexp.MustCompile(`^([0-9]{2})([0-9]{2})([0-9]{2})Z$\z`)
+	faaDuration  = regexp.MustCompile(`(?i)^(?:(\d{1,2})\s*(?:hours?|hrs?|h)(?:\s+and\s+|\s*))?(?:(\d{1,4})\s*(?:minutes?|mins?|m))?$\z`)
+	notamRange   = regexp.MustCompile(`\b([0-9]{10}) ?[-‐‑–] ?([0-9]{10})(?: ?EST)?\b`)
+	faaZulu      = regexp.MustCompile(`^([0-9]{2})([0-9]{2})([0-9]{2})Z$\z`)
+	faaCTOPClock = regexp.MustCompile(`^(?:[01][0-9]|2[0-3])[0-5][0-9]$\z`)
 )
 
 func faaMinutes(raw string) *int {

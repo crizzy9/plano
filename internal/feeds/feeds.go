@@ -108,6 +108,9 @@ type Advisory struct {
 	Area         string     `json:"area,omitempty"`
 	Direction    string     `json:"direction,omitempty"`
 	RawReason    string     `json:"rawReason,omitempty"`
+	// RawStartTime and RawEndTime retain CTOP source clocks without a calendar date.
+	RawStartTime string `json:"rawStartTime,omitempty"`
+	RawEndTime   string `json:"rawEndTime,omitempty"`
 	// AirportContextOnly identifies a reported program without flight membership.
 	AirportContextOnly bool `json:"airportContextOnly,omitempty"`
 	// TFMSProgramID is the target of a time-scoped FAA program cancellation.

@@ -23,6 +23,8 @@ The API requires an eligible account and plan. Check which endpoints, request vo
 
 Conditional NOTAM summaries retain the original text under `rawReason`. The English summary covers a limited set of common airport closure patterns. It does not resolve every exception or recurring schedule.
 
+The FAA's published CTOP example uses clock-only `HHMM` parent times. Valid four-digit parent clocks are retained as `rawStartTime` and `rawEndTime`; they do not acquire absolute dates from the polling time or constituent FCA windows. Recognized dated formats still populate `startsAt` and `endsAt`. The raw clocks describe source context, rather than a unique program occurrence or flight impact. The [live NAS check](../../ARCHITECTURE.md#verified-self-host-paths) contained no CTOP entries. [FAA's 2014 XML example](https://www.fly.faa.gov/fly/What_s_New/XML_is_changing) · [Served FAA DTD](https://www.fly.faa.gov/fly/dtd/AirportStatus.dtd)
+
 ## FAA SWIM and EUROCONTROL
 
 The optional `AdvisoryGateway` consumes a normalized HTTP snapshot from an operator-managed bridge. FAA SWIM Cloud Distribution Service requires a service access agreement and subscription. EUROCONTROL NM B2B is restricted by stakeholder eligibility, usage conditions, and TLS client certificates, with SOAP or plain XML requests and AMQP subscriptions. The bridge owns the upstream connection and schema translation. [FAA SWIFT and SCDS access](https://support.swim.faa.gov/hc/en-us) · [EUROCONTROL NM B2B access and protocols](https://www.eurocontrol.int/service/network-manager-business-business-b2b-web-services)
