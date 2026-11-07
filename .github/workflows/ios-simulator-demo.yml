@@ -1,0 +1,306 @@
+name: iOS simulator demo from compiled artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Approved Verify Plano run containing the compiled simulator app
+        type: string
+        required: true
+        default: '42366203033'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ios-simulator-demo-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ios:
+    name: Reuse the approved app and diagnose the base demo
+    if: github.repository == 'crizzy9/plano'
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+      PLANO_IOS_BUNDLE_ID: app.plano.verify
+      PLANO_IOS_APNS_ENVIRONMENT: development
+      # This workflow requests only the unchanged base flow, not an activity probe.
+      PLANO_IOS_ACTIVITY_PROBE: 'false'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.26.10'
+          cache-dependency-path: go.sum
+      - name: Check the diagnostic proxy with synthetic transports
+        run: python3 -m unittest discover -s mobile/scripts -p ios_demo_proxy_test.py
+      - name: Validate and restore only the approved compiled simulator app
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          umask 077
+          python3 - <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+          from pathlib import Path, PurePosixPath
+          import plistlib
+          import posixpath
+          import re
+          import stat
+          import struct
+          import subprocess
+          import sys
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          import zipfile
+
+          APPROVED_RUN = 42366203033
+          SOURCE = "65509de1bb398c72022457f26e463841d219d978"
+          REPOSITORY = "crizzy9/plano"
+          ARTIFACT = "plano-ios-compiled-simulator-app"
+          MAX_ARCHIVE = 512 * 1024 * 1024
+          MAX_EXPANDED = 1024 * 1024 * 1024
+          phase = "input validation"
+
+          def require(condition):
+              if not condition:
+                  raise ValueError()
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, response, code, message, headers, new_url):
+                  return None
+
+          api = urllib.request.build_opener(NoRedirect)
+
+          def api_request(path):
+              return urllib.request.Request("https://api.github.com/repos/" + REPOSITORY + path, headers={
+                  "Accept": "application/vnd.github+json", "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                  "X-GitHub-Api-Version": "2022-11-28",
+              })
+
+          def api_json(path):
+              with api.open(api_request(path), timeout=30) as response:
+                  data = response.read(1024 * 1024 + 1)
+              require(len(data) <= 1024 * 1024)
+              return json.loads(data)
+
+          def bounded_zip(path, max_entries, max_directory):
+              # Bound central-directory allocation before zipfile parses entries.
+              size = path.stat().st_size
+              with path.open("rb") as source:
+                  source.seek(max(0, size - 65557))
+                  tail = source.read(65557)
+              end = tail.rfind(b"PK\x05\x06")
+              require(end >= 0 and end + 22 <= len(tail))
+              _, disk, directory_disk, count, total, directory_size, offset, comment = struct.unpack_from("<4s4H2LH", tail, end)
+              require(end + 22 + comment == len(tail) and disk == directory_disk == 0)
+              require(count == total and 0 < total <= max_entries and directory_size <= max_directory)
+              require(offset + directory_size <= size - len(tail) + end)
+              archive = zipfile.ZipFile(path)
+              require(len(archive.infolist()) == total)
+              return archive
+
+          def regular(entry):
+              return not entry.is_dir() and stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG)
+
+          def sha256(path):
+              with path.open("rb") as source:
+                  return hashlib.file_digest(source, "sha256").hexdigest()
+
+          try:
+              text = os.environ["SOURCE_RUN_ID"]
+              require(re.fullmatch(r"[1-9][0-9]{0,19}", text) is not None and int(text) == APPROVED_RUN)
+              require(os.environ["GITHUB_REPOSITORY"] == REPOSITORY)
+              require(re.fullmatch(r"[0-9a-f]{40}", os.environ["GITHUB_SHA"]) is not None)
+              bundle_id = os.environ["PLANO_IOS_BUNDLE_ID"]
+              require(bundle_id == "app.plano.verify")
+
+              phase = "app source equivalence"
+              subprocess.run(["git", "merge-base", "--is-ancestor", SOURCE, "HEAD"], check=True)
+              # All app/build inputs must match, including App.tsx, src, modules,
+              # targets, assets, plugins, package locks and app configuration.
+              subprocess.run(["git", "diff", "--exit-code", SOURCE, "HEAD", "--", "mobile", ":(exclude)mobile/scripts"],
+                             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              # Keep every base-flow assertion and deadline exactly as compiled-run evidence used it.
+              subprocess.run(["git", "diff", "--exit-code", SOURCE, "HEAD", "--", "mobile/scripts/ios-demo-flow.yaml"],
+                             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+              phase = "source run metadata"
+              run = api_json("/actions/runs/" + text)
+              require(run["id"] == APPROVED_RUN and run["status"] == "completed" and run["head_sha"] == SOURCE)
+              require(run["path"] == ".github/workflows/verify.yml" and run["head_branch"] == "main")
+              require(run["event"] in ("push", "workflow_dispatch"))
+              require(run["repository"]["full_name"] == REPOSITORY and run["head_repository"]["full_name"] == REPOSITORY)
+              repository_id = run["repository"]["id"]
+              require(run["head_repository"]["id"] == repository_id)
+              listing = api_json("/actions/runs/" + text + "/artifacts?per_page=100")
+              require(listing["total_count"] <= 100 and len(listing["artifacts"]) == listing["total_count"])
+              matches = [item for item in listing["artifacts"] if item["name"] == ARTIFACT]
+              require(len(matches) == 1)
+              artifact = matches[0]
+              origin = artifact["workflow_run"]
+              require(origin["id"] == APPROVED_RUN and origin["head_sha"] == SOURCE)
+              require(origin["repository_id"] == origin["head_repository_id"] == repository_id)
+              require(artifact["expired"] is False and type(artifact["id"]) is int and artifact["id"] > 0)
+              require(type(artifact["size_in_bytes"]) is int and 0 < artifact["size_in_bytes"] <= MAX_ARCHIVE)
+              require(re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"]) is not None)
+              expires = datetime.datetime.fromisoformat(artifact["expires_at"].replace("Z", "+00:00"))
+              require(expires > datetime.datetime.now(datetime.timezone.utc))
+
+              phase = "artifact download"
+              work = Path(os.environ["RUNNER_TEMP"]) / "plano-ios-artifact-reuse"
+              work.mkdir(mode=0o700)
+              archive_path = work / "artifact.zip"
+              # GitHub's API returns a short-lived redirect. Do not forward the
+              # API credential to the download host or log the signed location.
+              try:
+                  with api.open(api_request("/actions/artifacts/" + str(artifact["id"]) + "/zip"), timeout=30):
+                      raise ValueError()
+              except urllib.error.HTTPError as response:
+                  require(response.code == 302)
+                  location = response.headers["Location"]
+                  response.close()
+              address = urllib.parse.urlsplit(location)
+              require(address.scheme == "https" and address.hostname is not None and address.username is None and address.password is None)
+              # Every redirect must retain HTTPS; no Authorization header is used here.
+              class HTTPSRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self, request, response, code, message, headers, new_url):
+                      require(urllib.parse.urlsplit(new_url).scheme == "https")
+                      return super().redirect_request(request, response, code, message, headers, new_url)
+              downloads = urllib.request.build_opener(HTTPSRedirect)
+              deadline, count = time.monotonic() + 180, 0
+              with downloads.open(location, timeout=30) as response, archive_path.open("xb") as output:
+                  while True:
+                      require(time.monotonic() < deadline)
+                      block = response.read(1024 * 1024)
+                      if not block:
+                          break
+                      count += len(block)
+                      require(count <= MAX_ARCHIVE)
+                      output.write(block)
+              require(count == artifact["size_in_bytes"] and "sha256:" + sha256(archive_path) == artifact["digest"])
+
+              phase = "artifact outer ZIP and manifest"
+              app_archive = work / "Plano.app.zip"
+              with bounded_zip(archive_path, 2, 16 * 1024) as outer:
+                  entries = outer.infolist()
+                  require(len(entries) == 2 and {entry.filename for entry in entries} == {"manifest.json", "Plano.app.zip"})
+                  require(all(regular(entry) and not entry.flag_bits & 1 for entry in entries))
+                  require(all(entry.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) for entry in entries))
+                  require(0 < outer.getinfo("manifest.json").file_size <= 4096)
+                  require(0 < outer.getinfo("Plano.app.zip").file_size <= MAX_ARCHIVE)
+                  manifest = json.loads(outer.read("manifest.json"))
+                  require(set(manifest) == {"source_commit", "bundle_id", "archive", "archive_sha256"})
+                  require(manifest["source_commit"] == SOURCE and manifest["bundle_id"] == bundle_id and manifest["archive"] == "Plano.app.zip")
+                  require(re.fullmatch(r"[0-9a-f]{64}", manifest["archive_sha256"]) is not None)
+                  with outer.open("Plano.app.zip") as source, app_archive.open("xb") as output:
+                      count = 0
+                      while block := source.read(1024 * 1024):
+                          count += len(block)
+                          require(count <= MAX_ARCHIVE)
+                          output.write(block)
+              require(sha256(app_archive) == manifest["archive_sha256"])
+
+              phase = "app ZIP paths and expansion bounds"
+              with bounded_zip(app_archive, 20000, 8 * 1024 * 1024) as archive:
+                  entries, names, links, expanded = archive.infolist(), set(), {}, 0
+                  for entry in entries:
+                      name = entry.filename.rstrip("/")
+                      parts = name.split("/")
+                      require(name and "\\" not in name and "\x00" not in name and not name.startswith("/"))
+                      require(all(part not in ("", ".", "..") for part in parts))
+                      require(name.casefold() not in names and not entry.flag_bits & 1)
+                      require(entry.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED))
+                      names.add(name.casefold())
+                      app_path = name == "Plano.app" or name.startswith("Plano.app/")
+                      resource_path = name in ("__MACOSX", "__MACOSX/Plano.app", "__MACOSX/._Plano.app") or name.startswith("__MACOSX/Plano.app/")
+                      require(app_path or resource_path)
+                      mode = stat.S_IFMT(entry.external_attr >> 16)
+                      require(mode in (0, stat.S_IFREG, stat.S_IFDIR, stat.S_IFLNK))
+                      expanded += entry.file_size
+                      require(expanded <= MAX_EXPANDED and entry.file_size <= MAX_ARCHIVE)
+                      if mode == stat.S_IFLNK:
+                          require(app_path and name != "Plano.app" and entry.file_size <= 4096)
+                          target = archive.read(entry).decode("utf-8")
+                          require(target and not target.startswith("/") and "\\" not in target and "\x00" not in target)
+                          links[name] = target
+                  for entry in entries:
+                      parts = PurePosixPath(entry.filename).parts
+                      require(not any("/".join(parts[:end]) in links for end in range(1, len(parts))))
+                  for name in links:
+                      value, seen = name, set()
+                      while True:
+                          parts = value.split("/")
+                          prefix = next(("/".join(parts[:end]) for end in range(1, len(parts) + 1)
+                                         if "/".join(parts[:end]) in links), None)
+                          if prefix is None:
+                              break
+                          require(prefix not in seen)
+                          seen.add(prefix)
+                          value = posixpath.normpath(posixpath.join(posixpath.dirname(prefix), links[prefix], *parts[len(prefix.split("/")):]))
+                          require(value == "Plano.app" or value.startswith("Plano.app/"))
+                  require("plano.app/info.plist" in names and "plano.app/plano" in names)
+                  require("plano.app/plugins/planoactivity.appex/info.plist" in names)
+
+              phase = "app restoration and bundle verification"
+              destination = Path(os.environ["RUNNER_TEMP"]) / "plano-ios/Build/Products/Release-iphonesimulator"
+              destination.mkdir(parents=True)
+              subprocess.run(["/usr/bin/ditto", "-x", "-k", str(app_archive), str(destination)], check=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              app = destination / "Plano.app"
+              for target, expected_id, executable in ((app, bundle_id, "Plano"),
+                      (app / "PlugIns/PlanoActivity.appex", bundle_id + ".activity", "PlanoActivity")):
+                  with (target / "Info.plist").open("rb") as source:
+                      info = plistlib.load(source)
+                  require(info["CFBundleIdentifier"] == expected_id and info["CFBundleExecutable"] == executable)
+                  require((target / executable).is_file() and (target / executable).stat().st_size > 0)
+                  subprocess.run(["codesign", "--verify", "--deep", "--strict", str(target)], check=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              provenance = {"compiled_app_source": SOURCE, "compiled_app_run": APPROVED_RUN,
+                            "backend_and_harness_source": os.environ["GITHUB_SHA"], "bundle_id": bundle_id,
+                            "artifact_digest": artifact["digest"], "app_archive_sha256": manifest["archive_sha256"],
+                            "artifact_expires_at": expires.isoformat(), "activity_probe": "not-requested"}
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                  summary.write("Compiled simulator app reused after source, digest, path and bundle checks.\n\n```json\n" +
+                                json.dumps(provenance, indent=2, sort_keys=True) + "\n```\n")
+              print("Approved simulator artifact restored; current-commit backend and unchanged base flow are next.")
+          except Exception:
+              raise SystemExit("iOS artifact reuse failed during " + phase + ".") from None
+          PY
+      - name: Build the current backend and run the unchanged base iOS flow
+        timeout-minutes: 22
+        run: bash deploy/verify-ios-demo.sh
+      - name: Keep only the existing iOS demo test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plano-ios-simulator-demo
+          path: |
+            ${{ runner.temp }}/plano-ios-demo-evidence/*.png
+            ${{ runner.temp }}/plano-ios-demo-evidence/*-codesign.txt
+            ${{ runner.temp }}/plano-ios-demo-evidence/*-simulator-entitlements.txt
+            ${{ runner.temp }}/plano-ios-demo-evidence/device.json
+            ${{ runner.temp }}/plano-ios-demo-evidence/demo.log
+            ${{ runner.temp }}/plano-ios-demo-evidence/proxy.log
+            ${{ runner.temp }}/plano-ios-demo-evidence/maestro.log
+            ${{ runner.temp }}/plano-ios-demo-evidence/ios.log
+            ${{ runner.temp }}/plano-ios-demo-evidence/results.xml
+            ${{ runner.temp }}/plano-ios-demo-evidence/maestro/
+            ${{ runner.temp }}/plano-ios-demo-evidence/activity/status.json
+          if-no-files-found: warn
+          retention-days: 7
