@@ -209,9 +209,19 @@ private final class PlanoActivityCoordinator {
   }()
 
   func restore() {
-    guard mayRestore, registration == nil, retirement == nil, let saved = LiveKeychain.load(),
-          saved.baseURL != nil, saved.binding != nil else { return }
-    install(saved)
+    guard registration == nil, configuring == nil, retirement == nil else { return }
+    if mayRestore {
+      do {
+        if let saved = try LiveKeychain.loadChecked(), saved.baseURL != nil, saved.binding != nil {
+          install(saved)
+          return
+        }
+      } catch {
+        // An inaccessible Keychain does not establish that the session ended.
+        return
+      }
+    }
+    dismissUnregisteredActivities()
   }
 
   func resume() {
@@ -243,7 +253,12 @@ private final class PlanoActivityCoordinator {
     if target.matches(registration) { return }
     guard change == generation else { throw RegistrationError.superseded }
     configuring = nil
-    try LiveKeychain.save(next)
+    do {
+      try LiveKeychain.save(next)
+    } catch {
+      restore()
+      throw error
+    }
     install(next)
   }
 
@@ -269,6 +284,23 @@ private final class PlanoActivityCoordinator {
       for await activity in Activity<PlanoActivityAttributes>.activityUpdates {
         guard isCurrent(current) else { break }
         reconcileActivities(including: activity, using: registration, generation: current)
+      }
+    }
+  }
+
+  private func dismissUnregisteredActivities() {
+    let current = generation
+    for activity in knownActivities() where isLive(activity) {
+      _ = beginEnding(activity, generation: current)
+    }
+    guard activities == nil else { return }
+    // APNs can deliver an already accepted start after local retirement.
+    // Observe those handles only to dismiss them. A new registration takes
+    // over this stream and applies its own binding checks.
+    activities = Task {
+      for await activity in Activity<PlanoActivityAttributes>.activityUpdates {
+        guard isCurrent(current) else { break }
+        if isLive(activity) { _ = beginEnding(activity, generation: current) }
       }
     }
   }
@@ -303,17 +335,18 @@ private final class PlanoActivityCoordinator {
     guard !oldActivities.isEmpty else { return }
     let ending = Task {
       for activity in oldActivities { await activity.end(nil, dismissalPolicy: .immediate) }
+      retirement = nil
     }
     retirement = ending
     await ending.value
-    retirement = nil
   }
 
   func clear() async {
     let oldActivities = knownActivities()
-    _ = invalidateRegistration()
+    let retired = invalidateRegistration()
     try? LiveKeychain.clear()
     await retireActivities(oldActivities)
+    if generation == retired { restore() }
   }
 
   func nextPushRevision() throws -> String {
@@ -328,7 +361,7 @@ private final class PlanoActivityCoordinator {
     let ownsActivities = target.matches(registration) || target.matches(configuring) ||
       (registration == nil && configuring == nil && target.matches(try? saved.get()))
     let oldActivities = ownsActivities ? knownActivities() : []
-    if ownsActivities { _ = invalidateRegistration() }
+    let retired = ownsActivities ? invalidateRegistration() : nil
 
     // Allocate the floor in the same actor turn that stops matching uploads.
     // ActivityKit teardown can suspend and let a later enable start work.
@@ -336,7 +369,10 @@ private final class PlanoActivityCoordinator {
       if target.matches(try saved.get()) { try LiveKeychain.clear() }
       return try nextPushRevision()
     }
-    if ownsActivities { await retireActivities(oldActivities) }
+    if let retired {
+      await retireActivities(oldActivities)
+      if generation == retired { restore() }
+    }
     return try floor.get()
   }
 
@@ -522,8 +558,8 @@ private final class PlanoActivityCoordinator {
         if http.statusCode == 404, http.mimeType == "application/json",
            (try? JSONDecoder().decode(DeviceRegistrationFailure.self, from: data))?.error == "record not found",
            case let .update(activityID, flightID) = slot,
-           let activity = Activity<PlanoActivityAttributes>.activities.first(where: {
-             $0.id == activityID && $0.attributes.flightId == flightID && $0.attributes.activityBinding == binding
+           let activity = knownActivities().first(where: {
+             $0.id == activityID && $0.attributes.flightId == flightID && $0.attributes.activityBinding == binding && isLive($0)
            }) {
           await endActivity(activity)
         }

@@ -65,6 +65,15 @@ func TestDeviceLiveSlotRequestValidation(t *testing.T) {
 			if w.Code != tt.want {
 				t.Fatalf("status %d, want %d: %s", w.Code, tt.want, w.Body.String())
 			}
+			if tt.want == http.StatusNotFound {
+				var failure struct {
+					Error string `json:"error"`
+				}
+				if w.Header().Get("Content-Type") != "application/json" ||
+					json.Unmarshal(w.Body.Bytes(), &failure) != nil || failure.Error != "record not found" {
+					t.Fatalf("unexpected response for an untracked Live Activity: %s", w.Body.String())
+				}
+			}
 		})
 	}
 }
