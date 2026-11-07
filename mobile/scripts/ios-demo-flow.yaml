@@ -1,0 +1,50 @@
+appId: ${APP_ID}
+name: Plano iOS demo
+---
+# The caller installs Plano on a fresh simulator and supplies its trusted TLS fixture.
+- launchApp:
+    stopApp: true
+- assertVisible: "Connect a server"
+- tapOn: "Connect a server"
+- assertVisible: 'https://plano\.example\.org'
+- tapOn: 'https://plano\.example\.org'
+- inputText: ${SERVER_URL}
+- hideKeyboard
+- tapOn: "Connect to server"
+- extendedWaitUntil:
+    visible: "Find a flight"
+    timeout: 30000
+# Maestro's back command supports Android and Web. Relaunch returns to Home on iOS.
+- launchApp:
+    stopApp: true
+- extendedWaitUntil:
+    visible: "Find a flight"
+    timeout: 30000
+- tapOn: "Find a flight"
+- tapOn: "UA123"
+- inputText: "UA123"
+- hideKeyboard
+- tapOn: "Tomorrow"
+- tapOn: "Search flights"
+- extendedWaitUntil:
+    visible: "UA123, SFO to EWR, Scheduled"
+    timeout: 30000
+- tapOn: "UA123, SFO to EWR, Scheduled"
+- extendedWaitUntil:
+    visible: "Track flight"
+    timeout: 30000
+- tapOn: "Track flight"
+- extendedWaitUntil:
+    visible: "Stop tracking"
+    timeout: 30000
+- takeScreenshot: ${EVIDENCE_DIR}/ios-tracked-detail
+- launchApp:
+    stopApp: true
+- extendedWaitUntil:
+    visible: "View UA123"
+    timeout: 30000
+- takeScreenshot: ${EVIDENCE_DIR}/ios-relaunch-home
+- tapOn: "View UA123"
+- extendedWaitUntil:
+    visible: "Stop tracking"
+    timeout: 30000

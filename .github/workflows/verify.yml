@@ -114,7 +114,7 @@ jobs:
   ios:
     name: iOS simulator and widget
     runs-on: macos-26
-    timeout-minutes: 50
+    timeout-minutes: 65
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
       PLANO_IOS_BUNDLE_ID: app.plano.verify
@@ -137,6 +137,10 @@ jobs:
             modules/plano-live/ios/ActivityIdentity.swift scripts/ActivityIdentityFixture.swift \
             -o "$RUNNER_TEMP/plano-activity-identity-fixture"
           "$RUNNER_TEMP/plano-activity-identity-fixture"
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.26.10'
+          cache-dependency-path: go.sum
       - run: npm ci
       - name: Generate the Xcode workspace
         run: |
@@ -155,37 +159,14 @@ jobs:
           test -s "$extension/PlanoActivity"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")" = "$PLANO_IOS_BUNDLE_ID"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$extension/Info.plist")" = "$PLANO_IOS_BUNDLE_ID.activity"
-      - name: Launch the app on an installed iPhone simulator
-        timeout-minutes: 5
-        run: |
-          app="$RUNNER_TEMP/plano-ios/Build/Products/Release-iphonesimulator/Plano.app"
-          device=$(xcrun simctl list devices available --json | jq -er '
-            [.devices | to_entries[]
-             | select(.key | startswith("com.apple.CoreSimulator.SimRuntime.iOS-26-4"))
-             | .value[]
-             | select(.isAvailable and .state == "Shutdown" and (.name | startswith("iPhone")))]
-            | .[0].udid | strings')
-          test -n "$device"
-          cleanup() {
-            xcrun simctl terminate "$device" "$PLANO_IOS_BUNDLE_ID" >/dev/null 2>&1 || true
-            xcrun simctl shutdown "$device" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          xcrun simctl boot "$device"
-          xcrun simctl bootstatus "$device" -b
-          xcrun simctl install "$device" "$app"
-          launched=$(xcrun simctl launch --terminate-running-process "$device" "$PLANO_IOS_BUNDLE_ID")
-          printf '%s\n' "$launched"
-          pid=${launched##*: }
-          [[ "$pid" =~ ^[0-9]+$ ]]
-          sleep 10
-          kill -0 "$pid"
-          ps -p "$pid" -o command= | grep -F '/Plano.app/Plano'
-          xcrun simctl io "$device" screenshot "$RUNNER_TEMP/plano-ios-launch.png"
-      - name: Keep the iOS launch screenshot
+      - name: Connect and track through the iOS app
+        timeout-minutes: 15
+        run: bash ../deploy/verify-ios-demo.sh
+      - name: Keep the iOS demo evidence
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: plano-ios-simulator-launch
-          path: ${{ runner.temp }}/plano-ios-launch.png
-          if-no-files-found: error
+          name: plano-ios-simulator-demo
+          path: ${{ runner.temp }}/plano-ios-demo-evidence/
+          if-no-files-found: warn
           retention-days: 7
