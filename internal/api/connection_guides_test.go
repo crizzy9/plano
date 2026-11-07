@@ -46,8 +46,13 @@ func TestBuiltInConnectionMapsUseReportedAirportCodes(t *testing.T) {
 					t.Fatalf("unexpected map fallback %+v, configured=%v", route, configured)
 				}
 			}
-			in := feeds.Flight{Destination: tc.iata}
-			out := feeds.Flight{Origin: tc.iata, OriginICAO: "KXZZ"}
+			in := feeds.Flight{Destination: "ZZZ", DestinationICAO: tc.icao}
+			out := feeds.Flight{Origin: tc.iata, OriginICAO: tc.icao}
+			if route, _ := rules.routeForConnection(in, out); route.MapURL != tc.mapURL {
+				t.Fatalf("shared ICAO received map %+v, want %s", route, tc.mapURL)
+			}
+			in = feeds.Flight{Destination: tc.iata}
+			out = feeds.Flight{Origin: tc.iata, OriginICAO: "KXZZ"}
 			if route, _ := rules.routeForConnection(in, out); route.MapURL != "" {
 				t.Fatalf("conflicting airport received map %+v", route)
 			}

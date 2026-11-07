@@ -65,20 +65,13 @@ func rankConnectionSuggestions(candidates []core.ConnectionSuggestionFlight, now
 			} else if gap > core.ScheduleConnectionWindow {
 				continue
 			}
-			airport := in.Destination
-			if airport == "" {
-				airport = out.Origin
-			}
-			if airport == "" {
-				airport = in.DestinationICAO
-			}
 			timeZone := out.OriginTimeZone
 			if timeZone == "" {
 				timeZone = in.DestinationTimeZone
 			}
 			matches = append(matches, connectionSuggestion{
 				Inbound: in.ID, Outbound: out.ID, InboundNumber: in.Number, OutboundNumber: out.Number,
-				Airport: airport, TimeZone: timeZone,
+				Airport: connectionAirportLabel(in, out), TimeZone: timeZone,
 				ScheduledArrival: in.ScheduledArrival.UTC(), ScheduledDeparture: out.ScheduledDeparture.UTC(),
 				ScheduledMinutes: int(gap / time.Minute), Source: source, departure: *departure,
 			})

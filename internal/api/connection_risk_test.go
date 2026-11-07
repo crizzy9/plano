@@ -96,6 +96,91 @@ func TestConnectionAirportsUseVerifiedICAOFirst(t *testing.T) {
 	}
 }
 
+func TestConnectionRoutesAndForecastsUseSharedICAO(t *testing.T) {
+	airportGraph := func(code, mapURL, instruction string, base, forecast int) string {
+		return fmt.Sprintf(`{
+			"codes":[%q], "mapUrl":%q,
+			"nodes":[
+				{"id":"terminal-a", "label":"Terminal A", "terminal":"A"},
+				{"id":"a1", "label":"Gate A1", "terminal":"A", "gate":"A1"},
+				{"id":"b1", "label":"Gate B1", "terminal":"B", "gate":"B1"}
+			],
+			"edges":[
+				{"from":"terminal-a", "to":"b1", "minutes":%d, "instruction":%q},
+				{"from":"a1", "to":"b1", "minutes":%d, "instruction":"Forecast gate route."}
+			]
+		}`, code, mapURL, base, instruction, forecast)
+	}
+	const iataMap, icaoMap = "https://iata.example/map", "https://icao.example/map"
+	const iataInstruction, icaoInstruction = "Follow the IATA graph route.", "Follow the ICAO graph route."
+	iataGraph := airportGraph("XZZ", iataMap, iataInstruction, 14, 20)
+	bothGraphs := iataGraph + "," + airportGraph("KABC", icaoMap, icaoInstruction, 30, 55)
+	laxGraph := airportGraph("LAX", iataMap, iataInstruction, 14, 20)
+	klaxGraph := airportGraph("KLAX", iataMap, iataInstruction, 14, 20)
+	now := time.Date(2026, time.November, 5, 12, 0, 0, 0, time.UTC)
+	arrival, departure := now.Add(time.Hour), now.Add(110*time.Minute)
+	predictArrivalGate := func(_ context.Context, _ feeds.Flight, arrival bool, _ time.Time) (*core.GatePrediction, error) {
+		if arrival {
+			return &core.GatePrediction{Gate: "A1"}, nil
+		}
+		return nil, nil
+	}
+	type routeExpectation struct {
+		airport, mapURL, instruction string
+		base, forecast, reserve      int
+		precision, risk              string
+	}
+	verifiedRoute := routeExpectation{"KABC", icaoMap, icaoInstruction, 30, 55, 0, "mixed", "Risky"}
+	agreedRoute := verifiedRoute
+	agreedRoute.airport = "XZZ"
+	genericRoute := routeExpectation{"KABC", "", "Follow connections signage at KABC.", 65, 0, 15, "generic", "Risky"}
+	iataRoute := routeExpectation{"XZZ", iataMap, iataInstruction, 14, 20, 0, "mixed", "Relaxed"}
+	for _, tc := range []struct {
+		name, inCode, outCode, graphs string
+		want                          routeExpectation
+	}{
+		{"conflicting display codes use the ICAO graph", "XZZ", "ABC", bothGraphs, verifiedRoute},
+		{"matching display codes still use the ICAO graph", "XZZ", "XZZ", bothGraphs, agreedRoute},
+		{"conflicting display codes without ICAO graph use generic timing", "XZZ", "ABC", iataGraph, genericRoute},
+		{"missing inbound display code leaves only the common ICAO", "", "XZZ", iataGraph, genericRoute},
+		{"missing outbound display code leaves only the common ICAO", "XZZ", "", iataGraph, genericRoute},
+		{"matching display codes allow IATA-only graph", "XZZ", "XZZ", iataGraph, iataRoute},
+		{"outbound uses the common ICAO as its display code", "XZZ", "KABC", iataGraph, iataRoute},
+		{"inbound uses the common ICAO as its display code", "KABC", "XZZ", iataGraph, iataRoute},
+		{"matching IATA identifies a different known airport", "LAX", "LAX", laxGraph, genericRoute},
+		{"alternate ICAO identifies a different known airport", "KABC", "KLAX", klaxGraph, genericRoute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rules, err := LoadConnectionRules(strings.NewReader(`{"version":1,"airports":[` + tc.graphs + `]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			in := feeds.Flight{Destination: tc.inCode, DestinationICAO: "KABC", ArrivalTerminal: "A", ScheduledArrival: &arrival}
+			out := feeds.Flight{Origin: tc.outCode, OriginICAO: "KABC", DepartureTerminal: "B", DepartureGate: "B1", ScheduledDeparture: &departure}
+			result, assessment, err := (Server{ConnectionRules: rules}).assessConnection(t.Context(), in, out, now, predictArrivalGate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := tc.want
+			if result.Airport != want.airport || result.MapURL != want.mapURL || result.TransferMinutes != want.base ||
+				result.BoardingReserveMinutes != want.reserve || result.Precision != want.precision ||
+				!slices.Contains(result.Instructions, want.instruction) || slices.Contains(result.Instructions, "Forecast gate route.") {
+				t.Fatalf("displayed route = %+v, want %+v", result, want)
+			}
+			if want.forecast == 0 {
+				if result.ForecastTransferMinutes != nil {
+					t.Fatalf("generic fallback used a configured gate forecast: %d", *result.ForecastTransferMinutes)
+				}
+			} else if result.ForecastTransferMinutes == nil || *result.ForecastTransferMinutes != want.forecast {
+				t.Fatalf("forecast from the wrong graph: %+v, want %d min", result, want.forecast)
+			}
+			if result.Risk != want.risk || assessment.Risk != want.risk {
+				t.Fatalf("risk = %s, monitor risk = %s, want %s", result.Risk, assessment.Risk, want.risk)
+			}
+		})
+	}
+}
+
 func TestConnectionForecastAffectsRiskWithoutReplacingRoute(t *testing.T) {
 	ctx := t.Context()
 	store, err := core.Open(filepath.Join(t.TempDir(), "plano.db"))

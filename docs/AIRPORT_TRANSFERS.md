@@ -178,6 +178,12 @@ configured airport. If a gate is unknown and its terminal has a checkpoint,
 Plano can use that checkpoint. The result distinguishes gate, mixed, and
 terminal routing precision.
 
+When both legs report the same ICAO airport, Plano looks for that airport's
+configured graph first. A compatible display code can match a graph listed
+under that code. When the display codes disagree or identify a different
+airport in Plano's built-in guides, Plano shows the shared ICAO code and uses
+the same airport for the route, map, and gate forecast.
+
 Plano uses its general transfer estimate when the airport has no graph,
 when the graph has no path between the available checkpoints, or when both
 endpoints reduce to the same terminal checkpoint. An airport map link can

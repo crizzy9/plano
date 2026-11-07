@@ -103,12 +103,13 @@ func TestConnectionSuggestionEligibility(t *testing.T) {
 	now := time.Date(2026, time.November, 6, 12, 0, 0, 0, time.UTC)
 	latest := now.Add(connectionSuggestionHorizon)
 	for _, test := range []struct {
-		name      string
-		departure time.Duration
-		gap       time.Duration
-		booked    bool
-		want      string
-		change    func(in, out *feeds.Flight)
+		name        string
+		departure   time.Duration
+		gap         time.Duration
+		booked      bool
+		want        string
+		wantAirport string
+		change      func(in, out *feeds.Flight)
 	}{
 		{name: "schedule window boundary", departure: time.Hour, gap: 8 * time.Hour, want: "schedule"},
 		{name: "outside schedule window", departure: time.Hour, gap: 8*time.Hour + time.Minute},
@@ -143,8 +144,16 @@ func TestConnectionSuggestionEligibility(t *testing.T) {
 		{name: "verified airports conflict", departure: time.Hour, gap: time.Hour, booked: true, change: func(in, out *feeds.Flight) {
 			in.DestinationICAO, out.OriginICAO = "KDEN", "KBJC"
 		}},
-		{name: "matching verified airports", departure: time.Hour, gap: time.Hour, want: "schedule", change: func(in, out *feeds.Flight) {
+		{name: "matching verified airports", departure: time.Hour, gap: time.Hour, want: "schedule", wantAirport: "KDEN", change: func(in, out *feeds.Flight) {
 			in.Destination, out.Origin = "", ""
+			in.DestinationICAO, out.OriginICAO = "KDEN", "KDEN"
+		}},
+		{name: "matching ICAO with conflicting display codes", departure: time.Hour, gap: time.Hour, want: "schedule", wantAirport: "KDEN", change: func(in, out *feeds.Flight) {
+			in.Destination, out.Origin = "BJC", "DEN"
+			in.DestinationICAO, out.OriginICAO = "KDEN", "KDEN"
+		}},
+		{name: "matching display codes identify another airport", departure: time.Hour, gap: time.Hour, want: "schedule", wantAirport: "KDEN", change: func(in, out *feeds.Flight) {
+			in.Destination, out.Origin = "LAX", "LAX"
 			in.DestinationICAO, out.OriginICAO = "KDEN", "KDEN"
 		}},
 	} {
@@ -179,6 +188,9 @@ func TestConnectionSuggestionEligibility(t *testing.T) {
 			}
 			if len(got) != 1 || got[0].Inbound != in.ID || got[0].Outbound != out.ID || got[0].Source != test.want {
 				t.Fatalf("expected %s connection, got %+v", test.want, got)
+			}
+			if test.wantAirport != "" && got[0].Airport != test.wantAirport {
+				t.Fatalf("got airport %q, want %q", got[0].Airport, test.wantAirport)
 			}
 		})
 	}

@@ -245,11 +245,37 @@ func connectionAirportsKnown(in, out feeds.Flight) bool {
 	return in.DestinationICAO != "" && out.OriginICAO != "" || in.Destination != "" && out.Origin != ""
 }
 
-func estimateConnectionRoute(in, out feeds.Flight, route ConnectionRoute, configured bool) connectionResult {
-	airport := in.Destination
-	if airport == "" {
-		airport = in.DestinationICAO
+func sharedConnectionICAO(in, out feeds.Flight) string {
+	if in.DestinationICAO == out.OriginICAO {
+		return connectionCode(in.DestinationICAO)
 	}
+	return ""
+}
+
+func connectionAirportLabel(in, out feeds.Flight) string {
+	airport := connectionCode(in.Destination)
+	if icao := sharedConnectionICAO(in, out); icao != "" {
+		onward := connectionCode(out.Origin)
+		if airport == icao {
+			airport = onward
+		}
+		if airport == "" || (onward != icao && onward != airport) {
+			return icao
+		}
+		for _, guide := range airportConnectionGuides {
+			if guide.icao != icao && (airport == guide.iata || airport == guide.icao) {
+				return icao
+			}
+		}
+	}
+	if airport == "" {
+		return connectionCode(in.DestinationICAO)
+	}
+	return airport
+}
+
+func estimateConnectionRoute(in, out feeds.Flight, route ConnectionRoute, configured bool) connectionResult {
+	airport := connectionAirportLabel(in, out)
 	transfer := 50
 	instructions := append([]string{}, route.Instructions...)
 	if len(instructions) == 0 {
@@ -294,7 +320,7 @@ func (rules *ConnectionRules) forecastTransfer(in, out feeds.Flight, precision s
 	if departureGate == "" && departure != nil {
 		departureGate = departure.Gate
 	}
-	forecast, ok := rules.Route(in.Destination, in.DestinationICAO, in.ArrivalTerminal, arrivalGate, out.DepartureTerminal, departureGate)
+	forecast, ok := rules.graphForConnection(in, out).route(in.ArrivalTerminal, arrivalGate, out.DepartureTerminal, departureGate)
 	if !ok || forecast.Precision == precision || forecast.Precision == "terminals" {
 		return nil
 	}

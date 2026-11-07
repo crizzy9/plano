@@ -56,11 +56,18 @@ func (g airportConnectionGuide) matches(primary, icao string) bool {
 		(icao == "" || icao == g.icao)
 }
 
+func (g airportConnectionGuide) matchesConnection(in, out feeds.Flight) bool {
+	if icao := sharedConnectionICAO(in, out); icao != "" {
+		return g.icao == icao
+	}
+	return g.matches(in.Destination, in.DestinationICAO) && g.matches(out.Origin, out.OriginICAO)
+}
+
 func (r *ConnectionRules) routeForConnection(in, out feeds.Flight) (ConnectionRoute, bool) {
-	graph := r.graphForAirport(in.Destination, in.DestinationICAO)
+	graph := r.graphForConnection(in, out)
 	route, configured := graph.route(in.ArrivalTerminal, in.ArrivalGate, out.DepartureTerminal, out.DepartureGate)
 	for _, guide := range airportConnectionGuides {
-		if !guide.matches(in.Destination, in.DestinationICAO) || !guide.matches(out.Origin, out.OriginICAO) {
+		if !guide.matchesConnection(in, out) {
 			continue
 		}
 		if route.MapURL == "" {
@@ -93,6 +100,13 @@ func (r *ConnectionRules) routeForConnection(in, out feeds.Flight) (ConnectionRo
 		break
 	}
 	return route, configured
+}
+
+func (r *ConnectionRules) graphForConnection(in, out feeds.Flight) *connectionGraph {
+	if icao := sharedConnectionICAO(in, out); icao != "" {
+		return r.graphForAirport(icao, connectionAirportLabel(in, out))
+	}
+	return r.graphForAirport(in.Destination, in.DestinationICAO)
 }
 
 var guideGatePattern = regexp.MustCompile(`^([A-Z])(0?[1-9]|[1-9][0-9])[A-Z]?$`)
