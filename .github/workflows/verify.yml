@@ -123,7 +123,8 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
       PLANO_IOS_BUNDLE_ID: app.plano.verify
-      PLANO_IOS_APNS_ENVIRONMENT: production
+      # Apple's documented Simulator APNs support uses the sandbox environment.
+      PLANO_IOS_APNS_ENVIRONMENT: development
       PLANO_IOS_ACTIVITY_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.ios_activity_probe && 'true' || 'false' }}
     defaults:
       run:

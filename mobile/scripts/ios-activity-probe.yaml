@@ -43,7 +43,7 @@ onFlowComplete:
     visible:
       text: "Enable flight alerts|Turn off flight alerts"
       enabled: true
-    timeout: 25000
+    timeout: 75000
 - takeScreenshot: ios-alert-registration-result
 - assertVisible: 'Flight alerts are enabled for this server\.'
 - assertVisible: "Turn off flight alerts"

@@ -49,6 +49,20 @@ async function wantsFlightAlerts(api: PlanoAPI) {
   return !!currentPlatform() && (await SecureStore.getItemAsync(preferenceKey(api))) === 'on';
 }
 
+async function waitForIOSPushToken<T>(pending: Promise<T>): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error('Couldn’t enable flight alerts. Check your connection and try again.')), 60_000);
+  });
+  try {
+    // APNs registration can stay pending without a native success/error callback.
+    // Racing observes late rejections without allowing this attempt to adopt a token.
+    return await Promise.race([pending, deadline]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 export async function flightAlertsEnabled(api: PlanoAPI) {
   if (!await wantsFlightAlerts(api)) return false;
   return Platform.OS !== 'android' || (await androidPushStatus(api.server))?.enabled === true;
@@ -129,7 +143,9 @@ export async function changeFlightAlerts(api: PlanoAPI, enable: boolean) {
   }
   const permission = await notifications.requestPermissionsAsync();
   if (!permission.granted) throw new Error('Allow notifications for Plano in your device settings.');
-  const device = await notifications.getDevicePushTokenAsync();
+  const device = await (platform === 'ios'
+    ? waitForIOSPushToken(notifications.getDevicePushTokenAsync())
+    : notifications.getDevicePushTokenAsync());
   if (typeof device.data !== 'string' || !device.data) throw new Error('The device didn’t return a push token.');
   if (platform === 'android' && expected) {
     if (!await registerAndroidDevice(api, device.data, expected, true, () => true, expectedInstallation)) {
