@@ -1127,6 +1127,7 @@ function AlertsSettings({ api }: { api: PlanoAPI }) {
     <View style={layout.section}>
       <Heading>Flight alerts</Heading>
       <Body>Get gate, delay, and arrival updates from this server.</Body>
+      {Platform.OS === 'ios' && <Body>Flight alerts also allow Live Activities to start and update automatically. Turning alerts off ends current Live Activities and pauses new ones.</Body>}
       <Action icon="bell" secondary label={enabled ? 'Turn off flight alerts' : 'Enable flight alerts'}
         onPress={toggle} busy={pending} />
       {enabled && <Body>Flight alerts are enabled for this server.</Body>}
