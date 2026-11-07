@@ -30,10 +30,20 @@ const (
 	checkInScheduleSchema = `
 CREATE INDEX IF NOT EXISTS flights_check_in_departure ON flights(` + checkInDepartureSQL + `,id) WHERE ` + checkInPredepartureSQL + `;
 CREATE INDEX IF NOT EXISTS devices_check_in_owner ON devices(owner) WHERE kind='alert';`
-	dueCheckInFlightsSQL = `SELECT f.id FROM flights f WHERE ` + checkInPredepartureSQL + `
+	checkInCandidateSelectSQL = `SELECT f.id,` + checkInDepartureSQL + ` FROM flights f WHERE ` + checkInPredepartureSQL
+	dueCheckInFlightsBaseSQL  = checkInCandidateSelectSQL + `
 AND ` + checkInDepartureSQL + `>=julianday(?) AND ` + checkInDepartureSQL + `<=julianday(?)
+AND ` + checkInPendingDeviceSQL
+	dueCheckInFlightsSQL            = dueCheckInFlightsBaseSQL + ` ORDER BY ` + checkInDepartureSQL + `,f.id LIMIT ?`
+	sameDepartureCheckInFlightsSQL  = dueCheckInFlightsBaseSQL + ` AND ` + checkInDepartureSQL + `=? AND f.id>? ORDER BY f.id LIMIT ?`
+	laterDepartureCheckInFlightsSQL = checkInCandidateSelectSQL + ` AND ` + checkInDepartureSQL + `>? AND ` + checkInDepartureSQL + `<=julianday(?)
 AND ` + checkInPendingDeviceSQL + ` ORDER BY ` + checkInDepartureSQL + `,f.id LIMIT ?`
 )
+
+type checkInCandidate struct {
+	id           string
+	departureDay float64
+}
 
 func checkInOpeningMovedLater(before, after feeds.Flight, now time.Time) bool {
 	prior, next := effectiveDeparture(before), effectiveDeparture(after)
@@ -58,39 +68,89 @@ func (s *Store) runCheckInScheduler(ctx context.Context, logger *slog.Logger) {
 // The read can use cached snapshots from older database versions. An empty
 // pass takes no write lock. Each candidate is rechecked under its own write
 // transaction so tracking, flight state and outbox insertion stay atomic.
+// Drain bounded pages without waiting for another scheduler tick. Advancing
+// past every candidate lets later flights proceed when an earlier one skips
+// or fails; the next ordinary scan can retry those flights.
 func (s *Store) queueDueCheckIns(ctx context.Context, now time.Time) error {
-	ids, err := s.dueCheckInFlights(ctx, now)
-	if err != nil {
-		return err
-	}
+	var after *checkInCandidate
 	var firstError error
-	for _, id := range ids {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if err := s.queueScheduledCheckIn(ctx, id, now); err != nil && firstError == nil {
-			firstError = fmt.Errorf("queue check-in for flight %s: %w", id, err)
+		candidates, err := s.dueCheckInFlights(ctx, now, after)
+		if cancelled := ctx.Err(); cancelled != nil {
+			return cancelled
 		}
+		if err != nil {
+			return errors.Join(firstError, err)
+		}
+		for _, candidate := range candidates {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			err := s.queueScheduledCheckIn(ctx, candidate.id, now)
+			if cancelled := ctx.Err(); cancelled != nil {
+				return cancelled
+			}
+			if err != nil && firstError == nil {
+				firstError = fmt.Errorf("queue check-in for flight %s: %w", candidate.id, err)
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(candidates) < checkInSchedulerBatch {
+			return firstError
+		}
+		last := candidates[len(candidates)-1]
+		after = &last
 	}
-	return firstError
 }
 
-func (s *Store) dueCheckInFlights(ctx context.Context, now time.Time) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, dueCheckInFlightsSQL, now.Format(time.RFC3339Nano),
-		now.Add(24*time.Hour).Format(time.RFC3339Nano), checkInSchedulerBatch)
+func (s *Store) dueCheckInFlights(ctx context.Context, now time.Time, after *checkInCandidate) ([]checkInCandidate, error) {
+	lower, upper := now.Format(time.RFC3339Nano), now.Add(24*time.Hour).Format(time.RFC3339Nano)
+	if after == nil {
+		return s.readCheckInCandidates(ctx, dueCheckInFlightsSQL, lower, upper, checkInSchedulerBatch)
+	}
+	// Separate the equal-key suffix from later keys so SQLite can seek both
+	// expression-index columns without sorting or scanning the prior prefix.
+	tied, err := s.readCheckInCandidates(ctx, sameDepartureCheckInFlightsSQL,
+		lower, upper, after.departureDay, after.id, checkInSchedulerBatch)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(tied) == checkInSchedulerBatch {
+		return tied, nil
+	}
+	// after came from this same fixed-time sweep. Its SQL key already meets
+	// the lower window bound, so a greater key cannot fall below that bound.
+	later, err := s.readCheckInCandidates(ctx, laterDepartureCheckInFlightsSQL,
+		after.departureDay, upper, checkInSchedulerBatch-len(tied))
+	if err != nil {
+		return nil, err
+	}
+	return append(tied, later...), nil
+}
+
+func (s *Store) readCheckInCandidates(ctx context.Context, query string, args ...any) ([]checkInCandidate, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []string
+	var candidates []checkInCandidate
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var candidate checkInCandidate
+		if err := rows.Scan(&candidate.id, &candidate.departureDay); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		candidates = append(candidates, candidate)
 	}
-	return ids, rows.Err()
+	return candidates, rows.Err()
 }
 
 func (s *Store) queueScheduledCheckIn(ctx context.Context, id string, now time.Time) error {
