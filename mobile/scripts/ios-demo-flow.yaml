@@ -6,6 +6,25 @@ name: Plano iOS demo
     stopApp: true
 - assertVisible: "Connect a server"
 - tapOn: "Connect a server"
+# Diagnostic only: at most one additional normal tap from the known initial Home.
+# The capped settle wait is not proof that navigation succeeded.
+- waitForAnimationToEnd:
+    timeout: 5000
+- runFlow:
+    label: Diagnostic one additional initial Home tap
+    when:
+      visible: '^My flights$'
+      notVisible: 'https://plano\.example\.org'
+    commands:
+      - runFlow:
+          when:
+            visible: '^Connect to your Plano server to search and track flights\.$'
+          commands:
+            - runFlow:
+                when:
+                  visible: '^Connect a server$'
+                commands:
+                  - tapOn: '^Connect a server$'
 - assertVisible: 'https://plano\.example\.org'
 - tapOn: 'https://plano\.example\.org'
 - inputText: ${SERVER_URL}

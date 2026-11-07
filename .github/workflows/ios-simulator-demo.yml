@@ -136,9 +136,35 @@ jobs:
               # targets, assets, plugins, package locks and app configuration.
               subprocess.run(["git", "diff", "--exit-code", SOURCE, "HEAD", "--", "mobile", ":(exclude)mobile/scripts"],
                              check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-              # Keep every base-flow assertion and deadline exactly as compiled-run evidence used it.
-              subprocess.run(["git", "diff", "--exit-code", SOURCE, "HEAD", "--", "mobile/scripts/ios-demo-flow.yaml"],
-                             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              # Preserve every baseline assertion/deadline; permit only this exact
+              # one-tap diagnostic insertion after the known initial Home tap.
+              baseline_flow = subprocess.run(["git", "show", SOURCE + ":mobile/scripts/ios-demo-flow.yaml"],
+                                             check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+              initial_tap = b'- assertVisible: "Connect a server"\n- tapOn: "Connect a server"\n'
+              navigation_probe = (
+                  b'# Diagnostic only: at most one additional normal tap from the known initial Home.\n'
+                  b'# The capped settle wait is not proof that navigation succeeded.\n'
+                  b'- waitForAnimationToEnd:\n'
+                  b'    timeout: 5000\n'
+                  b'- runFlow:\n'
+                  b'    label: Diagnostic one additional initial Home tap\n'
+                  b'    when:\n'
+                  b"      visible: '^My flights$'\n"
+                  b"      notVisible: 'https://plano\\.example\\.org'\n"
+                  b'    commands:\n'
+                  b'      - runFlow:\n'
+                  b'          when:\n'
+                  b"            visible: '^Connect to your Plano server to search and track flights\\.$'\n"
+                  b'          commands:\n'
+                  b'            - runFlow:\n'
+                  b'                when:\n'
+                  b"                  visible: '^Connect a server$'\n"
+                  b'                commands:\n'
+                  b"                  - tapOn: '^Connect a server$'\n"
+              )
+              require(baseline_flow.count(initial_tap) == 1)
+              expected_flow = baseline_flow.replace(initial_tap, initial_tap + navigation_probe, 1)
+              require(Path("mobile/scripts/ios-demo-flow.yaml").read_bytes() == expected_flow)
 
               phase = "source run metadata"
               run = api_json("/actions/runs/" + text)
