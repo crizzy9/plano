@@ -63,8 +63,13 @@ func TestEmailRetryOnlyResolvesUnfinishedLegs(t *testing.T) {
 	}
 	source := &evolvingImportSource{secondLegError: feeds.ErrUnavailable}
 	handler := (api.Server{Store: store, Source: source, Demo: true, Logger: slog.New(slog.DiscardHandler)}).Handler()
-	const email = "Subject: Itinerary\r\nContent-Type: text/plain\r\n\r\n" +
+	const messageID = "Message-ID: <import-fixture@example.net>\r\n"
+	const emailHeaders = messageID + "Subject: Itinerary\r\nContent-Type: text/plain\r\n\r\n"
+	const email = emailHeaders +
 		"UA123 | Departure: 5 January 2027\r\nUA456 | Departure: 7 January 2027\r\n"
+	delivery := func(host, message string) string {
+		return "Received: from " + host + ".example.net by plano.example.net; Fri, 1 Jan 2027 00:00:00 +0000\r\n" + message
+	}
 	forward := func(body string, want int) {
 		t.Helper()
 		r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/webhooks/email", strings.NewReader(body))
@@ -76,7 +81,7 @@ func TestEmailRetryOnlyResolvesUnfinishedLegs(t *testing.T) {
 			t.Fatalf("email delivery = %d (%s), want %d", w.Code, w.Body, want)
 		}
 	}
-	forward(email, http.StatusServiceUnavailable)
+	forward(delivery("original", email), http.StatusServiceUnavailable)
 	matched, err := store.Tracked(ctx, owner)
 	if err != nil || len(matched) != 1 || matched[0].ID != "demo-UA123-2027-01-05" {
 		t.Fatalf("partial import lost a match when the next lookup failed: %+v, %v", matched, err)
@@ -85,10 +90,9 @@ func TestEmailRetryOnlyResolvesUnfinishedLegs(t *testing.T) {
 		t.Fatal(err)
 	}
 	source.secondLegError = nil
-	forward(email, http.StatusServiceUnavailable)
+	forward(delivery("partial-retry", email), http.StatusServiceUnavailable)
 	source.secondLeg = true
-	forward(email, http.StatusNoContent)
-	forward(email, http.StatusNoContent)
+	forward(delivery("resolved-retry", email), http.StatusNoContent)
 	const cancellation = "Subject: Calendar cancellation\r\nContent-Type: text/calendar; method=CANCEL\r\n\r\n" +
 		"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:CANCEL\r\nBEGIN:VEVENT\r\nUID:fixture-cancel\r\n" +
 		"DTSTART:20270105T150000Z\r\nSUMMARY:UA123\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
@@ -97,11 +101,29 @@ func TestEmailRetryOnlyResolvesUnfinishedLegs(t *testing.T) {
 	if err != nil || len(flights) != 1 || flights[0].ID != "demo-UA456-2027-01-07" || source.firstLegLookups != 1 {
 		t.Fatalf("retry tracked %+v after %d first-leg lookups, error = %v", flights, source.firstLegLookups, err)
 	}
+	if err := store.Untrack(ctx, owner, "demo-UA456-2027-01-07"); err != nil {
+		t.Fatal(err)
+	}
+	lookups := len(source.lookups)
+	forward(delivery("completed-retry", email), http.StatusNoContent)
+	flights, err = store.Tracked(ctx, owner)
+	if err != nil || len(flights) != 0 || len(source.lookups) != lookups {
+		t.Fatalf("completed replay tracked %+v after %d new lookups, error = %v", flights, len(source.lookups)-lookups, err)
+	}
+
+	// A corrected itinerary remains eligible even if the sender reused its Message-ID.
+	const corrected = emailHeaders + "UA456 | Departure: 9 January 2027\r\n"
+	forward(delivery("correction", corrected), http.StatusNoContent)
+	flights, err = store.Tracked(ctx, owner)
+	if err != nil || len(flights) != 1 || flights[0].ID != "demo-UA456-2027-01-09" {
+		t.Fatalf("corrected itinerary tracked %+v, error = %v", flights, err)
+	}
+
 	// A new message with no matches still needs a retry when any lookup failed
 	// temporarily, even if a different leg was rejected permanently.
 	source.firstLegError = feeds.ErrInvalidQuery
 	source.secondLeg, source.secondLegError = false, feeds.ErrUnavailable
-	forward(strings.Replace(email, "Subject: Itinerary", "Subject: Retry", 1), http.StatusServiceUnavailable)
+	forward(strings.TrimPrefix(email, messageID), http.StatusServiceUnavailable)
 }
 
 func TestEmailWebhookCancellationWithReplacement(t *testing.T) {

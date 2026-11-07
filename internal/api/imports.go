@@ -206,7 +206,21 @@ func (s Server) emailWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	checksum := sha256.Sum256(raw)
-	digest := hex.EncodeToString(checksum[:])
+	rawDigest := hex.EncodeToString(checksum[:])
+	parsed, messageID, parseErr := itinerary.EmailWithMessageID(raw)
+	fingerprint := ""
+	if parseErr == nil && messageID != "" && len(parsed.Legs) != 0 && !parsed.Truncated {
+		fingerprint = emailMessageFingerprint(messageID, parsed)
+	}
+	digest, err := s.Store.BindEmailImportDigest(r.Context(), owner, token, rawDigest, fingerprint)
+	if errors.Is(err, core.ErrEmailRelayUnauthorized) {
+		respond(w, 401, map[string]string{"error": "valid email relay token required"})
+		return
+	}
+	if err != nil {
+		s.failure(w, err)
+		return
+	}
 	seen, err := s.Store.ImportedEmail(r.Context(), owner, digest)
 	if err != nil {
 		s.failure(w, err)
@@ -216,12 +230,11 @@ func (s Server) emailWebhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)
 		return
 	}
-	parsed, err := itinerary.Email(raw)
-	if err == nil && parsed.CancellationOnly {
+	if parseErr == nil && parsed.CancellationOnly {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if err != nil || len(parsed.Legs) == 0 {
+	if parseErr != nil || len(parsed.Legs) == 0 {
 		respond(w, 422, map[string]string{"error": "email has no recognized dated flights"})
 		return
 	}
@@ -294,6 +307,22 @@ func (s Server) emailWebhook(w http.ResponseWriter, r *http.Request) {
 	default:
 		respond(w, 422, map[string]string{"error": "email has no uniquely matching flights"})
 	}
+}
+
+func emailMessageFingerprint(messageID string, parsed itinerary.Itinerary) string {
+	// A delivery can add trace headers or present the same legs in another
+	// order. A correction with different itinerary facts keeps its own receipt.
+	legs := make([]string, 0, len(parsed.Legs))
+	for _, leg := range parsed.Legs {
+		legs = append(legs, strings.Join([]string{
+			leg.Number, leg.Date, leg.Origin, leg.Destination, leg.LocalDeparture,
+			leg.UTCDeparture.UTC().Format(time.RFC3339Nano),
+		}, "\x00"))
+	}
+	slices.Sort(legs)
+	facts := append([]string{"plano-email-identity-v1", messageID, parsed.BookingCode}, slices.Compact(legs)...)
+	digest := sha256.Sum256([]byte(strings.Join(facts, "\x00")))
+	return hex.EncodeToString(digest[:])
 }
 
 func emailLegKey(digest string, leg itinerary.Leg) string {

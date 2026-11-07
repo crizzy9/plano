@@ -8,12 +8,22 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
 )
 
 const MaxEmailBytes = 256 << 10
+
+const (
+	maxEmailMessageIDBytes = 998
+	emailMessageIDAtom     = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
+	emailMessageIDDotAtom  = emailMessageIDAtom + `(?:\.` + emailMessageIDAtom + `)*`
+)
+
+// Match the modern dot-atom and no-fold literal forms from RFC 5322 §3.6.4.
+var emailMessageIDPattern = regexp.MustCompile(`^<` + emailMessageIDDotAtom + `@(?:` + emailMessageIDDotAtom + `|\[[!-Z^-~]+\])>$`)
 
 type emailParts struct {
 	plain, html []emailTextPart
@@ -35,12 +45,19 @@ type emailCalendarPart struct {
 // Email extracts itinerary facts from RFC 5322 mail. Attachments other than
 // calendar invitations are ignored and links are never fetched.
 func Email(raw []byte) (Itinerary, error) {
+	result, _, err := EmailWithMessageID(raw)
+	return result, err
+}
+
+// EmailWithMessageID extracts an itinerary and its optional top-level
+// Message-ID. It preserves the identifier's brackets and case.
+func EmailWithMessageID(raw []byte) (Itinerary, string, error) {
 	if len(raw) > MaxEmailBytes {
-		return Itinerary{}, ErrInvalid
+		return Itinerary{}, "", ErrInvalid
 	}
 	message, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
-		return Itinerary{}, ErrInvalid
+		return Itinerary{}, "", ErrInvalid
 	}
 	var parts emailParts
 	parts.read(message.Header.Get, message.Body, 0, 0)
@@ -114,7 +131,19 @@ func Email(raw []byte) (Itinerary, error) {
 	}
 	result.Truncated = result.Truncated || confirmed.Truncated
 	result.CancellationOnly = (cancellations.recognized || len(notices) != 0) && len(result.Legs) == 0
-	return limitItinerary(result, MaxFlights), nil
+	return limitItinerary(result, MaxFlights), emailMessageID(message.Header), nil
+}
+
+func emailMessageID(header mail.Header) string {
+	values := header["Message-Id"]
+	if len(values) != 1 {
+		return ""
+	}
+	id := strings.Trim(values[0], " \t")
+	if len(id) > maxEmailMessageIDBytes || !emailMessageIDPattern.MatchString(id) {
+		return ""
+	}
+	return id
 }
 
 func emailSubject(raw string) string {

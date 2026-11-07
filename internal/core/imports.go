@@ -12,6 +12,16 @@ import (
 
 var ErrEmailRelayUnauthorized = errors.New("email relay is no longer authorized")
 
+const emailIdentitySchema = `
+CREATE TABLE IF NOT EXISTS email_import_identities (
+  owner TEXT NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
+  identity TEXT NOT NULL, digest TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(owner,identity)
+);
+CREATE INDEX IF NOT EXISTS email_import_identities_by_seen ON email_import_identities(seen);
+`
+
+const emailIdentityIdleTTL = 24 * time.Hour
+
 func (s *Store) RotateEmailRelay(ctx context.Context, owner string) (string, error) {
 	token := randomToken()
 	_, err := s.db.ExecContext(ctx, `INSERT INTO email_relays VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET token_hash=excluded.token_hash`, owner, hash(token))
@@ -30,6 +40,83 @@ func (s *Store) EmailRelayOwner(ctx context.Context, token string) (string, erro
 		err = ErrNotFound
 	}
 	return owner, err
+}
+
+// BindEmailImportDigest gives equivalent deliveries one receipt key before
+// lookups begin. An envelope alias keeps exact replays stable across parser
+// revisions, and a legacy delivery can carry forward its raw-byte key.
+func (s *Store) BindEmailImportDigest(ctx context.Context, owner, relayToken, rawDigest, fingerprint string) (string, error) {
+	if relayToken == "" || !emailImportHash(rawDigest) || fingerprint != "" && (rawDigest == fingerprint || !emailImportHash(fingerprint)) {
+		return "", feeds.ErrInvalidQuery
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	allowed, err := emailRelayAllowed(ctx, tx, owner, relayToken)
+	if err != nil {
+		return "", err
+	}
+	if !allowed {
+		return "", ErrEmailRelayUnauthorized
+	}
+	seen := time.Now().Unix()
+	envelope := hash("plano-email-envelope-v1\x00" + rawDigest)
+	const bindIdentity = `INSERT INTO email_import_identities(owner,identity,digest,seen)
+VALUES(?,?,?,?)
+ON CONFLICT(owner,identity) DO UPDATE SET seen=MAX(email_import_identities.seen,excluded.seen)`
+	var bound string
+	err = tx.QueryRowContext(ctx, `UPDATE email_import_identities SET seen=MAX(seen,?)
+WHERE owner=? AND identity=? RETURNING digest`, seen, owner, envelope).Scan(&bound)
+	if err == nil {
+		if fingerprint != "" {
+			// An exact replay can connect a newly parsed fingerprint to the
+			// original receipt without changing an established binding.
+			if _, err := tx.ExecContext(ctx, bindIdentity, owner, fingerprint, bound, seen); err != nil {
+				return "", err
+			}
+		}
+		return bound, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if fingerprint == "" {
+		return rawDigest, nil
+	}
+	var legacy bool
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM imported_messages WHERE owner=?1 AND digest=?2)
+  OR EXISTS(SELECT 1 FROM email_import_legs WHERE owner=?1 AND digest=?2)`, owner, rawDigest).Scan(&legacy)
+	if err != nil {
+		return "", err
+	}
+	digest := fingerprint
+	if legacy {
+		digest = rawDigest
+	}
+	err = tx.QueryRowContext(ctx, bindIdentity+` RETURNING digest`, owner, fingerprint, digest, seen).Scan(&bound)
+	if err != nil {
+		return "", err
+	}
+	if legacy {
+		// Exact replays retain their progress even if another delivery already
+		// established the binding. Leave the binding in place for variants.
+		bound = rawDigest
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO email_import_identities(owner,identity,digest,seen) VALUES(?,?,?,?)`,
+		owner, envelope, bound, seen); err != nil {
+		return "", err
+	}
+	return bound, tx.Commit()
+}
+
+func pruneEmailImportIdentities(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	// Keep bindings with progress and allow in-flight lookups time to commit.
+	_, err := tx.ExecContext(ctx, `DELETE FROM email_import_identities AS i WHERE seen<=?
+AND NOT EXISTS (SELECT 1 FROM imported_messages WHERE owner=i.owner AND digest=i.digest)
+AND NOT EXISTS (SELECT 1 FROM email_import_legs WHERE owner=i.owner AND digest=i.digest)`, now.Add(-emailIdentityIdleTTL).Unix())
+	return err
 }
 
 func (s *Store) ImportedEmail(ctx context.Context, owner, digest string) (bool, error) {
