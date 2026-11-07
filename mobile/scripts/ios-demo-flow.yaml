@@ -27,9 +27,9 @@ name: Plano iOS demo
 - tapOn: "Tomorrow"
 - tapOn: "Search flights"
 - extendedWaitUntil:
-    visible: "UA123, SFO to EWR, Scheduled"
+    visible: "UA123, SFO to EWR, Scheduled, Demo flight · Simulated data"
     timeout: 30000
-- tapOn: "UA123, SFO to EWR, Scheduled"
+- tapOn: "UA123, SFO to EWR, Scheduled, Demo flight · Simulated data"
 - extendedWaitUntil:
     visible: "Track flight"
     timeout: 30000

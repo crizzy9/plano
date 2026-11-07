@@ -87,7 +87,7 @@ function flightSnapshot(value: unknown): Flight | undefined {
   const observedAt = timestamp(source.observedAt);
   if (!id || !number || origin === undefined || destination === undefined || !observedAt) return undefined;
   return {
-    id, number, origin, destination, status, observedAt,
+    id, number, origin, destination, status, observedAt, source: text(source.source, 64),
     originICAO: text(source.originICAO, 16), destinationICAO: text(source.destinationICAO, 16),
     originTimeZone: text(source.originTimeZone, 64), destinationTimeZone: text(source.destinationTimeZone, 64),
     scheduledDeparture: timestamp(source.scheduledDeparture), scheduledArrival: timestamp(source.scheduledArrival),

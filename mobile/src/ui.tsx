@@ -11,6 +11,8 @@ import { usePalette } from './theme';
 
 export type IconName = 'search' | 'plane' | 'arrow' | 'share' | 'bell' | 'globe' | 'download';
 
+const demoFlightLabel = 'Demo flight · Simulated data';
+
 const icons: Record<IconName, string> = {
   search: 'M15.5 15.5 21 21 M17 10.5a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0',
   plane: 'M12 2v18 M12 7 3 13v2l9-3 9 3v-2l-9-6 M8 22l4-2 4 2',
@@ -107,6 +109,7 @@ export function FlightRow({ flight, onPress }: { flight: Flight; onPress?: () =>
       <View style={styles.rowLabel}>
         <Text style={[styles.rowRoute, { color: colors.text }]}>{flight.origin} to {flight.destination}</Text>
         <Body>{flight.number} · {formatDay(flight.scheduledDeparture, flight.originTimeZone)}</Body>
+        {flight.source === 'plano_demo' && <Text style={[styles.label, { color: colors.muted }]}>{demoFlightLabel}</Text>}
       </View>
       <View style={styles.rowStatus}>
         <Text style={[styles.label, { color: colors.tint }]}>{flightStatus(flight.status)}</Text>
@@ -117,7 +120,7 @@ export function FlightRow({ flight, onPress }: { flight: Flight; onPress?: () =>
   );
   return onPress ? (
     <Pressable onPress={onPress} accessibilityRole="button"
-      accessibilityLabel={`${flight.number}, ${flight.origin} to ${flight.destination}, ${flightStatus(flight.status)}`}
+      accessibilityLabel={`${flight.number}, ${flight.origin} to ${flight.destination}, ${flightStatus(flight.status)}${flight.source === 'plano_demo' ? `, ${demoFlightLabel}` : ''}`}
       style={({ pressed }) => rowStyle(pressed)}>
       {content}
     </Pressable>
@@ -143,6 +146,7 @@ export function FlightStrip({ flight }: { flight: Flight }) {
         <Text style={[styles.label, { color: colors.routeText }]}>{flight.number}</Text>
         <Text style={[styles.label, { color: colors.routeLine }]}>{flightStatus(flight.status)}</Text>
       </View>
+      {flight.source === 'plano_demo' && <Text style={[styles.label, { color: colors.routeMuted }]}>{demoFlightLabel}</Text>}
       <View style={styles.airports}>
         <View style={styles.endpoint}>
           <Text style={[styles.code, { color: colors.routeText }]}>{flight.origin}</Text>
