@@ -59,6 +59,7 @@ type Device struct {
 	Binding            string `json:"binding,omitempty"`
 	LiveSlot           string `json:"liveSlot,omitempty"`
 	LiveRevision       int64  `json:"liveRevision,omitempty"`
+	PushClock          string `json:"pushClock,omitempty"`
 }
 
 type StoreOptions struct {
@@ -240,7 +241,7 @@ CREATE INDEX IF NOT EXISTS bookings_by_locator ON bookings(owner, locator_hash);
 CREATE TABLE IF NOT EXISTS shares (
   token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, flight_id TEXT NOT NULL, expires INTEGER NOT NULL,
   FOREIGN KEY(owner, flight_id) REFERENCES tracked(owner, flight_id) ON DELETE CASCADE
-);` + radarSchema + providerTrackSchema + pickupSchema + friendSchema + airportCacheSchema + passportArchiveSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisoryAlertSchema + advisoryWithdrawalSchema + advisorySupersessionSchema + delayProviderSamplesSchema + delayEarlySamplesSchema + tfmsProgramCancellationSchema + calendarSyncSchema + automaticFlightReceiptSchema + atfmSlotSchema + emailIdentitySchema); err != nil {
+);` + radarSchema + providerTrackSchema + pickupSchema + friendSchema + airportCacheSchema + passportArchiveSchema + tripItSyncSchema + aeroSubscriptionSchema + connectionMonitorSchema + outboxAdvisorySchema + advisoryAlertSchema + advisoryWithdrawalSchema + advisorySupersessionSchema + delayProviderSamplesSchema + delayEarlySamplesSchema + tfmsProgramCancellationSchema + calendarSyncSchema + automaticFlightReceiptSchema + atfmSlotSchema + emailIdentitySchema + iosPushClockSchema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

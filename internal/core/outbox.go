@@ -27,7 +27,8 @@ func (s *Store) Register(ctx context.Context, owner string, device Device, now t
 		device.LiveSlot != "" && (device.LiveRevision <= 0 || device.Platform != "ios" ||
 			!(device.Kind == "live_start" && device.LiveSlot == "start" && device.FlightID == "" ||
 				device.Kind == "live_update" && device.FlightID != "" && activityLiveSlot.MatchString(device.LiveSlot))) ||
-		device.Platform == "ios" && device.Binding != "" && (device.LiveSlot == "" || !liveSessionBinding.MatchString(device.Binding)) {
+		device.Platform == "ios" && device.Binding != "" && (device.LiveSlot == "" || !liveSessionBinding.MatchString(device.Binding)) ||
+		device.PushClock != "" && (device.Platform != "ios" || device.LiveRevision <= 0 || !liveSessionBinding.MatchString(device.PushClock)) {
 		return ErrInvalidLiveSlot
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -35,7 +36,10 @@ func (s *Store) Register(ctx context.Context, owner string, device Device, now t
 		return err
 	}
 	defer tx.Rollback()
+	var iosTokenKey string
 	if device.Platform == "ios" {
+		var hexToken bool
+		iosTokenKey, hexToken = iosPushTokenKey(device.Token)
 		// Check the installation floor before a late request can take ownership
 		// of the same token from a different installation.
 		var ignored bool
@@ -43,12 +47,18 @@ func (s *Store) Register(ctx context.Context, owner string, device Device, now t
 SELECT 1 FROM ios_device_floors WHERE owner=? AND revision>=?
 ) OR EXISTS(
 SELECT 1 FROM devices d JOIN ios_alert_revisions r ON d.id=r.device_id
-WHERE d.owner=? AND d.platform='ios' AND d.kind=? AND d.token=? AND r.revision>=?
-)`, owner, device.LiveRevision, owner, device.Kind, device.Token, device.LiveRevision).Scan(&ignored); err != nil {
+WHERE d.owner=? AND d.platform='ios' AND d.kind=? AND (d.token=? OR (? AND lower(d.token)=?)) AND r.revision>=?
+)`, owner, device.LiveRevision, owner, device.Kind, device.Token, hexToken, iosTokenKey, device.LiveRevision).Scan(&ignored); err != nil {
 			return err
 		}
 		if ignored {
 			return nil
+		}
+		if device.PushClock != "" && hexToken {
+			if err := normalizeIOSPushToken(ctx, tx, device.Kind, iosTokenKey); err != nil {
+				return err
+			}
+			device.Token = iosTokenKey
 		}
 		if device.Kind == "live_start" && device.LiveSlot == "" {
 			// A request from before slot registration cannot take a bound token
@@ -57,8 +67,8 @@ WHERE d.owner=? AND d.platform='ios' AND d.kind=? AND d.token=? AND r.revision>=
 SELECT 1 FROM ios_live_start_bindings WHERE owner=? AND binding<>''
 ) OR EXISTS(
 SELECT 1 FROM devices d JOIN device_bindings b ON b.device_id=d.id
-WHERE d.platform='ios' AND d.kind='live_start' AND d.token=? AND b.binding<>''
-)`, owner, device.Token).Scan(&ignored); err != nil || ignored {
+WHERE d.platform='ios' AND d.kind='live_start' AND (d.token=? OR (? AND lower(d.token)=?)) AND b.binding<>''
+)`, owner, device.Token, hexToken, iosTokenKey).Scan(&ignored); err != nil || ignored {
 				return err
 			}
 		}
@@ -68,6 +78,12 @@ WHERE d.platform='ios' AND d.kind='live_start' AND d.token=? AND b.binding<>''
 		var ignored bool
 		priorDeviceID, ignored, err = priorLiveSlotDevice(ctx, tx, owner, device)
 		if err != nil || ignored {
+			return err
+		}
+	}
+	if device.Platform == "ios" {
+		stale, err := iosPushClockStale(ctx, tx, iosTokenKey, device)
+		if err != nil || stale {
 			return err
 		}
 	}
@@ -129,6 +145,11 @@ ON CONFLICT(device_id) DO UPDATE SET revision=excluded.revision`, deviceID, devi
 	}
 	if device.Binding != "" {
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO device_bindings VALUES(?,?)`, deviceID, device.Binding); err != nil {
+			return err
+		}
+	}
+	if device.PushClock != "" {
+		if err := acceptIOSPushClock(ctx, tx, iosTokenKey, device); err != nil {
 			return err
 		}
 	}
@@ -1298,16 +1319,21 @@ AND (newer.cleared_ns=0 OR newer.cleared_ns>=newer.observed_ns))`, tfmsCutoff); 
 }
 
 func (s *Store) RemoveDevice(ctx context.Context, owner string, d Device) error {
-	if d.LiveSlot != "" || d.LiveRevision != 0 {
+	if d.LiveSlot != "" || d.LiveRevision != 0 || d.PushClock != "" {
 		return ErrInvalidLiveSlot
+	}
+	var canonical string
+	var hexToken bool
+	if d.Platform == "ios" {
+		canonical, hexToken = iosPushTokenKey(d.Token)
 	}
 	// Bound iOS slots use revision-based revocation so a delayed exact-token
 	// deletion cannot remove a newer session that reused the token.
 	_, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE owner=? AND platform=? AND kind=? AND flight_id=?
-AND (token=? OR (?='' AND ?<>''))
+AND (token=? OR (? AND lower(token)=?) OR (?='' AND ?<>''))
 AND (?='' OR EXISTS(SELECT 1 FROM device_bindings WHERE device_id=devices.id AND binding=?))
 AND (platform<>'ios' OR NOT EXISTS(SELECT 1 FROM device_bindings WHERE device_id=devices.id))`,
-		owner, d.Platform, d.Kind, d.FlightID, d.Token, d.Token, d.Binding, d.Binding, d.Binding)
+		owner, d.Platform, d.Kind, d.FlightID, d.Token, hexToken, canonical, d.Token, d.Binding, d.Binding, d.Binding)
 	return err
 }
 

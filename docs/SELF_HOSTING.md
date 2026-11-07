@@ -491,6 +491,12 @@ again when the app relaunches. The server replaces an older token in the
 same installation and Live Activity slot when it accepts the rotated token.
 The app persists a registration counter in Keychain so the server can ignore
 an older write that arrives out of order.
+Current builds also share a clock ID across the device's iOS alert and Live
+Activity registrations. The server keeps the latest clock receipt per APNs
+token and push kind across installation transfers and device deletion. A
+reinstall with a new installation and clock can register at a lower revision.
+The app checks server support before sending the clock. Once a token has a
+clock receipt, registration for that token requires a clock-capable build.
 If a delayed remote start arrives after you untrack a flight, the app can
 dismiss that activity when the server confirms the flight is missing from
 your tracked list.

@@ -10,7 +10,7 @@ import {
 import { publishFlightRefresh } from './flight-refresh';
 import {
   addAndroidFlightAlertListener, androidPushStatus, canFenceIOSPush, clearLiveActivities, configureLiveActivities, disableAndroidPush, enableAndroidPush,
-  nextIOSPushRevision, startLiveActivity,
+  nextIOSPushRegistration, startLiveActivity,
   type RetiredAndroidPush,
 } from './live';
 
@@ -21,8 +21,8 @@ function currentPlatform() {
 function registerIOSDevice(api: PlanoAPI, token: string, explicit: boolean, active: () => boolean) {
   return withActiveIOSPushOrigin(api.server, async () => {
     if (!active() || !explicit && !await wantsFlightAlerts(api)) return false;
-    const liveRevision = canFenceIOSPush ? await nextIOSPushRevision() : undefined;
-    await api.registerDevice({ platform: 'ios', token, kind: 'alert', liveRevision });
+    const registration = canFenceIOSPush ? await nextIOSPushRegistration() : undefined;
+    await api.registerDevice({ platform: 'ios', token, kind: 'alert', ...registration });
     if (!active()) return false;
     if (explicit) await SecureStore.setItemAsync(preferenceKey(api), 'on');
     if (explicit || canFenceIOSPush) await configureLiveActivities(api);

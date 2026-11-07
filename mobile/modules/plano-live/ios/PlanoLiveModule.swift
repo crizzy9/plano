@@ -21,6 +21,10 @@ public final class PlanoLiveModule: Module {
       try await PlanoActivityCoordinator.shared.nextPushRevision()
     }
 
+    AsyncFunction("nextIOSPushRegistration") { () async throws -> [String: String] in
+      try await PlanoActivityCoordinator.shared.nextPushRegistration()
+    }
+
     AsyncFunction("retireIOSPush") { (server: String, token: String) async throws -> String in
       try await PlanoActivityCoordinator.shared.retirePush(server: server, token: token)
     }
@@ -92,7 +96,17 @@ private struct DeviceRegistration: Encodable {
   let requestUpdateToken: Bool?
   let liveSlot: String
   let liveRevision: Int64
+  let pushClock: String?
   let binding: String
+}
+
+private struct DeviceCapabilities: Decodable {
+  let iosPushClock: Bool
+}
+
+private struct PushRevisionClock {
+  let id: String
+  let revision: Int64
 }
 
 private struct DeviceRegistrationFailure: Decodable {
@@ -128,6 +142,7 @@ private enum LiveKeychain {
     kSecAttrAccount as String: "active-server",
   ]
   static let revisionQuery = query.merging([kSecAttrAccount as String: "token-revision"]) { _, new in new }
+  static let clockQuery = query.merging([kSecAttrAccount as String: "push-clock"]) { _, new in new }
 
   static func save(_ registration: ActivityRegistration) throws {
     let data = try JSONEncoder().encode(registration)
@@ -156,16 +171,32 @@ private enum LiveKeychain {
     return try JSONDecoder().decode(ActivityRegistration.self, from: data)
   }
 
+  @MainActor
   static func nextTokenRevision() throws -> Int64 {
     let current: Int64
     if let data = try read(matching: revisionQuery) { current = try JSONDecoder().decode(Int64.self, from: data) }
     else { current = 0 }
     guard current >= 0, current < Int64.max else { throw RegistrationError.keychain }
     let next = current + 1
-    // The counter may migrate with the installation credential. It contains
-    // no token and remains readable while locked after the first unlock.
     try save(JSONEncoder().encode(next), matching: revisionQuery, accessibility: kSecAttrAccessibleAfterFirstUnlock)
     return next
+  }
+
+  @MainActor
+  static func nextTokenRegistration() throws -> PushRevisionClock {
+    let id: String
+    if try read(matching: revisionQuery) != nil, let data = try read(matching: clockQuery) {
+      guard let saved = String(data: data, encoding: .utf8), UUID(uuidString: saved) != nil else {
+        throw RegistrationError.keychain
+      }
+      id = saved
+    } else {
+      id = UUID().uuidString.lowercased()
+      // Save the clock before allocating a revision. A failed write issues no
+      // registration, and the existing integer stays readable by older builds.
+      try save(Data(id.utf8), matching: clockQuery, accessibility: kSecAttrAccessibleAfterFirstUnlock)
+    }
+    return PushRevisionClock(id: id, revision: try nextTokenRevision())
   }
 
   private static func read(matching query: [String: Any]) throws -> Data? {
@@ -196,6 +227,7 @@ private final class PlanoActivityCoordinator {
   private var configuring: ActivityRegistration?
   private var mayRestore = true
   private var generation = UUID()
+  private var pushClockSupported = false
   private var startTokens: Task<Void, Never>?
   private var activities: Task<Void, Never>?
   private var observers: [String: ActivityObservers] = [:]
@@ -316,6 +348,7 @@ private final class PlanoActivityCoordinator {
     }
     observers.removeAll()
     uploads.reset()
+    pushClockSupported = false
   }
 
   private func invalidateRegistration() -> UUID {
@@ -351,6 +384,11 @@ private final class PlanoActivityCoordinator {
 
   func nextPushRevision() throws -> String {
     String(try LiveKeychain.nextTokenRevision())
+  }
+
+  func nextPushRegistration() throws -> [String: String] {
+    let clock = try LiveKeychain.nextTokenRegistration()
+    return ["pushClock": clock.id, "liveRevision": String(clock.revision)]
   }
 
   func retirePush(server: String, token: String) async throws -> String {
@@ -516,19 +554,42 @@ private final class PlanoActivityCoordinator {
 
   private func submit(_ token: Data, for slot: ActivityTokenSlot, using registration: ActivityRegistration, generation: UUID) {
     guard isCurrent(generation), !token.isEmpty else { return }
-    // Each queued value keeps one revision across retries. Persist the counter
-    // before sending so delayed requests can be ordered even after relaunch.
-    var revision: Int64?
+    // Keep the saved clock and revision together across retries.
+    var clock: PushRevisionClock?
     uploads.submit(token, for: slot) { [weak self] token, slot in
       guard let self, self.isCurrent(generation) else { return true }
-      if revision == nil { revision = try? LiveKeychain.nextTokenRevision() }
-      guard let revision else { return false }
-      return await self.register(data: token, slot: slot, revision: revision, using: registration, generation: generation)
+      if clock == nil { clock = try? LiveKeychain.nextTokenRegistration() }
+      guard let clock else { return false }
+      return await self.register(data: token, slot: slot, clock: clock, using: registration, generation: generation)
     }
   }
 
-  private func register(data: Data, slot: ActivityTokenSlot, revision: Int64, using registration: ActivityRegistration, generation: UUID) async -> Bool {
+  private func pushClockCapability(base: URL, generation: UUID) async -> Bool? {
+    if pushClockSupported { return true }
+    let url = base.appendingPathComponent("v1").appendingPathComponent("devices").appendingPathComponent("capabilities")
+    var request = URLRequest(url: url, timeoutInterval: 8)
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    guard let (data, response) = try? await transport.data(for: request), isCurrent(generation),
+          let http = response as? HTTPURLResponse else { return nil }
+    if http.statusCode == 404, http.mimeType == "text/plain", data == Data("404 page not found\n".utf8) {
+      // Probe again on a later registration so a running app can see an upgrade.
+      return pushClockSupported
+    }
+    guard http.statusCode == 200, http.mimeType == "application/json",
+          (try? JSONDecoder().decode(DeviceCapabilities.self, from: data))?.iosPushClock == true else { return nil }
+    pushClockSupported = true
+    return true
+  }
+
+  private func register(data: Data, slot: ActivityTokenSlot, clock: PushRevisionClock, using registration: ActivityRegistration,
+                        generation: UUID, forceLegacy: Bool = false) async -> Bool {
     guard let base = registration.baseURL, let binding = registration.binding else { return true }
+    let capability: Bool?
+    if forceLegacy { capability = false }
+    else { capability = await pushClockCapability(base: base, generation: generation) }
+    guard isCurrent(generation) else { return true }
+    guard let capability else { return false }
+    let pushClock = capability ? clock.id : nil
     let token = data.map { String(format: "%02x", $0) }.joined()
     let payload: DeviceRegistration
     switch slot {
@@ -537,11 +598,11 @@ private final class PlanoActivityCoordinator {
       if #available(iOS 18.0, *) { requestUpdateToken = true }
       else { requestUpdateToken = nil }
       payload = DeviceRegistration(token: token, kind: "live_start", flightId: nil, requestUpdateToken: requestUpdateToken,
-                                   liveSlot: "start", liveRevision: revision, binding: binding)
+                                   liveSlot: "start", liveRevision: clock.revision, pushClock: pushClock, binding: binding)
     case let .update(activityID, flightID):
       let digest = SHA256.hash(data: Data(activityID.utf8)).map { String(format: "%02x", $0) }.joined()
       payload = DeviceRegistration(token: token, kind: "live_update", flightId: flightID, requestUpdateToken: nil,
-                                   liveSlot: "activity:\(digest)", liveRevision: revision, binding: binding)
+                                   liveSlot: "activity:\(digest)", liveRevision: clock.revision, pushClock: pushClock, binding: binding)
     }
     guard let body = try? JSONEncoder().encode(payload) else { return true }
     var request = URLRequest(url: base.appendingPathComponent("v1").appendingPathComponent("devices"), timeoutInterval: 8)
@@ -551,12 +612,22 @@ private final class PlanoActivityCoordinator {
     request.httpBody = body
     for attempt in 0..<3 {
       guard isCurrent(generation) else { return true }
-      if let (data, response) = try? await transport.data(for: request),
+      if let (responseData, response) = try? await transport.data(for: request),
          let http = response as? HTTPURLResponse {
         // Both a registration change and a replacement token cancel old uploads.
         guard isCurrent(generation) else { return true }
+        if http.statusCode == 400 && capability {
+          pushClockSupported = false
+          let currentCapability = await pushClockCapability(base: base, generation: generation)
+          guard isCurrent(generation) else { return true }
+          if currentCapability == false {
+            return await register(data: data, slot: slot, clock: clock, using: registration,
+                                  generation: generation, forceLegacy: true)
+          }
+          return false
+        }
         if http.statusCode == 404, http.mimeType == "application/json",
-           (try? JSONDecoder().decode(DeviceRegistrationFailure.self, from: data))?.error == "record not found",
+           (try? JSONDecoder().decode(DeviceRegistrationFailure.self, from: responseData))?.error == "record not found",
            case let .update(activityID, flightID) = slot,
            let activity = knownActivities().first(where: {
              $0.id == activityID && $0.attributes.flightId == flightID && $0.attributes.activityBinding == binding && isLive($0)

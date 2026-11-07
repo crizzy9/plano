@@ -28,6 +28,7 @@ type NativeLive = {
   androidWidgetFlightPinned?: (origin: string, flightId: string) => Promise<boolean | null>;
   setAndroidWidgetFlightPinned?: (origin: string, flightId: string, pinned: boolean) => Promise<boolean>;
   nextIOSPushRevision?: () => Promise<string>;
+  nextIOSPushRegistration?: () => Promise<unknown>;
   retireIOSPush?: (origin: string, token: string) => Promise<string>;
 };
 
@@ -42,17 +43,31 @@ export const canCustomizeAndroidWidget = Platform.OS === 'android'
   && !!native?.androidWidgetDetailsEnabled && !!native?.setAndroidWidgetDetailsEnabled;
 export const canPinAndroidWidgetFlight = Platform.OS === 'android'
   && !!native?.androidWidgetFlightPinned && !!native?.setAndroidWidgetFlightPinned;
-export const canFenceIOSPush = Platform.OS === 'ios' && !!native?.nextIOSPushRevision && !!native?.retireIOSPush;
+export const canFenceIOSPush = Platform.OS === 'ios' && !!native?.retireIOSPush
+  && (!!native?.nextIOSPushRegistration || !!native?.nextIOSPushRevision);
 
-function iosPushRevision(value: string) {
-  const revision = Number(value);
-  if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(revision)) throw new Error('Invalid iOS alert revision.');
-  return revision;
+function iosPushRevision(value: unknown) {
+  if (typeof value === 'string' && /^[1-9][0-9]*$/.test(value)) {
+    const revision = Number(value);
+    if (Number.isSafeInteger(revision)) return revision;
+  }
+  throw new Error('Invalid iOS alert revision.');
 }
 
 export async function nextIOSPushRevision() {
   if (!native?.nextIOSPushRevision) throw new Error('Protected flight alerts require a current iOS build of Plano.');
   return iosPushRevision(await native.nextIOSPushRevision());
+}
+
+export async function nextIOSPushRegistration(): Promise<{ liveRevision: number; pushClock?: string }> {
+  if (!native?.nextIOSPushRegistration) return { liveRevision: await nextIOSPushRevision() };
+  const registration = await native.nextIOSPushRegistration();
+  if (!registration || typeof registration !== 'object' || !('pushClock' in registration) ||
+      typeof registration.pushClock !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(registration.pushClock) ||
+      !('liveRevision' in registration)) {
+    throw new Error('Invalid iOS alert registration.');
+  }
+  return { liveRevision: iosPushRevision(registration.liveRevision), pushClock: registration.pushClock };
 }
 
 export async function retireIOSPush(origin: string, token: string) {

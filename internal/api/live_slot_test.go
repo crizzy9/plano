@@ -26,9 +26,18 @@ func TestDeviceLiveSlotRequestValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := (api.Server{Store: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler()
+	capabilities := httptest.NewRecorder()
+	handler.ServeHTTP(capabilities, httptest.NewRequest(http.MethodGet, "/v1/devices/capabilities", nil))
+	var advertised map[string]bool
+	if capabilities.Code != http.StatusOK || capabilities.Header().Get("Content-Type") != "application/json" ||
+		json.Unmarshal(capabilities.Body.Bytes(), &advertised) != nil || !advertised["iosPushClock"] {
+		t.Fatalf("unexpected public device capabilities response: status %d, body %s", capabilities.Code, capabilities.Body.String())
+	}
 	start := core.Device{Platform: "ios", Kind: "live_start", Token: "fixture-start-token-for-test", LiveSlot: "start", LiveRevision: 1}
 	alert := core.Device{Platform: "ios", Kind: "alert", Token: "fixture-alert-token-for-test", LiveRevision: 2}
 	activity := "activity:" + strings.Repeat("a", 64)
+	const clock = "11111111-1111-4111-8111-111111111111"
+	clockedAlert := core.Device{Platform: "ios", Kind: "alert", Token: "fixture-clocked-alert-token", LiveRevision: 3, PushClock: clock}
 	for _, tt := range []struct {
 		name, method string
 		device       core.Device
@@ -52,6 +61,14 @@ func TestDeviceLiveSlotRequestValidation(t *testing.T) {
 		{"revision deletion requires a positive revision", http.MethodDelete, core.Device{Platform: "ios", LiveRevision: -2}, 400},
 		{"iOS revision deletion", http.MethodDelete, core.Device{Platform: "ios", LiveRevision: 2}, 204},
 		{"late slot registration is acknowledged", http.MethodPost, start, 204},
+		{"iOS alert accepts a push clock", http.MethodPost, clockedAlert, 204},
+		{"iOS start accepts a push clock", http.MethodPost, core.Device{Platform: "ios", Kind: "live_start", Token: start.Token, LiveSlot: "start", LiveRevision: 3, PushClock: clock}, 204},
+		{"iOS update clock still requires a tracked flight", http.MethodPost, core.Device{Platform: "ios", Kind: "live_update", FlightID: "flight", Token: "fixture-clocked-update-token", LiveSlot: activity, LiveRevision: 3, PushClock: clock}, 404},
+		{"push clock requires a positive revision", http.MethodPost, core.Device{Platform: "ios", Kind: "alert", Token: clockedAlert.Token, PushClock: clock}, 400},
+		{"push clock requires a UUID v4", http.MethodPost, core.Device{Platform: "ios", Kind: "alert", Token: clockedAlert.Token, LiveRevision: 4, PushClock: "11111111-1111-1111-8111-111111111111"}, 400},
+		{"Android rejects a push clock", http.MethodPost, core.Device{Platform: "android", Kind: "alert", Token: clockedAlert.Token, PushClock: clock}, 400},
+		{"exact device deletion rejects a push clock", http.MethodDelete, core.Device{Platform: "ios", Kind: "alert", Token: clockedAlert.Token, PushClock: clock}, 400},
+		{"revision deletion rejects a push clock", http.MethodDelete, core.Device{Platform: "ios", LiveRevision: 4, PushClock: clock}, 400},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			body, err := json.Marshal(tt.device)

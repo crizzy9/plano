@@ -94,6 +94,9 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/tracked/{id}", s.auth(s.untrack))
 	mux.HandleFunc("POST /v1/devices", s.auth(s.device))
 	mux.HandleFunc("DELETE /v1/devices", s.auth(s.device))
+	mux.HandleFunc("GET /v1/devices/capabilities", func(w http.ResponseWriter, _ *http.Request) {
+		respond(w, http.StatusOK, map[string]bool{"iosPushClock": true})
+	})
 	mux.HandleFunc("POST /v1/shares", s.auth(s.share))
 	mux.HandleFunc("GET /v1/shares", s.auth(s.pickupLinks))
 	mux.HandleFunc("DELETE /v1/shares/{id}", s.auth(s.revokePickupLink))
@@ -393,7 +396,7 @@ func (s Server) device(w http.ResponseWriter, r *http.Request, owner string) err
 		w.WriteHeader(204)
 		return nil
 	}
-	if (d.LiveSlot != "" || d.LiveRevision != 0) && r.Method != http.MethodPost {
+	if (d.LiveSlot != "" || d.LiveRevision != 0 || d.PushClock != "") && r.Method != http.MethodPost {
 		return errInvalid
 	}
 	if d.Binding != "" {

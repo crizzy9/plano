@@ -335,6 +335,7 @@ export interface Device {
   flightId?: string;
   binding?: string;
   liveRevision?: number;
+  pushClock?: string;
 }
 
 const defaultURL = process.env.EXPO_PUBLIC_API_URL || (__DEV__ ? Platform.select({
@@ -741,6 +742,8 @@ class APIError extends Error {
 
 class ConnectionError extends Error {}
 
+const deviceCapabilitiesPath = '/v1/devices/capabilities';
+
 class RequestAbortedError extends Error {
   constructor() {
     super('Plano request was canceled.');
@@ -796,11 +799,17 @@ async function request<T>(server: string, path: string, init: RequestInit = {}, 
       if (response.status === 403) throw new APIError(403, 'This server requires an enrollment code. Enter it in Settings.');
       if (response.status === 404) {
         const type = response.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase();
-        throw new APIError(404, 'That information is unavailable on this server.', type === 'text/plain');
+        const routeMissing = type === 'text/plain' && (path !== deviceCapabilitiesPath || await response.text() === '404 page not found\n');
+        checkRequestSignal(controller.signal);
+        throw new APIError(404, 'That information is unavailable on this server.', routeMissing);
       }
       if (response.status === 429) throw new APIError(429, 'Too many requests. Try again in a moment.');
       if (response.status >= 500) throw new APIError(response.status, 'Plano’s server is temporarily unavailable.');
       throw new APIError(response.status, 'Plano couldn’t complete that request.');
+    }
+    if (path === deviceCapabilitiesPath && (response.status !== 200 ||
+        response.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json')) {
+      throw new APIError(response.status, 'Plano returned invalid device capabilities.');
     }
     raw = await response.text();
     checkRequestSignal(controller.signal);
@@ -905,6 +914,23 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
   const savedToken = () => savedInstallationToken(server, background);
   let tokenRevision: number | undefined;
   let tokenPromise: Promise<string> | undefined;
+  let iosPushClockSupport: Promise<boolean> | undefined;
+
+  function supportsIOSPushClock() {
+    if (iosPushClockSupport) return iosPushClockSupport;
+    const probe = request<{ iosPushClock?: unknown }>(server, deviceCapabilitiesPath).then((capabilities) => {
+      if (capabilities?.iosPushClock !== true) throw new Error('Plano returned invalid device capabilities.');
+      return true;
+    }, (cause: unknown) => {
+      if (cause instanceof APIError && cause.status === 404 && cause.routeMissing) return false;
+      throw cause;
+    });
+    iosPushClockSupport = probe;
+    // Cache support, and probe again later after an outage or a server upgrade.
+    const forget = () => { iosPushClockSupport = undefined; };
+    void probe.then((supported) => { if (!supported) forget(); }, forget);
+    return probe;
+  }
 
   async function installationToken(enrollmentCode?: string): Promise<string> {
     if (!options.access) {
@@ -1287,9 +1313,19 @@ export function createAPI(server: string, options: APIAccessOptions = {}) {
       }
     },
     async registerDevice(device: Device, token?: string) {
-      return requestAs<void>(token ?? await installationToken(), '/v1/devices', {
-        method: 'POST', body: JSON.stringify(device),
+      const clocked = device.pushClock !== undefined && await supportsIOSPushClock();
+      const installation = token ?? await installationToken();
+      const submit = (withClock: boolean) => requestAs<void>(installation, '/v1/devices', {
+        method: 'POST', body: JSON.stringify(withClock ? device : { ...device, pushClock: undefined }),
       });
+      try {
+        await submit(clocked);
+      } catch (cause) {
+        if (!clocked || !(cause instanceof APIError) || cause.status !== 400) throw cause;
+        iosPushClockSupport = undefined;
+        if (await supportsIOSPushClock()) throw cause;
+        await submit(false);
+      }
     },
   };
 }
